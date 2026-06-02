@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 64">
+  <rect width="96" height="64" fill="#ffffff" />
+
+  <!-- Red ring mark -->
+  <path
+    d="M26 13C31 5 39 1 48 1c9 0 17 4 22 12h-7c-4-5-9-8-15-8s-11 3-15 8z"
+    fill="#e23c4b"
+  />
+  <path
+    d="M70 51c-5 8-13 12-22 12s-17-4-22-12h7c4 5 9 8 15 8s11-3 15-8z"
+    fill="#e23c4b"
+  />
+
+  <!-- Brand text -->
+  <text
+    x="48"
+    y="36"
+    text-anchor="middle"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="20"
+    font-weight="700"
+    letter-spacing="1"
+    fill="#1f3f9c"
+  >
+    FUNDA
+  </text>
+
+  <text
+    x="48"
+    y="58"
+    text-anchor="middle"
+    font-family="Arial, Helvetica, sans-serif"
+    font-size="10"
+    fill="#5f6575"
+  >
+    Since 1965
+  </text>
+</svg>

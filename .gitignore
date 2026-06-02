@@ -1,0 +1,38 @@
+# 依賴
+node_modules/
+dist/
+build/
+
+# 環境變數
+.env
+.env.local
+.env.production
+
+# 日誌
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 其他
+coverage/
+.cache/
+.deploy/
+backend/.data/
+backend/.tmp-test-dist/
+docs/handoff-current-state.md
+.claude/
+.serena/
+.data/
+frontend/test-results/
+frontend/playwright-report/
+.playwright-mcp/
+project_context.md
+.codex

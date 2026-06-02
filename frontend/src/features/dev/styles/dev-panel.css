@@ -1,0 +1,1187 @@
+/* === 開發者模式 (Phase 3 後 UI rewrite — 滿版深色) === */
+/*
+ * 注意：這裡自帶一份 design tokens（複製自 IT-duty 主題）。
+ * 不能依賴 :root 全域 tokens，因為 it-duty-page.css 只在 /it/duty 頁面 import，
+ * 工令報工列表的 dev panel 拿不到。所以 scope 在 .dev-mode-shell 內定義。
+ */
+
+.dev-mode-shell {
+  /* GitHub Dark Pro palette — 跟 IT 值班表的 slate/cyan 主題刻意分流 */
+  --dev-bg-primary: #0d1117;
+  --dev-bg-surface: #161b22;
+  --dev-bg-subtle: #21262d;
+  --dev-border: #30363d;
+  --dev-border-subtle: #21262d;
+  --dev-text-strong: #e6edf3;
+  --dev-text-default: #c9d1d9;
+  --dev-text-muted: #8b949e;
+  --dev-text-disabled: #6e7681;
+  --dev-accent: #58a6ff;
+  --dev-accent-strong: #79c0ff;
+  --dev-accent-bg: #1f6feb;
+  --dev-accent-row: rgba(88, 166, 255, 0.08);
+  --dev-warn: #f78166;
+  --dev-warn-bg: #341e10;
+  --dev-danger: #f85149;
+  --dev-radius-sm: 4px;
+  --dev-radius-md: 6px;
+  --dev-radius-lg: 8px;
+  --dev-border-hairline: 1px;
+
+  /* 滿版：突破父層 max-width 限制（vw 寬 + 對中位移）*/
+  width: 100vw;
+  margin-left: 50%;
+  transform: translateX(-50%);
+  padding: 24px 28px 64px;
+  background: var(--dev-bg-primary);
+  color: var(--dev-text-default);
+  min-height: 100vh;
+  font-family: inherit;
+}
+
+.dev-mode-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: var(--dev-border-hairline) solid var(--dev-border-subtle);
+}
+
+.dev-mode-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--dev-text-strong);
+  letter-spacing: -0.01em;
+}
+
+.dev-mode-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--dev-text-muted);
+}
+
+.dev-mode-section-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dev-text-strong);
+  margin-bottom: 8px;
+}
+
+.dev-mode-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--dev-text-muted);
+}
+
+.dev-mode-error {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--dev-danger);
+  background: rgba(248, 81, 73, 0.08);
+  border-radius: var(--dev-radius-sm);
+}
+
+/* === 按鈕 / 輸入 === */
+
+.dev-mode-btn {
+  appearance: none;
+  border: var(--dev-border-hairline) solid var(--dev-border);
+  background: var(--dev-bg-surface);
+  color: var(--dev-text-default);
+  padding: 6px 12px;
+  border-radius: var(--dev-radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.dev-mode-btn:hover:not(:disabled) {
+  background: var(--dev-bg-subtle);
+  border-color: var(--dev-text-muted);
+  color: var(--dev-text-strong);
+}
+
+.dev-mode-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dev-mode-btn--primary {
+  background: var(--dev-accent);
+  border-color: var(--dev-accent);
+  color: #0d1117;
+}
+
+.dev-mode-btn--primary:hover:not(:disabled) {
+  background: var(--dev-accent-strong);
+  border-color: var(--dev-accent-strong);
+  color: #0d1117;
+}
+
+.dev-mode-input {
+  width: 100%;
+  padding: 7px 10px;
+  border: var(--dev-border-hairline) solid var(--dev-border);
+  border-radius: var(--dev-radius-md);
+  font-size: 13px;
+  background: var(--dev-bg-surface);
+  color: var(--dev-text-default);
+  font-family: inherit;
+}
+
+.dev-mode-input::placeholder {
+  color: var(--dev-text-muted);
+}
+
+.dev-mode-input:focus {
+  outline: none;
+  border-color: var(--dev-accent);
+  box-shadow: 0 0 0 2px var(--dev-accent-row);
+}
+
+.dev-mode-input--search {
+  flex: 1;
+  font-size: 14px;
+  padding: 9px 12px;
+}
+
+/* === Auth === */
+
+.dev-mode-auth {
+  background: var(--dev-bg-surface);
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-lg);
+  padding: 16px 20px;
+  max-width: 480px;
+}
+
+.dev-mode-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.dev-mode-auth-note {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--dev-text-muted);
+  background: var(--dev-bg-subtle);
+  border-radius: var(--dev-radius-sm);
+  line-height: 1.5;
+}
+
+/* === Quick links === */
+
+.dev-mode-account {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--dev-bg-surface);
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-md);
+}
+
+.dev-mode-account-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dev-mode-account-label {
+  font-size: 12px;
+  color: var(--dev-text-muted);
+}
+
+.dev-mode-account-username {
+  background: var(--dev-bg-subtle);
+  color: var(--dev-accent-strong);
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+
+.dev-mode-quicklinks {
+  margin-bottom: 20px;
+}
+
+.dev-mode-quicklinks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.dev-mode-quicklink {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-md);
+  background: var(--dev-bg-surface);
+  color: var(--dev-text-default);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.dev-mode-quicklink:hover {
+  border-color: var(--dev-accent);
+  background: var(--dev-accent-row);
+}
+
+.dev-mode-quicklink-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dev-text-strong);
+}
+
+.dev-mode-quicklink-desc {
+  font-size: 11px;
+  color: var(--dev-text-muted);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+}
+
+/* === Ragic inline 搜尋（panel 下半） === */
+
+.dev-mode-ragic {
+  background: var(--dev-bg-surface);
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-lg);
+  padding: 14px 18px;
+}
+
+.ragic-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.ragic-inline__toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.ragic-inline__search {
+  flex: 1;
+  padding: 9px 12px;
+  font-size: 14px;
+  background: var(--dev-bg-primary);
+  color: var(--dev-text-default);
+  border: var(--dev-border-hairline) solid var(--dev-border);
+  border-radius: var(--dev-radius-md);
+  font-family: inherit;
+}
+
+.ragic-inline__search:focus {
+  outline: none;
+  border-color: var(--dev-accent);
+  box-shadow: 0 0 0 2px var(--dev-accent-row);
+}
+
+.ragic-inline__search::placeholder {
+  color: var(--dev-text-muted);
+}
+
+.ragic-inline__refresh-btn {
+  appearance: none;
+  padding: 9px 14px;
+  font-size: 13px;
+  border: var(--dev-border-hairline) solid var(--dev-border);
+  border-radius: var(--dev-radius-md);
+  background: var(--dev-bg-subtle);
+  color: var(--dev-text-default);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.ragic-inline__refresh-btn:hover:not(:disabled) {
+  background: var(--dev-bg-primary);
+  border-color: var(--dev-accent);
+  color: var(--dev-text-strong);
+}
+
+.ragic-inline__refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ragic-inline__statusline {
+  font-size: 12px;
+  color: var(--dev-text-muted);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+}
+
+.ragic-inline__error {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--dev-danger);
+  background: rgba(248, 81, 73, 0.08);
+  border-radius: var(--dev-radius-sm);
+}
+
+.ragic-inline__body {
+  margin-top: 4px;
+}
+
+/* === 抓取進度條（兩個 variant 共享，再各自微調 token）=== */
+
+.ragic-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.ragic-progress__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ragic-progress__phase {
+  font-weight: 500;
+}
+
+.ragic-progress__value {
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+.ragic-progress__bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.ragic-progress__bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-radius: 3px;
+  transition: width 0.18s ease-out;
+}
+
+/* inline variant — 用 .dev-mode-shell 的 token */
+.ragic-progress--inline {
+  background: var(--dev-bg-primary);
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  color: var(--dev-text-default);
+}
+.ragic-progress--inline .ragic-progress__phase {
+  color: var(--dev-accent-strong);
+}
+.ragic-progress--inline .ragic-progress__value {
+  color: var(--dev-text-muted);
+}
+.ragic-progress--inline .ragic-progress__bar {
+  background: var(--dev-bg-subtle);
+}
+.ragic-progress--inline .ragic-progress__bar-fill {
+  background: linear-gradient(
+    90deg,
+    var(--dev-accent),
+    var(--dev-accent-strong)
+  );
+}
+.ragic-progress--inline.ragic-progress--complete .ragic-progress__bar-fill {
+  background: #3fb950;
+}
+.ragic-progress--inline.ragic-progress--complete .ragic-progress__phase {
+  color: #3fb950;
+}
+
+/* modal variant — 用 .ragic-modal 的 token；需注意 modal 區塊內無 padding，
+   外層加 ragic-modal__progress-wrap 處理水平 padding */
+.ragic-modal__progress-wrap {
+  padding: 8px 18px 0;
+}
+.ragic-progress--modal {
+  background: var(--rm-bg-subtle);
+  border: 1px solid var(--rm-border);
+  color: var(--rm-text);
+}
+.ragic-progress--modal .ragic-progress__phase {
+  color: var(--rm-accent-strong);
+}
+.ragic-progress--modal .ragic-progress__value {
+  color: var(--rm-text-muted);
+}
+.ragic-progress--modal .ragic-progress__bar {
+  background: var(--rm-bg-active);
+}
+.ragic-progress--modal .ragic-progress__bar-fill {
+  background: linear-gradient(
+    90deg,
+    var(--rm-accent),
+    var(--rm-accent-strong)
+  );
+}
+.ragic-progress--modal.ragic-progress--complete .ragic-progress__bar-fill {
+  background: #3fb950;
+}
+.ragic-progress--modal.ragic-progress--complete .ragic-progress__phase {
+  color: #3fb950;
+}
+
+.ragic-inline__hint {
+  margin: 6px 0 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--dev-text-muted);
+  background: var(--dev-bg-primary);
+  border-radius: var(--dev-radius-md);
+  line-height: 1.6;
+}
+
+.ragic-inline__hint p {
+  margin: 0 0 6px;
+}
+
+.ragic-inline__hint ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ragic-inline__hint code {
+  background: var(--dev-bg-subtle);
+  padding: 1px 6px;
+  border-radius: var(--dev-radius-sm);
+  font-size: 11px;
+  color: var(--dev-accent-strong);
+}
+
+.ragic-inline__results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.ragic-inline__form-card {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-md);
+  background: var(--dev-bg-primary);
+  color: var(--dev-text-default);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.ragic-inline__form-card:hover {
+  border-color: var(--dev-accent);
+  background: var(--dev-accent-row);
+}
+
+.ragic-inline__form-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dev-text-strong);
+}
+
+.ragic-inline__form-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.ragic-inline__form-path {
+  background: var(--dev-bg-subtle);
+  color: var(--dev-accent-strong);
+  padding: 2px 6px;
+  border-radius: var(--dev-radius-sm);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+}
+
+.ragic-inline__form-counts {
+  color: var(--dev-text-muted);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+}
+
+/* === 帳號管理 Modal（內部 dark scope） === */
+
+/* === 修改帳密 Modal — 跟 manage-users 共用 dark token，自家 selector === */
+
+.change-password {
+  --cp-bg: #0d1117;
+  --cp-bg-subtle: #161b22;
+  --cp-border: #30363d;
+  --cp-text: #c9d1d9;
+  --cp-text-strong: #e6edf3;
+  --cp-text-muted: #8b949e;
+  --cp-accent: #58a6ff;
+  --cp-danger: #f85149;
+  --cp-danger-bg: rgba(248, 81, 73, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: inherit;
+  color: var(--cp-text);
+}
+
+.change-password__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.change-password__label {
+  font-size: 12px;
+  color: var(--cp-text-muted);
+}
+
+.change-password__input {
+  padding: 7px 10px;
+  font-size: 13px;
+  background: var(--cp-bg-subtle);
+  color: var(--cp-text);
+  border: 1px solid var(--cp-border);
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+.change-password__input:focus {
+  outline: none;
+  border-color: var(--cp-accent);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+}
+
+.change-password__input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.change-password__error {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--cp-danger);
+  background: var(--cp-danger-bg);
+  border-radius: 4px;
+}
+
+.change-password__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--cp-text-muted);
+}
+
+.manage-users {
+  /* GitHub Dark Pro palette */
+  --mu-bg: #161b22;
+  --mu-bg-subtle: #0d1117;
+  --mu-bg-active: #21262d;
+  --mu-border: #30363d;
+  --mu-border-strong: #30363d;
+  --mu-text: #c9d1d9;
+  --mu-text-strong: #e6edf3;
+  --mu-text-muted: #8b949e;
+  --mu-accent: #58a6ff;
+  --mu-accent-strong: #79c0ff;
+  --mu-danger: #f85149;
+  --mu-danger-bg: rgba(248, 81, 73, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-family: inherit;
+  color: var(--mu-text);
+}
+
+.manage-users__summary {
+  font-size: 13px;
+  color: var(--mu-text-muted);
+}
+
+.manage-users__summary strong {
+  color: var(--mu-accent-strong);
+  font-weight: 600;
+}
+
+.manage-users__error {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--mu-danger);
+  background: var(--mu-danger-bg);
+  border-radius: 4px;
+}
+
+.manage-users__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mu-text-muted);
+}
+
+.manage-users__list {
+  border: 1px solid var(--mu-border);
+  border-radius: 6px;
+  background: var(--mu-bg);
+  overflow: hidden;
+}
+
+.manage-users__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.manage-users__table thead th {
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--mu-bg-active);
+  color: var(--mu-text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  border-bottom: 1px solid var(--mu-border);
+}
+
+.manage-users__table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mu-border);
+  vertical-align: middle;
+}
+
+.manage-users__table tr:last-child td {
+  border-bottom: none;
+}
+
+.manage-users__td-name {
+  font-weight: 500;
+  color: var(--mu-text-strong);
+}
+
+.manage-users__td-name-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.manage-users__badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--mu-bg-active);
+  color: var(--mu-accent-strong);
+  font-weight: 400;
+}
+
+.manage-users__td-time {
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--mu-text-muted);
+  white-space: nowrap;
+}
+
+.manage-users__td-actor {
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--mu-text-muted);
+}
+
+.manage-users__td-action {
+  text-align: right;
+}
+
+.manage-users__delete-btn {
+  appearance: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--mu-bg-subtle);
+  color: var(--mu-danger);
+  border: 1px solid var(--mu-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.manage-users__delete-btn:hover:not(:disabled) {
+  background: var(--mu-danger-bg);
+  border-color: var(--mu-danger);
+}
+
+.manage-users__delete-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.manage-users__create {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--mu-bg);
+  border: 1px solid var(--mu-border);
+  border-radius: 6px;
+}
+
+.manage-users__create-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--mu-text-strong);
+}
+
+.manage-users__create-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+.manage-users__input {
+  padding: 7px 10px;
+  font-size: 13px;
+  background: var(--mu-bg-subtle);
+  color: var(--mu-text);
+  border: 1px solid var(--mu-border);
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+.manage-users__input:focus {
+  outline: none;
+  border-color: var(--mu-accent);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+}
+
+.manage-users__input::placeholder {
+  color: var(--mu-text-muted);
+}
+
+.manage-users__input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.manage-users__create-btn {
+  appearance: none;
+  padding: 7px 14px;
+  font-size: 13px;
+  background: var(--mu-accent);
+  color: #0d1117;
+  border: 1px solid var(--mu-accent);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.manage-users__create-btn:hover:not(:disabled) {
+  background: var(--mu-accent-strong);
+  border-color: var(--mu-accent-strong);
+}
+
+.manage-users__create-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* === Ragic 欄位索引 Modal (Phase C) — antd Modal 內部、自家 dark scope === */
+
+.ragic-modal {
+  /* GitHub Dark Pro palette */
+  --rm-bg: #0d1117;
+  --rm-bg-subtle: #161b22;
+  --rm-bg-active: #21262d;
+  --rm-border: #30363d;
+  --rm-text: #c9d1d9;
+  --rm-text-strong: #e6edf3;
+  --rm-text-muted: #8b949e;
+  --rm-accent: #58a6ff;
+  --rm-accent-strong: #79c0ff;
+  --rm-accent-bg: #1f6feb;
+  --rm-warn: #f78166;
+  --rm-warn-bg: #341e10;
+  --rm-danger: #f85149;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
+  background: var(--rm-bg);
+  color: var(--rm-text);
+  font-family: inherit;
+}
+
+.ragic-modal__toolbar {
+  display: flex;
+  gap: 10px;
+  padding: 14px 18px 8px;
+  border-bottom: 1px solid var(--rm-border);
+}
+
+.ragic-modal__search {
+  flex: 1;
+  padding: 10px 12px;
+  font-size: 14px;
+  background: var(--rm-bg-subtle);
+  color: var(--rm-text);
+  border: 1px solid var(--rm-border);
+  border-radius: 6px;
+  font-family: inherit;
+}
+
+.ragic-modal__search:focus {
+  outline: none;
+  border-color: var(--rm-accent);
+  box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+}
+
+.ragic-modal__search::placeholder {
+  color: var(--rm-text-muted);
+}
+
+.ragic-modal__refresh-btn {
+  appearance: none;
+  padding: 0 16px;
+  border: 1px solid var(--rm-border);
+  background: var(--rm-bg-subtle);
+  color: var(--rm-text);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.ragic-modal__refresh-btn:hover:not(:disabled) {
+  background: var(--rm-bg-active);
+  border-color: var(--rm-accent);
+  color: var(--rm-text-strong);
+}
+
+.ragic-modal__refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ragic-modal__statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 18px 10px;
+  border-bottom: 1px solid var(--rm-border);
+}
+
+.ragic-modal__statusline {
+  font-size: 12px;
+  color: var(--rm-text-muted);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+}
+
+.ragic-modal__copy-toast {
+  font-size: 12px;
+  background: var(--rm-accent-bg);
+  color: var(--rm-accent-strong);
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+
+.ragic-modal__error {
+  margin: 0;
+  padding: 8px 18px;
+  font-size: 12px;
+  color: var(--rm-danger);
+  background: rgba(248, 81, 73, 0.08);
+  border-bottom: 1px solid var(--rm-border);
+}
+
+.ragic-modal__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 18px;
+}
+
+.ragic-modal__hint {
+  margin: 12px 0;
+  padding: 16px 20px;
+  font-size: 13px;
+  color: var(--rm-text-muted);
+  background: var(--rm-bg-subtle);
+  border-radius: 6px;
+  line-height: 1.6;
+}
+
+.ragic-modal__hint p {
+  margin: 0 0 8px;
+}
+
+.ragic-modal__hint ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ragic-modal__hint code {
+  background: var(--rm-bg-active);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--rm-accent-strong);
+}
+
+.ragic-modal__results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ragic-modal__form {
+  border: 1px solid var(--rm-border);
+  border-radius: 6px;
+  background: var(--rm-bg-subtle);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.ragic-modal__form:hover {
+  border-color: var(--rm-text-muted);
+}
+
+.ragic-modal__form--expanded {
+  border-color: var(--rm-accent);
+}
+
+.ragic-modal__form-head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  color: var(--rm-text);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+
+.ragic-modal__form-head:hover {
+  background: rgba(88, 166, 255, 0.05);
+}
+
+.ragic-modal__form-caret {
+  color: var(--rm-text-muted);
+  font-size: 11px;
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.ragic-modal__form-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ragic-modal__form-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--rm-text-strong);
+}
+
+.ragic-modal__form-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.ragic-modal__form-path {
+  background: var(--rm-bg-active);
+  color: var(--rm-accent-strong);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.ragic-modal__form-counts {
+  color: var(--rm-text-muted);
+}
+
+.ragic-modal__form-body {
+  padding: 8px 14px 14px 30px;
+  border-top: 1px solid var(--rm-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ragic-modal__subtable {
+  border-top: 1px dashed var(--rm-border);
+  padding-top: 10px;
+}
+
+.ragic-modal__subtable-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.ragic-modal__subtable-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--rm-text-strong);
+}
+
+/* === Key badge === */
+
+.ragic-modal__key-badge {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid;
+  transition: filter 0.15s;
+}
+
+.ragic-modal__key-badge:hover {
+  filter: brightness(1.15);
+}
+
+.ragic-modal__key-badge--primary {
+  background: var(--rm-accent-bg);
+  color: var(--rm-accent-strong);
+  border-color: var(--rm-accent);
+}
+
+.ragic-modal__key-badge--warn {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn);
+  border-color: var(--rm-warn);
+}
+
+.ragic-modal__key-badge-label {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.ragic-modal__key-badge-value {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+/* === Field table === */
+
+.ragic-modal__table-wrap {
+  overflow-x: auto;
+}
+
+.ragic-modal__table-title {
+  font-size: 11px;
+  color: var(--rm-text-muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.ragic-modal__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ragic-modal__table thead th {
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--rm-bg-active);
+  color: var(--rm-text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  border-bottom: 1px solid var(--rm-border);
+  position: sticky;
+  top: 0;
+}
+
+.ragic-modal__table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--rm-border);
+  vertical-align: top;
+}
+
+.ragic-modal__table tr:last-child td {
+  border-bottom: none;
+}
+
+.ragic-modal__td-pos {
+  width: 48px;
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  color: var(--rm-text-muted);
+  font-size: 12px;
+}
+
+.ragic-modal__td-name {
+  min-width: 160px;
+  font-weight: 500;
+  color: var(--rm-text-strong);
+}
+
+.ragic-modal__td-type {
+  width: 80px;
+  font-size: 12px;
+  color: var(--rm-accent-strong);
+}
+
+.ragic-modal__td-note {
+  font-size: 12px;
+  color: var(--rm-text-muted);
+  word-break: break-word;
+}
+
+.ragic-modal__id-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--rm-border);
+  background: var(--rm-bg-active);
+  color: var(--rm-warn);
+  border-radius: 4px;
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ragic-modal__id-btn:hover {
+  background: var(--rm-warn-bg);
+  border-color: var(--rm-warn);
+}

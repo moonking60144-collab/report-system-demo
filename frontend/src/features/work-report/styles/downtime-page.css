@@ -1,0 +1,434 @@
+.downtime-page-notice {
+  border-radius: 12px;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid #dbe3eb;
+  background: #ffffff;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.downtime-page-notice.is-success {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.downtime-page-notice.is-error {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.downtime-page-notice.is-info {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1e40af;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.downtime-auto-fill-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.downtime-auto-fill-item {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  border-radius: 12px;
+  padding: 0.75rem 0.85rem;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.downtime-auto-fill-item span {
+  color: #1d4ed8;
+  font-size: 0.78rem;
+}
+
+.downtime-auto-fill-item strong {
+  color: #1e3a8a;
+  font-size: 0.92rem;
+}
+
+.downtime-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 0.8rem;
+}
+
+.downtime-form-field--full {
+  grid-column: 1 / -1;
+}
+
+.downtime-field-autofilled > span,
+.downtime-field-autofilled > small {
+  animation: modal-autofill-flash 0.7s ease-out;
+}
+
+.downtime-field-autofilled .detail-inline-picker-trigger,
+.downtime-field-autofilled input,
+.downtime-field-autofilled textarea {
+  border-color: #f59e0b;
+  background: rgba(254, 243, 199, 0.95);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
+}
+
+.downtime-empty-state {
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.downtime-record-table-wrap {
+  overflow-x: auto;
+}
+
+.downtime-records-section {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.downtime-record-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 880px;
+}
+
+.downtime-record-table th,
+.downtime-record-table td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.7rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.84rem;
+}
+
+.downtime-record-table th {
+  color: #475569;
+  font-weight: 700;
+  background: #f8fafc;
+  white-space: nowrap;
+}
+
+.downtime-record-table td {
+  color: #0f172a;
+  line-height: 1.45;
+}
+
+.downtime-records-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.downtime-record-table tr.is-editing {
+  background: #fff7ed;
+}
+
+.downtime-record-table tr.is-editing td {
+  vertical-align: top;
+}
+
+.downtime-inline-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+  box-sizing: border-box;
+}
+
+.downtime-inline-input:focus {
+  border-color: #2563eb;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.downtime-inline-input:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.downtime-inline-input--narrow {
+  width: 5rem;
+}
+
+.downtime-record-actions-cell {
+  white-space: nowrap;
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.downtime-record-action-btn {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.downtime-record-action-spinner--danger {
+  border-color: rgba(220, 38, 38, 0.25);
+  border-top-color: #dc2626;
+}
+
+.downtime-record-action-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.downtime-record-action-btn:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.downtime-record-action-btn--primary {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+.downtime-record-action-btn--primary:hover:not(:disabled) {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+
+.downtime-record-action-btn--danger {
+  border-color: #fca5a5;
+  color: #dc2626;
+}
+
+.downtime-record-action-btn--danger:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #dc2626;
+}
+
+/* === Record Audit History Modal === */
+
+.detail-page-history-btn,
+.downtime-page-history-btn {
+  padding: 0.3rem 0.75rem;
+  margin-left: 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: normal;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.detail-page-history-btn:hover:not(:disabled),
+.downtime-page-history-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.detail-page-history-btn:disabled,
+.downtime-page-history-btn:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.audit-history-timeline__row-id {
+  font-size: 0.72rem;
+  color: #64748b;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  margin-left: auto;
+}
+
+.audit-history-modal__title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.audit-history-modal__label {
+  font-size: 0.85rem;
+  color: #64748b;
+  font-weight: normal;
+}
+
+.audit-history-modal__scope-hint {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #475569;
+  background: #f1f5f9;
+  border-left: 3px solid #94a3b8;
+  border-radius: 4px;
+}
+
+.audit-history-modal__truncated-notice {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #92400e;
+  background: #fef3c7;
+  border-left: 3px solid #d97706;
+  border-radius: 4px;
+}
+
+.audit-history-modal__state {
+  padding: 1.5rem 0.5rem;
+  text-align: center;
+  color: #64748b;
+}
+
+.audit-history-modal__state--error {
+  color: #dc2626;
+}
+
+.audit-history-modal__state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.audit-history-modal__loading-spinner {
+  border-color: rgba(37, 99, 235, 0.2);
+  border-top-color: #2563eb;
+}
+
+.audit-history-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.audit-history-timeline__entry {
+  border: 1px solid #e2e8f0;
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+  background: #fff;
+}
+
+.audit-history-timeline__head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.audit-history-timeline__time {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.82rem;
+  color: #475569;
+}
+
+.audit-history-timeline__action {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.audit-history-timeline__action--update {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.audit-history-timeline__action--delete {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.audit-history-timeline__actor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  font-size: 0.78rem;
+  color: #475569;
+  margin-bottom: 0.3rem;
+}
+
+.audit-history-timeline__task {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  margin-bottom: 0.3rem;
+}
+
+.audit-history-timeline__fields {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+
+.audit-history-timeline__fields-label {
+  font-size: 0.78rem;
+  color: #475569;
+  margin-right: 0.2rem;
+}
+
+.audit-history-timeline__field-chip {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #1e293b;
+  font-size: 0.72rem;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.audit-history-timeline__diff {
+  margin-top: 0.4rem;
+}
+
+.audit-history-timeline__diff > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: #2563eb;
+}
+
+.audit-history-timeline__diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.audit-history-timeline__diff-grid pre {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 0.5rem;
+  font-size: 0.72rem;
+  max-height: 240px;
+  overflow: auto;
+  margin: 0.25rem 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

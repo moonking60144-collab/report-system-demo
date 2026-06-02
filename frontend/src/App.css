@@ -1,0 +1,7 @@
+@import "./features/work-report/styles/layout-sidebar-toolbar.css";
+@import "./features/work-report/styles/status-task-table-base.css";
+@import "./features/work-report/styles/column-menu.css";
+@import "./features/work-report/styles/table-detail-overlays.css";
+@import "./features/work-report/styles/detail-page.css";
+@import "./features/work-report/styles/downtime-page.css";
+@import "./features/work-report/styles/responsive.css";
