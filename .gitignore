@@ -34,5 +34,7 @@ docs/handoff-current-state.md
 frontend/test-results/
 frontend/playwright-report/
 .playwright-mcp/
+# 臨時驗證腳本輸出（verify-demo-overlays.mjs）
+frontend/verify-shot.png
 project_context.md
 .codex

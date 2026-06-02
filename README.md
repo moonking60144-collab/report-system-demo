@@ -2,7 +2,11 @@
 
 > 內網生產用的工廠報工管理系統，原為自有部署，本 repo 已加入 **Demo Mode**：上游 Ragic SaaS 替換成記憶體假倉，可以 zero-config 在本機完整啟動。
 
+![Demo screenshot](docs/screenshot.png)
+
 技術棧：**React 19 + Vite 7 + AntD 6** 前端／**Express 4 + TypeScript 5.9 + Node 20 + SQLite** 後端。
+
+右下「故障模擬」panel 是 demo 專屬控制台，可即時注入 **上游失敗率 / 上游延遲 / 寫入時掉欄位** — 對應展示 circuit breaker / token bucket 排隊 / Form 16 write verifier 自動 rollback 三條防線。
 
 ---
 

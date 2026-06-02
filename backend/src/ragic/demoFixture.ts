@@ -224,7 +224,9 @@ function buildWorkOrders(opts: WorkOrderBuildOptions): Record<string, RagicRecor
       "[上一站]報工容器數": String(Math.floor(producedTotal / 100)),
       主製程簡稱: proc.name,
       子製程類別代碼: proc.subCode,
-      製程大分類代碼: proc.category,
+      // 對齊 frontend landing page 的 prodTypeCode filter（constants.ts thread-rolling-104=TI、heading-105=HF）
+      // 推導：process code 前綴決定 prodType，跟 form16ReportTypeRules.mapProcessCodeToReportType 同邏輯
+      製程大分類代碼: deriveProdTypeFromProcessCode(proc.subCode),
       工令單種類: "一般",
       目前使用來料: "標準鋼料",
       "完工量<br>(扣除製程耗損)": String(producedTotal),
@@ -284,6 +286,17 @@ function addDays(d: Date, days: number): Date {
   const out = new Date(d);
   out.setDate(d.getDate() + days);
   return out;
+}
+
+function deriveProdTypeFromProcessCode(processCode: string): string {
+  const upper = processCode.trim().toUpperCase();
+  if (upper.startsWith("HF")) return "HF";
+  if (upper.startsWith("TI") || upper.startsWith("BU") || upper.startsWith("WP")) return "TI";
+  if (upper.startsWith("LM") || upper.startsWith("EP")) return "3F";
+  if (upper.startsWith("CH")) return "CH";
+  if (upper.startsWith("PA")) return "PA";
+  if (upper.startsWith("SP")) return "SP";
+  return "OTHER";
 }
 
 export function buildDemoFixture(): DemoFixture {

@@ -4,6 +4,8 @@ import zhTW from "antd/locale/zh_TW";
 import enUS from "antd/locale/en_US";
 import { useTranslation } from "react-i18next";
 import { AppRouter } from "./AppRouter";
+import { DemoBadge } from "./components/DemoBadge";
+import { FaultInjectionPanel } from "./components/FaultInjectionPanel";
 import { useServerBootGuard } from "./hooks/useServerBootGuard";
 import { isWorkReportSessionExpiredPath } from "./features/work-report/session/sessionExpiry";
 import { useWorkReportAvailabilityGuard } from "./features/work-report/hooks/useWorkReportAvailabilityGuard";
@@ -31,6 +33,8 @@ export function AppWithLocale() {
   return (
     <ConfigProvider locale={antdLocale}>
       <AntApp>
+        <DemoBadge />
+        <FaultInjectionPanel />
         <BrowserRouter>
           <AppRouterShell />
         </BrowserRouter>
