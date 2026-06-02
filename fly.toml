@@ -1,8 +1,8 @@
-# Fly.io configuration for ragic-report demo deployment.
+# Fly.io configuration for report-system-demo deployment.
 # Single-service: one VM serves both Express API and the built Vite SPA.
 # Replace `app` with the name returned by `fly launch` before first deploy.
 
-app = "ragic-report-demo"
+app = "report-system-demo"
 primary_region = "nrt"
 
 [build]

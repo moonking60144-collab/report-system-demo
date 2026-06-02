@@ -5,7 +5,7 @@
 # 2. 連結這個 GitHub repo
 # 3. Render 會自動讀本檔，建立 web service
 # 4. 等首次 build（~5-10 分鐘，sqlite3 native module 要編）
-# 5. 拿到 https://ragic-report-demo-<hash>.onrender.com
+# 5. 拿到 https://report-system-demo-<hash>.onrender.com
 #
 # Render free tier 限制：
 # - Idle 15 分鐘自動 sleep，下次訪問 cold start ~30-50 秒
@@ -16,7 +16,7 @@
 
 services:
   - type: web
-    name: ragic-report-demo
+    name: report-system-demo
     runtime: docker
     plan: free
     region: singapore

@@ -1,6 +1,6 @@
-# Ragic 報工系統 — Demo 版
+# 報工系統 — Demo 版
 
-> 內網生產用的工廠報工管理系統，原為自有部署，本 repo 已加入 **Demo Mode**：上游 Ragic SaaS 替換成記憶體假倉，可以 zero-config 在本機完整啟動。
+> 內網生產用的工廠報工管理系統，原為自有部署，本 repo 已加入 **Demo Mode**：上游 no-code SaaS DB 替換成記憶體假倉，可以 zero-config 在本機完整啟動。
 
 ![Demo screenshot](docs/screenshot.png)
 
@@ -34,7 +34,7 @@ npm run dev
 
 ## 核心技術亮點
 
-這套系統是給工廠作業員 24 小時運作的內網生產系統。Demo 保留了下面所有機制（除了上游 Ragic 改成 mock），可以在面試現場一邊操作 UI 一邊講設計考量。
+這套系統是給工廠作業員 24 小時運作的內網生產系統。Demo 保留了下面所有機制（除了上游 SaaS 改成 mock），可以在面試現場一邊操作 UI 一邊講設計考量。
 
 ### 上游治理（[backend/src/infra/](backend/src/infra/)）
 - **Token bucket 全域限流** — `RAGIC_GLOBAL_RATE_PER_SECOND` + `BURST_CAPACITY`，4 條 lane（user / sync / background / write）共用同一個 bucket，避免 22 個 slot burst 打爆上游
@@ -48,8 +48,8 @@ npm run dev
 - **Stale-while-revalidate** 模式 + 啟動預熱（demo 下關閉）
 
 ### 寫入一致性
-- **Idempotency**：`x-client-mutation-id` 透過 `clientRowKey` 對應 Ragic rowId，重送同 ID 不會重複建立 — 見 [backend/src/services/workReportService.ts](backend/src/services/workReportService.ts)
-- **Form 16 ↔ Form 104/105 子表連動**：報工列建立在 Form 16 (停機紀錄)，由 Ragic workflow 自動推回工令子表；mock 在 [backend/src/ragic/mockClient.ts](backend/src/ragic/mockClient.ts) 模擬同樣的 propagation 語意
+- **Idempotency**：`x-client-mutation-id` 透過 `clientRowKey` 對應上游 rowId，重送同 ID 不會重複建立 — 見 [backend/src/services/workReportService.ts](backend/src/services/workReportService.ts)
+- **Form 16 ↔ Form 104/105 子表連動**：報工列建立在 Form 16 (停機紀錄)，由上游 workflow 自動推回工令子表；mock 在 [backend/src/ragic/mockClient.ts](backend/src/ragic/mockClient.ts) 模擬同樣的 propagation 語意
 - **Write verify**：create 完立刻讀回比對，欄位不一致就自動 DELETE 止血（避免 orphan 種子）
 - **Post-create polling**：拿到 form 16 rowId 後輪詢工令子表確認 row 出現再回應
 
@@ -77,25 +77,25 @@ npm run dev
 
 | 元件 | 真實版 | Demo 版 |
 |---|---|---|
-| Ragic 讀寫 | HTTPS → `demo.local/...` | 記憶體 Map，毫秒回應 |
+| 上游讀寫 | HTTPS → `demo.local/...` | 記憶體 Map，毫秒回應 |
 | SQLite read model | 啟動同步 | 仍可用，但預設不預載（避免冷啟動延遲）|
 | Token bucket / scheduler | 真正排程 | 仍運作，stats 可從 [debug clients](backend/src/routes/debugClients.ts) 看到 |
 | SSE 推送 | 真實 | 真實 |
-| Idempotency | clientRowKey ↔ Ragic ID | clientRowKey ↔ mock ID |
-| Form 16 連動 | Ragic workflow | mockClient.propagateForm16ToParentSubtable |
+| Idempotency | clientRowKey ↔ 上游 rowId | clientRowKey ↔ mock ID |
+| Form 16 連動 | 上游 workflow | mockClient.propagateForm16ToParentSubtable |
 | 預熱 / 自動同步 | 啟用 | 預設關閉（無外部 SaaS 可同步） |
 
 關鍵實作：
-- **替換點**：[backend/src/ragic/client.ts](backend/src/ragic/client.ts) 出口處 `createRagicClient()` 依 `env.DEMO_MODE` 決定 export `RagicClient` 還是 `MockRagicClient`
+- **替換點**：[backend/src/ragic/client.ts](backend/src/ragic/client.ts) 出口處 `createRagicClient()` 依 `env.DEMO_MODE` 決定 export `RagicClient` 還是 in-memory mock client
 - **業務邏輯零修改**：所有 routes / services / hooks 都用同一個 `ragicClient`，沒人知道底下是 mock 還是 SaaS
-- **環境變數注入**：[backend/src/config/env.ts](backend/src/config/env.ts) 在 `DEMO_MODE=true` 時自動填入必填的 Ragic env 預設值，免設定即可啟動
+- **環境變數注入**：[backend/src/config/env.ts](backend/src/config/env.ts) 在 `DEMO_MODE=true` 時自動填入必填的上游 env 預設值，免設定即可啟動
 
 ---
 
 ## 專案結構
 
 ```text
-ragic-report/
+report-system-demo/
 ├── backend/
 │   ├── src/
 │   │   ├── ragic/            ← 上游客戶端（含 mockClient + demoFixture）
@@ -154,7 +154,7 @@ repo 內有 [render.yaml](render.yaml) Blueprint，**zero CLI**。流程：
 2. New + → Blueprint → 連結這個 GitHub repo
 3. Render 讀 [render.yaml](render.yaml)，自動建立 web service + 隨機產生 `DEMO_RESET_KEY` 並注入
 4. 等首次 build（~5-10 分鐘，sqlite3 native module 要編）
-5. Live URL：`https://ragic-report-demo-<hash>.onrender.com`
+5. Live URL：`https://report-system-demo-<hash>.onrender.com`
 
 之後 push 到 `main` 自動重 build + redeploy。
 
