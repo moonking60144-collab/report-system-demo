@@ -142,7 +142,26 @@ curl http://localhost:3000/api/forms/104/reports?limit=5
 
 ---
 
-## Deploy to Fly.io
+## Deploy to Render（推薦 — 不用信用卡）
+
+repo 內有 [render.yaml](render.yaml) Blueprint，**zero CLI**。流程：
+
+1. 在 [dashboard.render.com](https://dashboard.render.com) 註冊（GitHub OAuth，免信用卡）
+2. New + → Blueprint → 連結這個 GitHub repo
+3. Render 讀 [render.yaml](render.yaml)，自動建立 web service + 隨機產生 `DEMO_RESET_KEY` 並注入
+4. 等首次 build（~5-10 分鐘，sqlite3 native module 要編）
+5. Live URL：`https://ragic-report-demo-<hash>.onrender.com`
+
+之後 push 到 `main` 自動重 build + redeploy。
+
+注意點：
+- Free tier 容器 idle 15 分鐘自動 sleep，下次訪問 cold start ~30-50 秒（給面試官第一次點要心理準備）
+- Filesystem 是 ephemeral，SQLite / JSON state 每次重啟重設 — 但 demo mode 本來就 zero-config 重啟回 fixture，沒差
+- `DEMO_RESET_KEY` 在 Render dashboard → Environment 查（前端 FaultInjectionPanel 第一次展開會跟你要）
+
+---
+
+## Deploy to Fly.io（要綁信用卡）
 
 把 demo 版直接丟上公開網址（單一服務、SPA + API 同源、SQLite 落地在 Fly volume）。前置：裝 [flyctl](https://fly.io/docs/flyctl/install/) 並 `fly auth login`。
 

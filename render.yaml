@@ -1,0 +1,35 @@
+# Render Blueprint — one-click deploy via Render dashboard.
+#
+# 使用方式：
+# 1. 在 https://dashboard.render.com 點 New + → Blueprint
+# 2. 連結這個 GitHub repo
+# 3. Render 會自動讀本檔，建立 web service
+# 4. 等首次 build（~5-10 分鐘，sqlite3 native module 要編）
+# 5. 拿到 https://ragic-report-demo-<hash>.onrender.com
+#
+# Render free tier 限制：
+# - Idle 15 分鐘自動 sleep，下次訪問 cold start ~30-50 秒
+# - 容器 filesystem ephemeral — SQLite / JSON state 每次重啟重設
+# - 但 demo mode 本來就 zero-config 重啟回 fixture，影響為零
+#
+# 自動 deploy：repo push 到 main 會觸發 Render rebuild + redeploy。
+
+services:
+  - type: web
+    name: ragic-report-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: NODE_ENV
+        value: production
+      # Render 會幫你產生並注入這個值；dashboard 可看
+      # 前端 FaultInjectionPanel 第一次展開會跟你要這個 key
+      - key: DEMO_RESET_KEY
+        generateValue: true
