@@ -44,7 +44,10 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const app = express();
-app.set("trust proxy", true);
+// Trust only 1 hop (the immediate reverse proxy — Fly.io / Render edge / nginx).
+// 用 boolean true 會盲信整條 X-Forwarded-For chain，讓任何 client 都能偽造
+// req.ip 進來繞過 IP 黑名單與 rate limit。明確指定跳數安全得多。
+app.set("trust proxy", 1);
 
 app.use(
   cors({

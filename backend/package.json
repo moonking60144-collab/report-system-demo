@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "dist/server.js",
   "scripts": {
-    "test": "node -e \"require('fs').rmSync('.tmp-test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test .tmp-test-dist/tests/**/*.test.js",
+    "test": "node -e \"require('fs').rmSync('.tmp-test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && cross-env DEMO_MODE=true node --test .tmp-test-dist/tests/**/*.test.js",
     "dev": "node --watch --import tsx src/server.ts",
     "demo": "cross-env DEMO_MODE=true node --watch --import tsx src/server.ts",
     "build": "tsc -p tsconfig.build.json",
