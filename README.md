@@ -73,7 +73,7 @@ npm run dev
 
 ---
 
-## Demo 模式怎麼運作
+## Demo 模式運作
 
 | 元件 | 真實版 | Demo 版 |
 |---|---|---|
@@ -85,7 +85,7 @@ npm run dev
 | Form 16 連動 | 上游 workflow | mockClient.propagateForm16ToParentSubtable |
 | 預熱 / 自動同步 | 啟用 | 預設關閉（無外部 SaaS 可同步） |
 
-關鍵實作：
+實作：
 - **替換點**：[backend/src/ragic/client.ts](backend/src/ragic/client.ts) 出口處 `createRagicClient()` 依 `env.DEMO_MODE` 決定 export `RagicClient` 還是 in-memory mock client
 - **業務邏輯零修改**：所有 routes / services / hooks 都用同一個 `ragicClient`，沒人知道底下是 mock 還是 SaaS
 - **環境變數注入**：[backend/src/config/env.ts](backend/src/config/env.ts) 在 `DEMO_MODE=true` 時自動填入必填的上游 env 預設值，免設定即可啟動
@@ -124,7 +124,7 @@ report-system-demo/
 
 ## 主要 API
 
-完整列表見 [backend/src/routes/](backend/src/routes/)；幾條最有代表性的：
+完整列表見 [backend/src/routes/](backend/src/routes/)：
 
 ```
 GET    /api/forms/104/reports                  工令列表（preview）
@@ -139,85 +139,9 @@ GET    /api/events                             SSE 即時事件流
 GET    /api/health                             健康 + demoMode flag
 ```
 
-Demo 下可直接 curl 試（不需驗證 header）：
+Demo 下可直接 curl 試：
 ```bash
 curl http://localhost:3000/api/forms/104/reports?limit=5
 ```
 
----
 
-## Deploy to Render（推薦 — 不用信用卡）
-
-repo 內有 [render.yaml](render.yaml) Blueprint，**zero CLI**。流程：
-
-1. 在 [dashboard.render.com](https://dashboard.render.com) 註冊（GitHub OAuth，免信用卡）
-2. New + → Blueprint → 連結這個 GitHub repo
-3. Render 讀 [render.yaml](render.yaml)，自動建立 web service + 隨機產生 `DEMO_RESET_KEY` 並注入
-4. 等首次 build（~5-10 分鐘，sqlite3 native module 要編）
-5. Live URL：`https://report-system-demo-<hash>.onrender.com`
-
-之後 push 到 `main` 自動重 build + redeploy。
-
-注意點：
-- Free tier 容器 idle 15 分鐘自動 sleep，下次訪問 cold start ~30-50 秒（給面試官第一次點要心理準備）
-- Filesystem 是 ephemeral，SQLite / JSON state 每次重啟重設 — 但 demo mode 本來就 zero-config 重啟回 fixture，沒差
-- `DEMO_RESET_KEY` 在 Render dashboard → Environment 查（前端 FaultInjectionPanel 第一次展開會跟你要）
-
----
-
-## Deploy to Fly.io（要綁信用卡）
-
-把 demo 版直接丟上公開網址（單一服務、SPA + API 同源、SQLite 落地在 Fly volume）。前置：裝 [flyctl](https://fly.io/docs/flyctl/install/) 並 `fly auth login`。
-
-```bash
-# 1. 第一次部署：建立 app（會問名字，並用 repo 的 fly.toml 當範本；別讓它自動 deploy）
-fly launch --no-deploy --copy-config
-
-# 2. 建持久 volume（SQLite + 各種 JSON state 都寫進 /data）
-fly volumes create data --region nrt --size 1
-
-# 3. 設定 secrets — DEMO_RESET_KEY 用來呼叫重置 fixture endpoint（自行決定強度）
-fly secrets set DEMO_RESET_KEY="$(openssl rand -hex 16)"
-
-# 4. 部署
-fly deploy
-
-# 5. 開啟瀏覽器看結果
-fly open
-```
-
-部署後：
-
-- `fly status` 看機器狀態、`fly logs` 看 boot log（注意 `event: listen` 跟 `frontend-static-enabled`）
-- 容器內 `/data` 由 volume 提供，重啟 / 重新部署都會保留 SQLite + cache
-- `fly.toml` 預設 `auto_stop_machines = true` + `min_machines_running = 0`，沒流量時自動停機省錢；下次請求會冷啟（~5 秒）
-- 多 region / 多機器擴展前要先確認 SQLite write target 只有一台機器寫（Fly volume 不能共享）
-
----
-
-## 真實版部署
-
-> 以下是給原始 IT 維護者看的；面試 demo 用不到。
-
-打包腳本：
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-server-package.ps1
-```
-
-產物在 `.deploy/<時間戳>-ragic-report-updated-version-sever/`。
-複製到 Windows server（保留現場 `.env`、`.cache`、`.data`），`npm run start` 啟動。
-
-開發機跑真實版（要 `.env` 含 `RAGIC_API_KEY` 等）：
-```bash
-cd backend && npm run dev
-cd frontend && npm run dev
-```
-
----
-
-## 排查
-
-- **列表資料怪**：先看 `GET /api/forms/104/reports/full?refresh=1` 跟 SQLite sync 狀態
-- **建立 / 編輯 hang**：看 backend log 的 `lane` / `circuit-breaker` 事件、`/api/debug/clients` 看 in-flight
-- **SSE 沒推送**：看 `GET /api/events` 是否 200，前端 hook 的 reconnect 狀態
-- **DEMO 徽章不見**：`curl http://localhost:3000/api/health` 看 `demoMode` 是否 true
