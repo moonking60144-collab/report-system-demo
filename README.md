@@ -63,8 +63,6 @@ npm run dev
 - 診斷面板可即時查 hydration source、cache state、SSE 連線、SQLite snapshot age
 
 ### 認證 / 多裝置
-- **無密碼、IP 黑名單** — 工廠固定設備 + admin 可即時封鎖異常裝置（HTTP 423 語意化）
-- `x-client-id` + `x-tab-id` 多維追蹤，同機多 tab 可獨立識別
 - env-fallback admin + scrypt 密碼雜湊 + 多帳號管理（[backend/src/services/userManagementService.ts](backend/src/services/userManagementService.ts) 等）
 
 ### 資料治理
