@@ -1,6 +1,6 @@
 const workReportZhTw = {
   page: {
-    title: "ACME Manufacturing Report System",
+    title: "製造業報工管理系統",
     groupThreadRolling: "Process A Report",
     groupHeading: "Process B Report",
     groupDowntime: "停機紀錄",
