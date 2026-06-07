@@ -39,8 +39,6 @@ export interface DebugClientPresence {
   serverBootIdAtConnect: string | null;
   deployVersionAtConnect: string | null;
   maintenanceMessage: string | null;
-  blocked: boolean;
-  blockedReason: string | null;
   status: "online" | "offline" | "stale";
   updatedAt: string;
 }
@@ -69,9 +67,7 @@ export interface DebugClientCommand {
     | "force-refresh"
     | "force-session-expired"
     | "set-maintenance-message"
-    | "clear-maintenance-message"
-    | "set-blocked"
-    | "clear-blocked";
+    | "clear-maintenance-message";
   createdAt: string;
   createdBy: string;
   message?: string;
@@ -81,7 +77,6 @@ export interface DebugClientCommand {
 export interface DebugClientSummary {
   totalClients: number;
   onlineClients: number;
-  blockedClients: number;
   clientsWithErrors: number;
   realtimeDisconnectedClients: number;
 }
@@ -203,9 +198,7 @@ export async function sendDebugClientCommand(
       | "force-refresh"
       | "force-session-expired"
       | "set-maintenance-message"
-      | "clear-maintenance-message"
-      | "set-blocked"
-      | "clear-blocked";
+      | "clear-maintenance-message";
     message?: string;
     reason?: string;
   }

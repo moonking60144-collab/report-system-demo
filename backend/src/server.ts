@@ -9,10 +9,8 @@ import { prewarmFormOptionsOnStartup, prewarmReportFullCacheOnStartup } from "./
 import { startSqliteAutoSync } from "./bootstrap/sqliteAutoSync";
 import { setupFrontendStaticServing } from "./bootstrap/frontendStatic";
 import { env } from "./config/env";
-import { resolveRequestClientIdentity } from "./infra/requestClientIdentity";
 import { demoRateLimit } from "./middleware/demoRateLimit";
 import { errorHandler } from "./middleware/errorHandler";
-import { workReportClientPresenceStore } from "./observability/workReportClientPresenceStore";
 import { startRuntimeHealthLogger } from "./observability/runtimeHealthLogger";
 import healthRouter from "./routes/health";
 import debugClientsRouter from "./routes/debugClients";
@@ -71,41 +69,6 @@ app.use(
 // 明確化 body size limit：Express 預設 100kb，這邊顯化為 1mb（報工 payload 最大幾十 KB，足量）
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
-
-app.use((req, res, next) => {
-  const path = req.path;
-  if (
-    path.startsWith("/api/debug/clients") ||
-    path.startsWith("/api/system-notice") ||
-    path.startsWith("/api/health")
-  ) {
-    next();
-    return;
-  }
-
-  const identity = resolveRequestClientIdentity(req);
-  const blockedReason = workReportClientPresenceStore.getBlockedReasonByIp(identity.effectiveIp);
-  if (!blockedReason) {
-    next();
-    return;
-  }
-
-  if (
-    path.startsWith("/api/forms") ||
-    path.startsWith("/api/downtime") ||
-    path.startsWith("/api/events")
-  ) {
-    res.status(423).json({
-      error: {
-        code: "CLIENT_IP_BLOCKED",
-        message: blockedReason || "此裝置已被管理端停用",
-      },
-    });
-    return;
-  }
-
-  next();
-});
 
 app.use("/api", healthRouter);
 app.use("/api", debugClientsRouter);

@@ -223,9 +223,7 @@ debugClientsRouter.post(
       type !== "force-refresh" &&
       type !== "force-session-expired" &&
       type !== "set-maintenance-message" &&
-      type !== "clear-maintenance-message" &&
-      type !== "set-blocked" &&
-      type !== "clear-blocked"
+      type !== "clear-maintenance-message"
     ) {
       throw new HttpError(400, "不支援的 debug command type", "DEBUG_CLIENT_COMMAND_INVALID");
     }

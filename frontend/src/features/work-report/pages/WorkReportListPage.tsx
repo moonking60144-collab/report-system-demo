@@ -594,7 +594,7 @@ export function WorkReportListPage() {
     enabled: true,
     currentPath: location.pathname + location.search,
   });
-  const { maintenanceMessage, blocked, blockedReason } = useWorkReportClientPresence({
+  const { maintenanceMessage } = useWorkReportClientPresence({
     currentPath: location.pathname + location.search,
     currentFormId,
     currentTopView: activeTopView,
@@ -682,41 +682,6 @@ export function WorkReportListPage() {
               </span>
             </div>
           </section>
-        ) : null}
-        {blocked ? (
-          <div
-            role="alert"
-            aria-live="assertive"
-            style={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 3000,
-              background: "rgba(15, 23, 42, 0.72)",
-              backdropFilter: "blur(2px)",
-              display: "grid",
-              placeItems: "center",
-              padding: "1.5rem",
-            }}
-          >
-            <div
-              style={{
-                width: "min(560px, 100%)",
-                padding: "1.4rem 1.5rem",
-                borderRadius: "16px",
-                border: "1px solid rgba(248, 113, 113, 0.5)",
-                background: "#1f1111",
-                boxShadow: "0 18px 40px rgba(0,0,0,0.35)",
-                color: "#fecaca",
-              }}
-            >
-              <div style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "0.55rem" }}>
-                此裝置已被管理端停用
-              </div>
-              <div style={{ lineHeight: 1.65, fontSize: "0.96rem" }}>
-                {blockedReason || "此裝置已被管理端暫時停用"}
-              </div>
-            </div>
-          </div>
         ) : null}
         <WorkReportSyncProgressModal
           open={refreshSyncModalOpen}

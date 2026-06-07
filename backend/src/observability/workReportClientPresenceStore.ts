@@ -2,9 +2,7 @@ export type WorkReportClientCommandType =
   | "force-refresh"
   | "force-session-expired"
   | "set-maintenance-message"
-  | "clear-maintenance-message"
-  | "set-blocked"
-  | "clear-blocked";
+  | "clear-maintenance-message";
 
 export interface WorkReportClientPresence {
   clientId: string;
@@ -34,8 +32,6 @@ export interface WorkReportClientPresence {
   serverBootIdAtConnect: string | null;
   deployVersionAtConnect: string | null;
   maintenanceMessage: string | null;
-  blocked: boolean;
-  blockedReason: string | null;
   status: "online" | "offline" | "stale";
   updatedAt: string;
 }
@@ -93,8 +89,6 @@ interface UpsertWorkReportClientPresenceInput {
   lastErrorAt?: string | null;
   lastErrorSummary?: string | null;
   maintenanceMessage?: string | null;
-  blocked?: boolean;
-  blockedReason?: string | null;
   lastSseConnectedAt?: string | null;
   lastSseDisconnectedAt?: string | null;
 }
@@ -112,7 +106,6 @@ class WorkReportClientPresenceStore {
   private readonly presenceByKey = new Map<string, WorkReportClientPresence>();
   private readonly eventsByKey = new Map<string, WorkReportClientEventSummary[]>();
   private readonly commandsByKey = new Map<string, WorkReportClientCommand[]>();
-  private readonly blockedIpReasonByKey = new Map<string, string | null>();
   private readonly maxClients = 2_000;
   private readonly maxEventsPerClient = 50;
   private readonly maxCommandsPerClient = 20;
@@ -160,8 +153,6 @@ class WorkReportClientPresenceStore {
     const key = buildPresenceKey(input.clientId, input.tabId);
     const existing = this.presenceByKey.get(key);
     const now = new Date().toISOString();
-    const effectiveIpKey = normalizeIpKey(input.effectiveIp);
-    const blockedByIp = effectiveIpKey ? this.blockedIpReasonByKey.get(effectiveIpKey) : undefined;
     const next: WorkReportClientPresence = existing
       ? {
           ...existing,
@@ -174,8 +165,6 @@ class WorkReportClientPresenceStore {
           clientBootId: input.clientBootId ?? existing.clientBootId,
           serverBootIdAtConnect: input.serverBootIdAtConnect ?? existing.serverBootIdAtConnect,
           deployVersionAtConnect: input.deployVersionAtConnect ?? existing.deployVersionAtConnect,
-          blocked: blockedByIp !== undefined ? true : existing.blocked,
-          blockedReason: blockedByIp !== undefined ? blockedByIp : existing.blockedReason,
           status: "online",
           updatedAt: now,
         }
@@ -207,8 +196,6 @@ class WorkReportClientPresenceStore {
           serverBootIdAtConnect: input.serverBootIdAtConnect,
           deployVersionAtConnect: input.deployVersionAtConnect,
           maintenanceMessage: null,
-          blocked: blockedByIp !== undefined ? true : false,
-          blockedReason: blockedByIp !== undefined ? blockedByIp ?? null : null,
           status: "online",
           updatedAt: now,
         };
@@ -224,8 +211,6 @@ class WorkReportClientPresenceStore {
     const key = buildPresenceKey(input.clientId, input.tabId);
     const existing = this.presenceByKey.get(key);
     const now = new Date().toISOString();
-    const effectiveIpKey = normalizeIpKey(input.effectiveIp);
-    const blockedByIp = effectiveIpKey ? this.blockedIpReasonByKey.get(effectiveIpKey) : undefined;
     const nextConnected = input.connected ?? existing?.connected ?? true;
     const next: WorkReportClientPresence = {
       clientId: input.clientId,
@@ -261,9 +246,6 @@ class WorkReportClientPresenceStore {
       serverBootIdAtConnect: input.serverBootIdAtConnect,
       deployVersionAtConnect: input.deployVersionAtConnect,
       maintenanceMessage: input.maintenanceMessage ?? existing?.maintenanceMessage ?? null,
-      blocked: blockedByIp !== undefined ? true : input.blocked ?? existing?.blocked ?? false,
-      blockedReason:
-        blockedByIp !== undefined ? blockedByIp : input.blockedReason ?? existing?.blockedReason ?? null,
       status: this.resolvePresenceStatus(input.lastSeenAt, nextConnected),
       updatedAt: now,
     };
@@ -318,10 +300,6 @@ class WorkReportClientPresenceStore {
       return null;
     }
     const now = new Date().toISOString();
-    const blockedByIp =
-      normalizeIpKey(effectiveIp ?? existing.effectiveIp) !== null
-        ? this.blockedIpReasonByKey.get(normalizeIpKey(effectiveIp ?? existing.effectiveIp)!)
-        : undefined;
     const next: WorkReportClientPresence = {
       ...existing,
       effectiveIp: effectiveIp ?? existing.effectiveIp,
@@ -329,22 +307,12 @@ class WorkReportClientPresenceStore {
       realtimeConnected: false,
       lastSeenAt: now,
       lastSseDisconnectedAt: now,
-      blocked: blockedByIp !== undefined ? true : existing.blocked,
-      blockedReason: blockedByIp !== undefined ? blockedByIp : existing.blockedReason,
       status: "offline",
       updatedAt: now,
     };
     this.presenceByKey.set(key, next);
     this.commandsByKey.delete(key);
     return next;
-  }
-
-  getBlockedReasonByIp(effectiveIp: string | null | undefined): string | null {
-    const key = normalizeIpKey(effectiveIp);
-    if (!key) {
-      return null;
-    }
-    return this.blockedIpReasonByKey.get(key) ?? null;
   }
 
   listClients(): WorkReportClientPresence[] {
@@ -392,7 +360,6 @@ class WorkReportClientPresenceStore {
   getSummary(): {
     totalClients: number;
     onlineClients: number;
-    blockedClients: number;
     clientsWithErrors: number;
     realtimeDisconnectedClients: number;
   } {
@@ -400,7 +367,6 @@ class WorkReportClientPresenceStore {
     return {
       totalClients: clients.length,
       onlineClients: clients.filter((client) => client.status === "online").length,
-      blockedClients: clients.filter((client) => client.blocked).length,
       clientsWithErrors: clients.filter((client) => Boolean(client.lastErrorAt)).length,
       realtimeDisconnectedClients: clients.filter((client) => !client.realtimeConnected).length,
     };
@@ -433,22 +399,8 @@ class WorkReportClientPresenceStore {
       )
     );
 
-    if (command.type === "set-blocked") {
-      for (const ipKey of targetEffectiveIps) {
-        this.blockedIpReasonByKey.set(ipKey, command.reason ?? null);
-      }
-    } else if (command.type === "clear-blocked") {
-      for (const ipKey of targetEffectiveIps) {
-        this.blockedIpReasonByKey.delete(ipKey);
-      }
-    }
-
     const commandTargets =
-      (
-        command.type === "set-blocked" ||
-        command.type === "clear-blocked" ||
-        command.type === "force-session-expired"
-      ) && targetEffectiveIps.length > 0
+      command.type === "force-session-expired" && targetEffectiveIps.length > 0
         ? this.listClients().filter((client) => {
             const ipKey = normalizeIpKey(client.effectiveIp);
             return ipKey ? targetEffectiveIps.includes(ipKey) : false;
@@ -473,24 +425,6 @@ class WorkReportClientPresenceStore {
         this.presenceByKey.set(key, {
           ...client,
           maintenanceMessage: null,
-          updatedAt: new Date().toISOString(),
-        });
-      } else if (command.type === "set-blocked") {
-        this.presenceByKey.set(key, {
-          ...client,
-          blocked: true,
-          blockedReason:
-            command.reason ??
-            (normalizeIpKey(client.effectiveIp)
-              ? this.blockedIpReasonByKey.get(normalizeIpKey(client.effectiveIp)!) ?? null
-              : null),
-          updatedAt: new Date().toISOString(),
-        });
-      } else if (command.type === "clear-blocked") {
-        this.presenceByKey.set(key, {
-          ...client,
-          blocked: false,
-          blockedReason: null,
           updatedAt: new Date().toISOString(),
         });
       }

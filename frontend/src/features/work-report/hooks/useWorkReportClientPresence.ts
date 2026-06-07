@@ -35,7 +35,6 @@ export function useWorkReportClientPresence({
   const tabId = useMemo(() => getOrCreateTabId(), []);
   const clientBootId = useMemo(() => getOrCreateClientBootId(), []);
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null);
-  const [blockedReason, setBlockedReason] = useState<string | null>(null);
   const [serverBootId, setServerBootId] = useState<string | null>(null);
   const latestStateRef = useRef({
     currentPath,
@@ -74,7 +73,6 @@ export function useWorkReportClientPresence({
     const syncPresenceState = (presence: DebugClientPresence) => {
       setServerBootId(String(presence.serverBootIdAtConnect ?? "").trim() || null);
       setMaintenanceMessage(presence.maintenanceMessage ?? null);
-      setBlockedReason(presence.blocked ? presence.blockedReason ?? "blocked" : null);
     };
 
     const applyCommands = (commands: DebugClientCommand[]) => {
@@ -89,14 +87,6 @@ export function useWorkReportClientPresence({
         }
         if (command.type === "clear-maintenance-message") {
           setMaintenanceMessage(null);
-          continue;
-        }
-        if (command.type === "set-blocked") {
-          setBlockedReason(command.reason ?? command.message ?? "blocked");
-          continue;
-        }
-        if (command.type === "clear-blocked") {
-          setBlockedReason(null);
           continue;
         }
         if (command.type === "force-session-expired") {
@@ -176,8 +166,6 @@ export function useWorkReportClientPresence({
     clientId,
     tabId,
     maintenanceMessage,
-    blocked: Boolean(blockedReason),
-    blockedReason,
     serverBootId,
   };
 }
