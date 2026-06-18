@@ -32,6 +32,11 @@ const ItDutyPage = lazy(() =>
     default: m.ItDutyPage,
   }))
 );
+const DevDashboardPage = lazy(() =>
+  import("./features/dev/pages/DevDashboardPage").then((m) => ({
+    default: m.DevDashboardPage,
+  }))
+);
 
 function RouteFallback() {
   return (
@@ -66,6 +71,9 @@ export function AppRouter() {
 
         {/* IT 內部區：完全不被 work-report context 包到 */}
         <Route path="/it/duty" element={<ItDutyPage />} />
+
+        {/* Demo 開發者模式：展示欄位索引、SQLite generation swap 與 mock 上游資料流 */}
+        <Route path="/dev" element={<DevDashboardPage />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

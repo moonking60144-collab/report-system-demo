@@ -30,6 +30,8 @@ npm run dev
 
 > 啟動時 80 筆工令與 6 條 linked source 表（機台 / 操作員 / 工序）會 deterministic 生成。重啟服務會回到初始 fixture。
 
+開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看欄位索引、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
+
 ---
 
 ## 系統架構
