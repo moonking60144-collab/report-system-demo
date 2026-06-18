@@ -4,6 +4,7 @@ import { getFormConfig } from "../../config/forms";
 import { publishWorkReportFormUpdated } from "../../events/realtimeEventBus";
 import { ragicClient } from "../../ragic/client";
 import { workReportSqliteRepository } from "../../storage/sqlite/workReportSqliteRepository";
+import { sqliteClient } from "../../storage/sqlite/sqliteClient";
 import type { WorkReportRecord } from "../../types/workReport";
 import { workReportReadService } from "../work-report/workReportReadService";
 import { buildRefreshEntryOptions } from "../work-report/shared/refreshEntryOptions";
@@ -25,21 +26,12 @@ async function scanFormRecords(
   const linkedSources = await prepareLinkedSourceMaps(config.linkedFields, "sync");
   const recordsByEntryId = new Map<string, WorkReportRecord>();
   const pageLimit = 1000;
-  let offset = 0;
+  // 一波併發抓幾頁：沿用 sync lane concurrency 上限；outbound 速率由 background
+  // token bucket 鎖住，不會吃掉 user/write 的前景預算。設 1 即等同序列。
+  const waveSize = env.RAGIC_SYNC_READ_CONCURRENCY;
   let duplicateCount = 0;
 
-  while (true) {
-    const page = await ragicClient.getFormPage(
-      config.ragicPath,
-      { limit: pageLimit, offset },
-      false,
-      { timeoutMs: env.RAGIC_SYNC_READ_TIMEOUT_MS, priority: "sync" }
-    );
-    const rows = normalizeRows(page);
-    if (rows.length === 0) {
-      break;
-    }
-
+  const ingestRows = (rows: ReturnType<typeof normalizeRows>): void => {
     for (const row of rows) {
       const normalizedRow: RagicRow = {
         entryId: row.entryId,
@@ -60,13 +52,37 @@ async function scanFormRecords(
         id: entryId,
       });
     }
+  };
+
+  let baseOffset = 0;
+  let done = false;
+  while (!done) {
+    const offsets = Array.from(
+      { length: waveSize },
+      (_unused, index) => baseOffset + index * pageLimit
+    );
+    const pages = await Promise.all(
+      offsets.map((offset) =>
+        ragicClient.getFormPage(
+          config.ragicPath,
+          { limit: pageLimit, offset },
+          false,
+          { timeoutMs: env.RAGIC_SYNC_READ_TIMEOUT_MS, priority: "sync" }
+        )
+      )
+    );
+
+    // Promise.all 保序 → 依 offset 遞增處理，維持序列版「後抓覆蓋先抓」去重語意
+    for (const page of pages) {
+      const rows = normalizeRows(page);
+      if (rows.length < pageLimit) {
+        done = true;
+      }
+      ingestRows(rows);
+    }
 
     onProgress(recordsByEntryId.size);
-
-    if (rows.length < pageLimit) {
-      break;
-    }
-    offset += pageLimit;
+    baseOffset += waveSize * pageLimit;
   }
 
   if (duplicateCount > 0) {
@@ -90,8 +106,12 @@ export const workReportSyncService = new WorkReportSyncService({
       buildRefreshEntryOptions("sync")
     );
   },
-  replaceFormSnapshot:
-    workReportSqliteRepository.replaceFormSnapshot.bind(workReportSqliteRepository),
+  replaceFormSnapshot: async (formId, records, syncedAt) => {
+    const result = await workReportSqliteRepository.replaceFormSnapshot(formId, records, syncedAt);
+    // 全量 snapshot 是 WAL 暴漲主因；寫完立即 checkpoint 把整庫 WAL 搬回主檔。
+    await sqliteClient.checkpoint();
+    return result;
+  },
   upsertEntrySnapshot:
     workReportSqliteRepository.upsertEntrySnapshot.bind(workReportSqliteRepository),
   deleteEntrySnapshot:
@@ -110,6 +130,8 @@ export const workReportSyncService = new WorkReportSyncService({
     workReportSqliteRepository.cleanupProcessedProjectionEvents.bind(workReportSqliteRepository),
   getFormSnapshotCounts:
     workReportSqliteRepository.getFormSnapshotCounts.bind(workReportSqliteRepository),
+  cleanupOldFormGenerations:
+    workReportSqliteRepository.cleanupOldFormGenerations.bind(workReportSqliteRepository),
   publishWorkReportFormUpdated,
   generateTaskId: () => randomUUID(),
 });

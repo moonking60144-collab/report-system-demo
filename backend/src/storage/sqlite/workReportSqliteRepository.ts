@@ -7,7 +7,11 @@ import type {
   WorkReportRecord,
 } from "../../types/workReport";
 import { READ_MODEL_SCHEMA_VERSION } from "./readModelSchema";
-import { sqliteClient } from "./sqliteClient";
+import {
+  runSerializedWrite,
+  sqliteClient,
+  withWriteTransaction,
+} from "./sqliteClient";
 import {
   buildEntryWhereClauses,
   buildSearchText,
@@ -36,6 +40,7 @@ export interface SyncStatePatch {
   startedAt?: string | null;
   finishedAt?: string | null;
   snapshotAt?: string | null;
+  activeGenerationId?: string | null;
   readModelVersion?: number | null;
   totalEntries?: number;
   totalRows?: number;
@@ -49,6 +54,7 @@ export interface StoredSyncState {
   startedAt: string | null;
   finishedAt: string | null;
   snapshotAt: string | null;
+  activeGenerationId?: string | null;
   readModelVersion: number | null;
   totalEntries: number;
   totalRows: number;
@@ -70,186 +76,227 @@ export interface PendingProjectionEntry {
   latestSeq: number;
 }
 
+export interface SnapshotMutationOptions {
+  generationId?: string | null;
+}
+
+export interface CleanupGenerationOptions {
+  batchSize?: number;
+  keepRecentGenerations?: number;
+}
+
+interface EntrySnapshotPayload {
+  formId: string;
+  generationId: string;
+  entryId: string;
+  workOrderNo: string | null;
+  customerPartNo: string | null;
+  machineCode: string | null;
+  filterMachineCode: string | null;
+  status: string | null;
+  ragicUnfinishedStatus: string | null;
+  siteRunning: number | null;
+  startSchedule: number | null;
+  sortOrder: number | null;
+  plannedStartDate: string | null;
+  lastUpdatedAt: string | null;
+  searchText: string | null;
+  summaryJson: string;
+  detailJson: string;
+  syncedAt: string;
+}
+
+interface RowSnapshotPayload {
+  formId: string;
+  generationId: string;
+  entryId: string;
+  rowId: string;
+  dateValue: string | null;
+  operatorId: string | null;
+  processCode: string | null;
+  machineId: string | null;
+  payloadJson: string;
+  syncedAt: string;
+}
+
 class WorkReportSqliteRepository {
-  private writeChain: Promise<void> = Promise.resolve();
-
-  private async runSerializedWrite<T>(
-    operation: (db: Database) => Promise<T>
-  ): Promise<T> {
-    const scheduled = this.writeChain
-      .catch(() => {
-        // NOTE: 讓後續 SQLite 寫入不會因前一次失敗而卡死。
-      })
-      .then(async () => operation(await sqliteClient.getDb()));
-
-    this.writeChain = scheduled.then(
-      () => undefined,
-      () => undefined
-    );
-
-    return scheduled;
-  }
-
   async replaceFormSnapshot(
     formId: string,
     records: WorkReportRecord[],
     syncedAt: string
   ): Promise<{ entryCount: number; rowCount: number }> {
-    return this.runSerializedWrite(async (db) =>
-      this.replaceFormSnapshotWithDb(db, formId, records, syncedAt)
-    );
+    return this.replaceFormSnapshotWithDb(formId, records, syncedAt);
   }
 
   private async replaceFormSnapshotWithDb(
-    db: Database,
     formId: string,
     records: WorkReportRecord[],
     syncedAt: string
   ): Promise<{ entryCount: number; rowCount: number }> {
     const dedupedRecords = dedupeRecordsByEntryId(records);
     const batchSize = env.SQLITE_SYNC_BATCH_SIZE;
-    const rowPayloads: Array<{
-      formId: string;
-      entryId: string;
-      rowId: string;
-      dateValue: string | null;
-      operatorId: string | null;
-      processCode: string | null;
-      machineId: string | null;
-      payloadJson: string;
-      syncedAt: string;
-    }> = [];
+    const generationId = syncedAt;
+    const entryPayloads: EntrySnapshotPayload[] = [];
+    const rowPayloads: RowSnapshotPayload[] = [];
 
-    await db.exec("BEGIN IMMEDIATE TRANSACTION");
-    const insertEntryStmt = await db.prepare(
-      `
-      INSERT INTO work_report_entries (
-        form_id,
-        entry_id,
-        work_order_no,
-        customer_part_no,
-        machine_code,
-        filter_machine_code,
-        status,
-        ragic_unfinished_status,
-        site_running,
-        start_schedule,
-        sort_order,
-        planned_start_date,
-        last_updated_at,
-        search_text,
-        summary_json,
-        detail_json,
-        synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `
-    );
-    const insertRowStmt = await db.prepare(
-      `
-      INSERT INTO work_report_rows (
-        form_id,
-        entry_id,
-        row_id,
-        date_value,
-        operator_id,
-        process_code,
-        machine_id,
-        payload_json,
-        synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `
-    );
-    try {
-      await db.run("DELETE FROM work_report_rows WHERE form_id = ?", formId);
-      await db.run("DELETE FROM work_report_entries WHERE form_id = ?", formId);
-
-      for (const recordChunk of chunkArray(dedupedRecords, batchSize)) {
-        for (const record of recordChunk) {
-          const entryId = toNullableText(record.id);
-          if (!entryId) {
-            continue;
-          }
-
-          const reports = Array.isArray(record.reports) ? record.reports : [];
-          const summaryRecord: WorkReportRecord = { ...record, reports: [] };
-          const summaryJsonStr = JSON.stringify(summaryRecord);
-          const searchText = buildSearchText(summaryRecord);
-          // detail_json 直接用原 record；原本還多 spread 一次 { ...record, reports } 是多餘 clone
-          const detailJsonStr = JSON.stringify(record);
-
-          await insertEntryStmt.run(
-            formId,
-            entryId,
-            toNullableText(record.workOrderNo),
-            toNullableText(record.customerPartNo),
-            toNullableText(record.machineCode),
-            toNullableText(record.filterMachineCode),
-            toNullableText(record.status),
-            toNullableText(record.ragicUnfinishedStatus),
-            parseSemanticBooleanToInteger(record.siteRunning),
-            parseSemanticBooleanToInteger(record.startSchedule),
-            toNullableNumber(record.sortOrder),
-            toNullableIsoDateTime(record.plannedStartDate),
-            toNullableIsoDateTime(record.lastUpdatedAt),
-            searchText,
-            summaryJsonStr,
-            detailJsonStr,
-            syncedAt
-          );
-
-          for (const report of reports) {
-            const rowId = toNullableText((report as WorkReportItem).rowId);
-            if (!rowId) {
-              continue;
-            }
-
-            rowPayloads.push({
-              formId,
-              entryId,
-              rowId,
-              dateValue: toNullableText((report as WorkReportItem).date),
-              operatorId: toNullableText((report as WorkReportItem).operatorId),
-              processCode: toNullableText((report as WorkReportItem).processCode),
-              machineId: toNullableText((report as WorkReportItem).machineId),
-              payloadJson: JSON.stringify(report),
-              syncedAt,
-            });
-          }
-        }
+    for (const record of dedupedRecords) {
+      const entryId = toNullableText(record.id);
+      if (!entryId) {
+        continue;
       }
 
-      for (const rowChunk of chunkArray(rowPayloads, batchSize * 2)) {
-        for (const row of rowChunk) {
-          await insertRowStmt.run(
-            row.formId,
-            row.entryId,
-            row.rowId,
-            row.dateValue,
-            row.operatorId,
-            row.processCode,
-            row.machineId,
-            row.payloadJson,
-            row.syncedAt
-          );
-        }
-      }
+      const reports = Array.isArray(record.reports) ? record.reports : [];
+      const summaryRecord: WorkReportRecord = { ...record, reports: [] };
+      entryPayloads.push({
+        formId,
+        generationId,
+        entryId,
+        workOrderNo: toNullableText(record.workOrderNo),
+        customerPartNo: toNullableText(record.customerPartNo),
+        machineCode: toNullableText(record.machineCode),
+        filterMachineCode: toNullableText(record.filterMachineCode),
+        status: toNullableText(record.status),
+        ragicUnfinishedStatus: toNullableText(record.ragicUnfinishedStatus),
+        siteRunning: parseSemanticBooleanToInteger(record.siteRunning),
+        startSchedule: parseSemanticBooleanToInteger(record.startSchedule),
+        sortOrder: toNullableNumber(record.sortOrder),
+        plannedStartDate: toNullableIsoDateTime(record.plannedStartDate),
+        lastUpdatedAt: toNullableIsoDateTime(record.lastUpdatedAt),
+        searchText: buildSearchText(summaryRecord),
+        summaryJson: JSON.stringify(summaryRecord),
+        detailJson: JSON.stringify(record),
+        syncedAt,
+      });
 
-      await db.exec("COMMIT");
-      return {
-        entryCount: dedupedRecords.length,
-        rowCount: rowPayloads.length,
-      };
-    } catch (error) {
-      await db.exec("ROLLBACK");
-      throw error;
-    } finally {
-      await insertEntryStmt.finalize();
-      await insertRowStmt.finalize();
+      for (const report of reports) {
+        const rowId = toNullableText((report as WorkReportItem).rowId);
+        if (!rowId) {
+          continue;
+        }
+
+        rowPayloads.push({
+          formId,
+          generationId,
+          entryId,
+          rowId,
+          dateValue: toNullableText((report as WorkReportItem).date),
+          operatorId: toNullableText((report as WorkReportItem).operatorId),
+          processCode: toNullableText((report as WorkReportItem).processCode),
+          machineId: toNullableText((report as WorkReportItem).machineId),
+          payloadJson: JSON.stringify(report),
+          syncedAt,
+        });
+      }
     }
+
+    return withWriteTransaction(async (db) => {
+      const insertEntryStmt = await db.prepare(
+        `
+        INSERT INTO work_report_entries (
+          form_id,
+          generation_id,
+          entry_id,
+          work_order_no,
+          customer_part_no,
+          machine_code,
+          filter_machine_code,
+          status,
+          ragic_unfinished_status,
+          site_running,
+          start_schedule,
+          sort_order,
+          planned_start_date,
+          last_updated_at,
+          search_text,
+          summary_json,
+          detail_json,
+          synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      );
+      const insertRowStmt = await db.prepare(
+        `
+        INSERT INTO work_report_rows (
+          form_id,
+          generation_id,
+          entry_id,
+          row_id,
+          date_value,
+          operator_id,
+          process_code,
+          machine_id,
+          payload_json,
+          synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      );
+      try {
+        await db.run(
+          "DELETE FROM work_report_rows WHERE form_id = ? AND generation_id = ?",
+          formId,
+          generationId
+        );
+        await db.run(
+          "DELETE FROM work_report_entries WHERE form_id = ? AND generation_id = ?",
+          formId,
+          generationId
+        );
+
+        for (const entryChunk of chunkArray(entryPayloads, batchSize)) {
+          for (const entry of entryChunk) {
+            await insertEntryStmt.run(
+              entry.formId,
+              entry.generationId,
+              entry.entryId,
+              entry.workOrderNo,
+              entry.customerPartNo,
+              entry.machineCode,
+              entry.filterMachineCode,
+              entry.status,
+              entry.ragicUnfinishedStatus,
+              entry.siteRunning,
+              entry.startSchedule,
+              entry.sortOrder,
+              entry.plannedStartDate,
+              entry.lastUpdatedAt,
+              entry.searchText,
+              entry.summaryJson,
+              entry.detailJson,
+              entry.syncedAt
+            );
+          }
+        }
+
+        for (const rowChunk of chunkArray(rowPayloads, batchSize * 2)) {
+          for (const row of rowChunk) {
+            await insertRowStmt.run(
+              row.formId,
+              row.generationId,
+              row.entryId,
+              row.rowId,
+              row.dateValue,
+              row.operatorId,
+              row.processCode,
+              row.machineId,
+              row.payloadJson,
+              row.syncedAt
+            );
+          }
+        }
+
+        return {
+          entryCount: entryPayloads.length,
+          rowCount: rowPayloads.length,
+        };
+      } finally {
+        await insertEntryStmt.finalize();
+        await insertRowStmt.finalize();
+      }
+    });
   }
 
   async upsertSyncState(patch: SyncStatePatch): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await runSerializedWrite(async (db) => {
       await this.upsertSyncStateWithDb(db, patch);
     });
   }
@@ -269,6 +316,10 @@ class WorkReportSqliteRepository {
       patch.finishedAt === undefined ? existing?.finishedAt ?? null : patch.finishedAt ?? null;
     const nextSnapshotAt =
       patch.snapshotAt === undefined ? existing?.snapshotAt ?? null : patch.snapshotAt ?? null;
+    const nextActiveGenerationId =
+      patch.activeGenerationId === undefined
+        ? existing?.activeGenerationId ?? null
+        : patch.activeGenerationId ?? null;
     const nextReadModelVersion =
       patch.readModelVersion === undefined
         ? existing?.readModelVersion ?? null
@@ -289,12 +340,13 @@ class WorkReportSqliteRepository {
         started_at,
         finished_at,
         snapshot_at,
+        active_generation_id,
         read_model_version,
         total_entries,
         total_rows,
         message,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(form_id)
       DO UPDATE SET
         status = excluded.status,
@@ -302,6 +354,7 @@ class WorkReportSqliteRepository {
         started_at = excluded.started_at,
         finished_at = excluded.finished_at,
         snapshot_at = excluded.snapshot_at,
+        active_generation_id = excluded.active_generation_id,
         read_model_version = excluded.read_model_version,
         total_entries = excluded.total_entries,
         total_rows = excluded.total_rows,
@@ -314,6 +367,7 @@ class WorkReportSqliteRepository {
       nextStartedAt,
       nextFinishedAt,
       nextSnapshotAt,
+      nextActiveGenerationId,
       nextReadModelVersion,
       nextTotalEntries,
       nextTotalRows,
@@ -327,25 +381,13 @@ class WorkReportSqliteRepository {
     entryId: string,
     reason: ProjectionQueueReason
   ): Promise<number> {
-    return this.runSerializedWrite(async (db) =>
-      this.enqueueProjectionEventWithDb(db, formId, entryId, reason)
-    );
-  }
-
-  private async enqueueProjectionEventWithDb(
-    db: Database,
-    formId: string,
-    entryId: string,
-    reason: ProjectionQueueReason
-  ): Promise<number> {
     const normalizedEntryId = toNullableText(entryId);
     if (!normalizedEntryId) {
       return 0;
     }
 
-    const now = new Date().toISOString();
-    await db.exec("BEGIN IMMEDIATE TRANSACTION");
-    try {
+    return withWriteTransaction(async (db) => {
+      const now = new Date().toISOString();
       await db.run(
         `
         INSERT INTO projection_state (form_id, last_enqueued_seq, updated_at)
@@ -391,16 +433,12 @@ class WorkReportSqliteRepository {
         now
       );
 
-      await db.exec("COMMIT");
       return nextSeq;
-    } catch (error) {
-      await db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   async getLatestProjectionSeq(formId: string): Promise<number> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     const row = await db.get<{ last_enqueued_seq: number }>(
       "SELECT last_enqueued_seq FROM projection_state WHERE form_id = ?",
       formId
@@ -409,7 +447,7 @@ class WorkReportSqliteRepository {
   }
 
   async getOldestPendingProjectionSeq(formId: string): Promise<number | null> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     const row = await db.get<{ seq: number }>(
       `
       SELECT seq
@@ -431,7 +469,7 @@ class WorkReportSqliteRepository {
     afterSeq: number,
     upToSeq: number
   ): Promise<PendingProjectionEntry[]> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     const rows = await db.all<Array<{ entry_id: string; latest_seq: number }>>(
       `
       SELECT entry_id, MAX(seq) AS latest_seq
@@ -459,7 +497,7 @@ class WorkReportSqliteRepository {
     seq: number,
     processedAt: string
   ): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await runSerializedWrite(async (db) => {
       await db.run(
         `
         UPDATE projection_queue
@@ -478,7 +516,7 @@ class WorkReportSqliteRepository {
     upToSeq: number,
     processedAt: string
   ): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await runSerializedWrite(async (db) => {
       await db.run(
         `
         UPDATE projection_queue
@@ -495,7 +533,7 @@ class WorkReportSqliteRepository {
   }
 
   async cleanupProcessedProjectionEvents(formId: string, upToSeq: number): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await runSerializedWrite(async (db) => {
       await db.run(
         `
         DELETE FROM projection_queue
@@ -510,7 +548,7 @@ class WorkReportSqliteRepository {
   }
 
   async getSyncState(formId: string): Promise<StoredSyncState | null> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     return this.getSyncStateWithDb(db, formId);
   }
 
@@ -525,6 +563,7 @@ class WorkReportSqliteRepository {
       started_at: string | null;
       finished_at: string | null;
       snapshot_at: string | null;
+      active_generation_id: string | null;
       read_model_version: number | null;
       total_entries: number;
       total_rows: number;
@@ -543,6 +582,7 @@ class WorkReportSqliteRepository {
       startedAt: row.started_at,
       finishedAt: row.finished_at,
       snapshotAt: row.snapshot_at,
+      activeGenerationId: row.active_generation_id ?? row.snapshot_at ?? null,
       readModelVersion:
         row.read_model_version === null || row.read_model_version === undefined
           ? null
@@ -554,12 +594,47 @@ class WorkReportSqliteRepository {
     };
   }
 
+  private async getActiveGenerationIdWithDb(
+    db: Database,
+    formId: string
+  ): Promise<string | null> {
+    const state = await this.getSyncStateWithDb(db, formId);
+    return toNullableText(state?.activeGenerationId) ?? toNullableText(state?.snapshotAt);
+  }
+
+  private async resolveSnapshotMutationGenerationIdWithDb(
+    db: Database,
+    formId: string,
+    syncedAt: string,
+    options?: SnapshotMutationOptions
+  ): Promise<string> {
+    return (
+      toNullableText(options?.generationId) ??
+      (await this.getActiveGenerationIdWithDb(db, formId)) ??
+      syncedAt
+    );
+  }
+
   async getReports(
     formId: string,
     options: SqliteReportQueryOptions
   ): Promise<SqliteReportQueryResult> {
-    const db = await sqliteClient.getDb();
-    const { whereClauses, whereParams } = buildEntryWhereClauses(formId, options);
+    const db = await sqliteClient.getReadDb();
+    const generationId = await this.getActiveGenerationIdWithDb(db, formId);
+    if (!generationId) {
+      return {
+        data: [],
+        count: 0,
+        totalCount: 0,
+        hasMore: false,
+      };
+    }
+
+    const { whereClauses, whereParams } = buildEntryWhereClauses(
+      formId,
+      options,
+      generationId
+    );
 
     const queryLimit = Math.max(1, Math.trunc(options.limit));
     const queryOffset = Math.max(0, Math.trunc(options.offset));
@@ -622,9 +697,21 @@ class WorkReportSqliteRepository {
     options: ReportFacetQueryOptions,
     fields: string[]
   ): Promise<Record<string, ReportFacetCount[]>> {
-    const db = await sqliteClient.getDb();
-    const { whereClauses, whereParams } = buildEntryWhereClauses(formId, options);
+    const db = await sqliteClient.getReadDb();
     const result: Record<string, ReportFacetCount[]> = {};
+    const generationId = await this.getActiveGenerationIdWithDb(db, formId);
+    if (!generationId) {
+      for (const field of fields) {
+        result[field] = [];
+      }
+      return result;
+    }
+
+    const { whereClauses, whereParams } = buildEntryWhereClauses(
+      formId,
+      options,
+      generationId
+    );
 
     for (const field of fields) {
       if (
@@ -671,16 +758,22 @@ class WorkReportSqliteRepository {
   }
 
   async getFullReports(formId: string): Promise<WorkReportRecord[]> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
+    const generationId = await this.getActiveGenerationIdWithDb(db, formId);
+    if (!generationId) {
+      return [];
+    }
+
     const rows = await db.all<EntryRowRecord[]>(
       `
       SELECT entry_id, summary_json
       FROM work_report_entries
-      WHERE form_id = ?
+      WHERE form_id = ? AND generation_id = ?
       ORDER BY rowid ASC
       LIMIT ?
       `,
       formId,
+      generationId,
       env.REPORT_FULL_CACHE_MAX_RECORDS
     );
 
@@ -692,15 +785,21 @@ class WorkReportSqliteRepository {
   }
 
   async getReportByEntryId(formId: string, entryId: string): Promise<WorkReportRecord | null> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
+    const generationId = await this.getActiveGenerationIdWithDb(db, formId);
+    if (!generationId) {
+      return null;
+    }
+
     const row = await db.get<EntryDetailRecord>(
       `
       SELECT detail_json
       FROM work_report_entries
-      WHERE form_id = ? AND entry_id = ?
+      WHERE form_id = ? AND generation_id = ? AND entry_id = ?
       LIMIT 1
       `,
       formId,
+      generationId,
       entryId
     );
 
@@ -713,18 +812,8 @@ class WorkReportSqliteRepository {
   async upsertEntrySnapshot(
     formId: string,
     record: WorkReportRecord,
-    syncedAt: string
-  ): Promise<{ rowCount: number }> {
-    return this.runSerializedWrite(async (db) =>
-      this.upsertEntrySnapshotWithDb(db, formId, record, syncedAt)
-    );
-  }
-
-  private async upsertEntrySnapshotWithDb(
-    db: Database,
-    formId: string,
-    record: WorkReportRecord,
-    syncedAt: string
+    syncedAt: string,
+    options?: SnapshotMutationOptions
   ): Promise<{ rowCount: number }> {
     const entryId = toNullableText(record.id);
     if (!entryId) {
@@ -737,16 +826,23 @@ class WorkReportSqliteRepository {
       reports: [],
     };
 
-    await db.exec("BEGIN IMMEDIATE TRANSACTION");
-    try {
-      await db.run(
-        "DELETE FROM work_report_rows WHERE form_id = ? AND entry_id = ?",
+    return withWriteTransaction(async (db) => {
+      const generationId = await this.resolveSnapshotMutationGenerationIdWithDb(
+        db,
         formId,
+        syncedAt,
+        options
+      );
+      await db.run(
+        "DELETE FROM work_report_rows WHERE form_id = ? AND generation_id = ? AND entry_id = ?",
+        formId,
+        generationId,
         entryId
       );
       await db.run(
-        "DELETE FROM work_report_entries WHERE form_id = ? AND entry_id = ?",
+        "DELETE FROM work_report_entries WHERE form_id = ? AND generation_id = ? AND entry_id = ?",
         formId,
+        generationId,
         entryId
       );
 
@@ -754,6 +850,7 @@ class WorkReportSqliteRepository {
         `
         INSERT INTO work_report_entries (
           form_id,
+          generation_id,
           entry_id,
           work_order_no,
           customer_part_no,
@@ -770,9 +867,10 @@ class WorkReportSqliteRepository {
           summary_json,
           detail_json,
           synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         formId,
+        generationId,
         entryId,
         toNullableText(record.workOrderNo),
         toNullableText(record.customerPartNo),
@@ -806,6 +904,7 @@ class WorkReportSqliteRepository {
           `
           INSERT INTO work_report_rows (
             form_id,
+            generation_id,
             entry_id,
             row_id,
             date_value,
@@ -814,9 +913,10 @@ class WorkReportSqliteRepository {
             machine_id,
             payload_json,
             synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
           formId,
+          generationId,
           entryId,
           rowId,
           toNullableText((report as WorkReportItem).date),
@@ -828,36 +928,64 @@ class WorkReportSqliteRepository {
         );
       }
 
-      await db.exec("COMMIT");
       return { rowCount };
-    } catch (error) {
-      await db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  async deleteEntrySnapshot(formId: string, entryId: string): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
-      await this.deleteEntrySnapshotWithDb(db, formId, entryId);
     });
   }
 
-  async getFormSnapshotCounts(formId: string): Promise<{ entryCount: number; rowCount: number }> {
-    const db = await sqliteClient.getDb();
-    return this.getFormSnapshotCountsWithDb(db, formId);
+  async deleteEntrySnapshot(
+    formId: string,
+    entryId: string,
+    options?: SnapshotMutationOptions
+  ): Promise<void> {
+    await withWriteTransaction(async (db) => {
+      const generationId =
+        toNullableText(options?.generationId) ?? (await this.getActiveGenerationIdWithDb(db, formId));
+      if (!generationId) {
+        return;
+      }
+      await db.run(
+        "DELETE FROM work_report_rows WHERE form_id = ? AND generation_id = ? AND entry_id = ?",
+        formId,
+        generationId,
+        entryId
+      );
+      await db.run(
+        "DELETE FROM work_report_entries WHERE form_id = ? AND generation_id = ? AND entry_id = ?",
+        formId,
+        generationId,
+        entryId
+      );
+    });
+  }
+
+  async getFormSnapshotCounts(
+    formId: string,
+    options?: SnapshotMutationOptions
+  ): Promise<{ entryCount: number; rowCount: number }> {
+    const db = await sqliteClient.getReadDb();
+    return this.getFormSnapshotCountsWithDb(db, formId, options?.generationId);
   }
 
   private async getFormSnapshotCountsWithDb(
     db: Database,
-    formId: string
+    formId: string,
+    requestedGenerationId?: string | null
   ): Promise<{ entryCount: number; rowCount: number }> {
+    const generationId =
+      toNullableText(requestedGenerationId) ?? (await this.getActiveGenerationIdWithDb(db, formId));
+    if (!generationId) {
+      return { entryCount: 0, rowCount: 0 };
+    }
+
     const entryCountRow = await db.get<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM work_report_entries WHERE form_id = ?",
-      formId
+      "SELECT COUNT(*) AS count FROM work_report_entries WHERE form_id = ? AND generation_id = ?",
+      formId,
+      generationId
     );
     const rowCountRow = await db.get<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM work_report_rows WHERE form_id = ?",
-      formId
+      "SELECT COUNT(*) AS count FROM work_report_rows WHERE form_id = ? AND generation_id = ?",
+      formId,
+      generationId
     );
 
     return {
@@ -866,18 +994,50 @@ class WorkReportSqliteRepository {
     };
   }
 
+  async cleanupOldFormGenerations(
+    formId: string,
+    keepGenerationId: string,
+    options: CleanupGenerationOptions = {}
+  ): Promise<number> {
+    const normalizedKeepGenerationId = toNullableText(keepGenerationId);
+    if (!normalizedKeepGenerationId) {
+      return 0;
+    }
+
+    let deletedEntries = 0;
+    while (true) {
+      const deletedInBatch = await runSerializedWrite((db) =>
+        cleanupOldFormGenerationsBatchWithDb(db, formId, normalizedKeepGenerationId, options)
+      );
+
+      deletedEntries += deletedInBatch;
+      if (deletedInBatch === 0) {
+        return deletedEntries;
+      }
+
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    }
+  }
+
   async touchSyncStateSnapshot(
     formId: string,
     snapshotAt: string,
     message: string | null = null
   ): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await runSerializedWrite(async (db) => {
       const existing = await this.getSyncStateWithDb(db, formId);
       if (!existing) {
         return;
       }
 
-      const counts = await this.getFormSnapshotCountsWithDb(db, formId);
+      const counts = await this.getFormSnapshotCountsWithDb(
+        db,
+        formId,
+        existing.activeGenerationId ?? existing.snapshotAt
+      );
+      const activeGenerationId = existing.activeGenerationId ?? existing.snapshotAt;
 
       await this.upsertSyncStateWithDb(db, {
         formId,
@@ -886,6 +1046,7 @@ class WorkReportSqliteRepository {
         startedAt: existing.startedAt,
         finishedAt: existing.finishedAt,
         snapshotAt,
+        activeGenerationId,
         readModelVersion: existing.readModelVersion ?? READ_MODEL_SCHEMA_VERSION,
         totalEntries: counts.entryCount,
         totalRows: counts.rowCount,
@@ -894,30 +1055,75 @@ class WorkReportSqliteRepository {
     });
   }
 
-  private async deleteEntrySnapshotWithDb(
-    db: Database,
-    formId: string,
-    entryId: string
-  ): Promise<void> {
-    await db.exec("BEGIN IMMEDIATE TRANSACTION");
-    try {
-      await db.run(
-        "DELETE FROM work_report_rows WHERE form_id = ? AND entry_id = ?",
-        formId,
-        entryId
-      );
-      await db.run(
-        "DELETE FROM work_report_entries WHERE form_id = ? AND entry_id = ?",
-        formId,
-        entryId
-      );
-      await db.exec("COMMIT");
-    } catch (error) {
-      await db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
 }
 
 export const workReportSqliteRepository = new WorkReportSqliteRepository();
+
+export async function cleanupOldFormGenerationsBatchWithDb(
+  db: Database,
+  formId: string,
+  keepGenerationId: string,
+  options: CleanupGenerationOptions = {}
+): Promise<number> {
+  const normalizedKeepGenerationId = toNullableText(keepGenerationId);
+  if (!normalizedKeepGenerationId) {
+    return 0;
+  }
+
+  const requestedKeepRecentGenerations = Math.trunc(options.keepRecentGenerations ?? 2);
+  const keepRecentGenerations = Number.isFinite(requestedKeepRecentGenerations)
+    ? Math.max(1, requestedKeepRecentGenerations)
+    : 2;
+  const requestedBatchSize = Math.trunc(options.batchSize ?? 500);
+  const batchSize = Number.isFinite(requestedBatchSize) ? Math.max(1, requestedBatchSize) : 500;
+  const generationRows = await db.all<Array<{ generation_id: string }>>(
+    `
+    SELECT generation_id
+    FROM work_report_entries
+    WHERE form_id = ?
+    GROUP BY generation_id
+    ORDER BY generation_id DESC
+    LIMIT ?
+    `,
+    formId,
+    keepRecentGenerations
+  );
+  const retainedGenerationIds = Array.from(
+    new Set([
+      normalizedKeepGenerationId,
+      ...generationRows.map((row) => row.generation_id).filter(Boolean),
+    ])
+  );
+  const placeholders = retainedGenerationIds.map(() => "?").join(", ");
+  const rows = await db.all<Array<{ generation_id: string; entry_id: string }>>(
+    `
+    SELECT generation_id, entry_id
+    FROM work_report_entries
+    WHERE form_id = ?
+      AND generation_id NOT IN (${placeholders})
+    ORDER BY generation_id ASC
+    LIMIT ?
+    `,
+    formId,
+    ...retainedGenerationIds,
+    batchSize
+  );
+  if (rows.length === 0) {
+    return 0;
+  }
+
+  for (const row of rows) {
+    await db.run(
+      `
+      DELETE FROM work_report_entries
+      WHERE form_id = ?
+        AND generation_id = ?
+        AND entry_id = ?
+      `,
+      formId,
+      row.generation_id,
+      row.entry_id
+    );
+  }
+  return rows.length;
+}

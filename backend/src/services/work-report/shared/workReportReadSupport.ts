@@ -1,4 +1,4 @@
-import { shouldUseSqliteReadForForm } from "../../../config/env";
+import { env, shouldUseSqliteReadForForm } from "../../../config/env";
 import type {
   ReportAnalysisQueryOptions,
   ReportAnalysisSummary,
@@ -10,26 +10,60 @@ import type {
   WorkReportRecord,
 } from "../../../types/workReport";
 import type { StoredSyncState } from "../../../storage/sqlite/workReportSqliteRepository";
-import { hasReadableSqliteSnapshot } from "../readModelState";
+import { hasReadableSqliteSnapshot, isSqliteSnapshotStale } from "../readModelState";
 import { parseSemanticBoolean } from "../../../utils/semanticBoolean";
 import { normalizeComparableValue, parseNumericValue } from "./valueUtils";
 
 const COLUMN_BLANK_TOKEN = "__blank__";
 const COLUMN_BOOL_TRUE_TOKEN = "__bool_true__";
 const COLUMN_BOOL_FALSE_TOKEN = "__bool_false__";
+const STALE_SNAPSHOT_WARN_INTERVAL_MS = 5 * 60 * 1000;
 
 export class WorkReportReadSupport {
   private readonly alphaNumericCollator = new Intl.Collator("zh-Hant", {
     numeric: true,
     sensitivity: "base",
   });
+  private readonly staleSnapshotWarnAtByForm = new Map<string, number>();
 
   shouldUseSqliteRead(formId: string): boolean {
     return shouldUseSqliteReadForForm(formId);
   }
 
-  isSqliteSnapshotReady(syncState: StoredSyncState | null): boolean {
-    return hasReadableSqliteSnapshot(syncState);
+  isSqliteSnapshotReady(
+    syncState: StoredSyncState | null,
+    options: { allowStale?: boolean } = {}
+  ): boolean {
+    if (!syncState || !hasReadableSqliteSnapshot(syncState)) {
+      return false;
+    }
+    if (isSqliteSnapshotStale(syncState, env.SQLITE_READ_MAX_STALENESS_MS)) {
+      const allowStale = Boolean(options.allowStale);
+      this.warnStaleSnapshot(syncState, allowStale ? "used" : "fallback");
+      return allowStale;
+    }
+    return true;
+  }
+
+  private warnStaleSnapshot(syncState: StoredSyncState, mode: "fallback" | "used"): void {
+    // 每個 form 每 5 分鐘最多 warn 一次：stale 期間所有列表/詳情請求都會走到
+    // 這裡，不 throttle 會洗版。
+    const now = Date.now();
+    const lastWarnAt = this.staleSnapshotWarnAtByForm.get(syncState.formId) ?? 0;
+    if (now - lastWarnAt < STALE_SNAPSHOT_WARN_INTERVAL_MS) {
+      return;
+    }
+    this.staleSnapshotWarnAtByForm.set(syncState.formId, now);
+    console.warn(
+      mode === "used"
+        ? "[sqlite-read][stale-snapshot-used]"
+        : "[sqlite-read][stale-snapshot-fallback]",
+      {
+        formId: syncState.formId,
+        snapshotAt: syncState.snapshotAt,
+        maxStalenessMs: env.SQLITE_READ_MAX_STALENESS_MS,
+      }
+    );
   }
 
   filterSortAndPaginateReports(

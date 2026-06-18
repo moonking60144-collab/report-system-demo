@@ -56,7 +56,7 @@ export class WorkReportAnalysisReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState)) {
+      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
         return null;
       }
       return await workReportSqliteRepository.getFacetCounts(formId, options, fields);

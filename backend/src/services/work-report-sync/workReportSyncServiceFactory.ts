@@ -61,9 +61,14 @@ interface WorkReportSyncServiceDeps {
   upsertEntrySnapshot(
     formId: string,
     record: WorkReportRecord,
-    syncedAt: string
+    syncedAt: string,
+    options?: { generationId?: string | null }
   ): Promise<{ rowCount: number }>;
-  deleteEntrySnapshot(formId: string, entryId: string): Promise<void>;
+  deleteEntrySnapshot(
+    formId: string,
+    entryId: string,
+    options?: { generationId?: string | null }
+  ): Promise<void>;
   getSyncState(formId: string): Promise<StoredSyncStateLike | null>;
   upsertSyncState(patch: {
     formId: string;
@@ -72,6 +77,7 @@ interface WorkReportSyncServiceDeps {
     startedAt?: string | null;
     finishedAt?: string | null;
     snapshotAt?: string | null;
+    activeGenerationId?: string | null;
     readModelVersion?: number | null;
     totalEntries?: number;
     totalRows?: number;
@@ -90,7 +96,11 @@ interface WorkReportSyncServiceDeps {
     processedAt: string
   ): Promise<void>;
   cleanupProcessedProjectionEvents(formId: string, upToSeq: number): Promise<void>;
-  getFormSnapshotCounts(formId: string): Promise<{ entryCount: number; rowCount: number }>;
+  getFormSnapshotCounts(
+    formId: string,
+    options?: { generationId?: string | null }
+  ): Promise<{ entryCount: number; rowCount: number }>;
+  cleanupOldFormGenerations?(formId: string, keepGenerationId: string): Promise<number>;
   publishWorkReportFormUpdated(formId: string): void;
   generateTaskId(): string;
 }
@@ -223,6 +233,7 @@ export class WorkReportSyncService {
       const oldestPendingSeq = await this.deps.getOldestPendingProjectionSeq(task.formId);
       let processedSeq =
         oldestPendingSeq !== null ? Math.max(0, oldestPendingSeq - 1) : startSeq;
+      const replayStartedAfterSeq = processedSeq;
 
       const records = await this.deps.scanFormRecords(task.formId, (count) => {
         this.patchTask(taskId, {
@@ -247,17 +258,25 @@ export class WorkReportSyncService {
       workReportDebugLog("sync", "replay-started", {
         taskId,
         formId: task.formId,
+        generationId: snapshotAt,
         processedSeq,
       });
-      processedSeq = await this.replayPendingProjectionEntries(task.formId, processedSeq);
+      processedSeq = await this.replayPendingProjectionEntries(
+        task.formId,
+        processedSeq,
+        snapshotAt
+      );
       workReportDebugLog("sync", "replay-completed", {
         taskId,
         formId: task.formId,
+        generationId: snapshotAt,
         processedSeq,
       });
 
       const finalSnapshotAt = new Date().toISOString();
-      const counts = await this.deps.getFormSnapshotCounts(task.formId);
+      const counts = await this.deps.getFormSnapshotCounts(task.formId, {
+        generationId: snapshotAt,
+      });
       const finishedAt = new Date().toISOString();
 
       this.patchTask(taskId, {
@@ -276,11 +295,16 @@ export class WorkReportSyncService {
         startedAt,
         finishedAt,
         snapshotAt: finalSnapshotAt,
+        activeGenerationId: snapshotAt,
         readModelVersion: READ_MODEL_SCHEMA_VERSION,
         totalEntries: counts.entryCount,
         totalRows: counts.rowCount,
         message: "同步完成",
       });
+      if (processedSeq > replayStartedAfterSeq) {
+        await this.deps.markProjectionRangeProcessed(task.formId, processedSeq, finishedAt);
+        await this.deps.cleanupProcessedProjectionEvents(task.formId, processedSeq);
+      }
 
       workReportDebugLog("sync", "succeeded", {
         taskId,
@@ -288,11 +312,37 @@ export class WorkReportSyncService {
         startedAt,
         finishedAt,
         snapshotAt: finalSnapshotAt,
+        activeGenerationId: snapshotAt,
         syncedEntries: counts.entryCount,
         syncedRows: counts.rowCount,
       });
 
       this.deps.publishWorkReportFormUpdated(task.formId);
+      void this.deps.cleanupOldFormGenerations?.(task.formId, snapshotAt).then(
+        (deletedEntries) => {
+          if (deletedEntries > 0) {
+            workReportDebugLog("sync", "old-generations-cleaned", {
+              taskId,
+              formId: task.formId,
+              keepGenerationId: snapshotAt,
+              deletedEntries,
+            });
+          }
+        },
+        (cleanupError) => {
+          workReportDebugLog(
+            "sync",
+            "old-generations-cleanup-failed",
+            {
+              taskId,
+              formId: task.formId,
+              keepGenerationId: snapshotAt,
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            },
+            "warn"
+          );
+        }
+      );
     } catch (error) {
       const finishedAt = new Date().toISOString();
       const normalizedError =
@@ -339,7 +389,8 @@ export class WorkReportSyncService {
 
   private async replayPendingProjectionEntries(
     formId: string,
-    initialProcessedSeq: number
+    initialProcessedSeq: number,
+    generationId: string
   ): Promise<number> {
     let processedSeq = initialProcessedSeq;
 
@@ -356,23 +407,26 @@ export class WorkReportSyncService {
       );
 
       for (const pendingEntry of pendingEntries) {
-        await this.refreshEntrySnapshot(formId, pendingEntry.entryId);
+        await this.refreshEntrySnapshot(formId, pendingEntry.entryId, generationId);
       }
 
-      const processedAt = new Date().toISOString();
-      await this.deps.markProjectionRangeProcessed(formId, upperSeq, processedAt);
-      await this.deps.cleanupProcessedProjectionEvents(formId, upperSeq);
       processedSeq = upperSeq;
     }
   }
 
-  private async refreshEntrySnapshot(formId: string, entryId: string): Promise<void> {
+  private async refreshEntrySnapshot(
+    formId: string,
+    entryId: string,
+    generationId: string
+  ): Promise<void> {
     try {
       const record = await this.deps.refreshEntry(formId, entryId);
-      await this.deps.upsertEntrySnapshot(formId, record, new Date().toISOString());
+      await this.deps.upsertEntrySnapshot(formId, record, new Date().toISOString(), {
+        generationId,
+      });
     } catch (error) {
       if (error instanceof HttpError && error.code === "REPORT_NOT_FOUND") {
-        await this.deps.deleteEntrySnapshot(formId, entryId);
+        await this.deps.deleteEntrySnapshot(formId, entryId, { generationId });
         return;
       }
       throw error;

@@ -31,7 +31,7 @@ export function DemoBadge() {
 
   return (
     <Tooltip
-      title="目前以記憶體假倉執行。上游 Ragic SaaS 已替換為 MockRagicClient，所有業務邏輯（SSE、SQLite read model、token bucket、Form 16 idempotency 等）原樣運作。"
+      title="目前以記憶體假倉執行。外部 SaaS 已替換為 MockRagicClient；SSE、SQLite active generation、generation swap、token bucket、Form 16 idempotency 等資料流原樣運作。"
       placement="bottomLeft"
     >
       <div

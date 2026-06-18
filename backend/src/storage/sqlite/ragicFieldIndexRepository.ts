@@ -1,5 +1,5 @@
 import type { Database } from "sqlite";
-import { sqliteClient } from "./sqliteClient";
+import { createConnectionSerializer, sqliteClient } from "./sqliteClient";
 import type {
   RagicFieldIndexEntry,
   RagicFieldIndexState,
@@ -145,22 +145,7 @@ function buildSearchText(input: RagicFieldIndexInsertInput): string {
 export function createRagicFieldIndexRepository(
   getDb: () => Promise<Database>
 ): RagicFieldIndexRepository {
-  let writeChain: Promise<void> = Promise.resolve();
-
-  async function runSerializedWrite<T>(
-    operation: (db: Database) => Promise<T>
-  ): Promise<T> {
-    const scheduled = writeChain
-      .catch(() => {
-        // 避免上一筆失敗讓後續寫入卡住
-      })
-      .then(async () => operation(await getDb()));
-    writeChain = scheduled.then(
-      () => undefined,
-      () => undefined
-    );
-    return scheduled;
-  }
+  const { runSerializedWrite } = createConnectionSerializer(getDb);
 
   return {
     async replaceAll(entries, refreshedAt) {

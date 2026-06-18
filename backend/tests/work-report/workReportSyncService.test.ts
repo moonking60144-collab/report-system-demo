@@ -8,8 +8,11 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
   const syncStatePatches: Array<Record<string, unknown>> = [];
   const replayWindows: Array<[number, number]> = [];
   const refreshedEntries: string[] = [];
+  const replayUpsertGenerationIds: string[] = [];
+  const countGenerationIds: Array<string | null> = [];
   const markedSeqs: number[] = [];
   const cleanedSeqs: number[] = [];
+  let snapshotGenerationId = "";
 
   let latestSeqCall = 0;
   const latestSeqs = [10, 10, 12, 12];
@@ -31,8 +34,14 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
         reports: [],
       };
     },
-    replaceFormSnapshot: async () => ({ entryCount: 0, rowCount: 0 }),
-    upsertEntrySnapshot: async () => ({ rowCount: 0 }),
+    replaceFormSnapshot: async (_formId, _records, syncedAt) => {
+      snapshotGenerationId = syncedAt;
+      return { entryCount: 0, rowCount: 0 };
+    },
+    upsertEntrySnapshot: async (_formId, _record, _syncedAt, options) => {
+      replayUpsertGenerationIds.push(options?.generationId ?? "");
+      return { rowCount: 0 };
+    },
     deleteEntrySnapshot: async () => undefined,
     getSyncState: async () => null,
     upsertSyncState: async (patch) => {
@@ -60,10 +69,13 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
     cleanupProcessedProjectionEvents: async (_formId, upToSeq) => {
       cleanedSeqs.push(upToSeq);
     },
-    getFormSnapshotCounts: async () => ({
-      entryCount: 2,
-      rowCount: 4,
-    }),
+    getFormSnapshotCounts: async (_formId, options) => {
+      countGenerationIds.push(options?.generationId ?? null);
+      return {
+        entryCount: 2,
+        rowCount: 4,
+      };
+    },
     publishWorkReportFormUpdated: () => undefined,
   });
 
@@ -80,8 +92,11 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
     [10, 12],
   ]);
   assert.deepEqual(refreshedEntries, ["E-1", "E-2"]);
-  assert.deepEqual(markedSeqs, [10, 12]);
-  assert.deepEqual(cleanedSeqs, [10, 12]);
+  assert.match(snapshotGenerationId, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(replayUpsertGenerationIds, [snapshotGenerationId, snapshotGenerationId]);
+  assert.deepEqual(countGenerationIds, [snapshotGenerationId]);
+  assert.deepEqual(markedSeqs, [12]);
+  assert.deepEqual(cleanedSeqs, [12]);
 
   const runningPatch = syncStatePatches[0];
   assert.equal(runningPatch.status, "running");
@@ -91,6 +106,7 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
 
   const successPatch = syncStatePatches[syncStatePatches.length - 1];
   assert.equal(successPatch.status, "success");
+  assert.equal(successPatch.activeGenerationId, snapshotGenerationId);
   assert.equal(successPatch.totalEntries, 2);
   assert.equal(successPatch.totalRows, 4);
   assert.equal(typeof successPatch.snapshotAt, "string");
@@ -99,6 +115,8 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
 
 test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", async () => {
   let deletedEntryId = "";
+  let snapshotGenerationId = "";
+  let deleteGenerationId = "";
 
   const service = new WorkReportSyncService({
     generateTaskId: () => "sync-105-delete",
@@ -106,10 +124,14 @@ test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", asyn
     refreshEntry: async () => {
       throw new HttpError(404, "找不到報工資料：E-404", "REPORT_NOT_FOUND");
     },
-    replaceFormSnapshot: async () => ({ entryCount: 0, rowCount: 0 }),
+    replaceFormSnapshot: async (_formId, _records, syncedAt) => {
+      snapshotGenerationId = syncedAt;
+      return { entryCount: 0, rowCount: 0 };
+    },
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
-    deleteEntrySnapshot: async (_formId, entryId) => {
+    deleteEntrySnapshot: async (_formId, entryId, options) => {
       deletedEntryId = entryId;
+      deleteGenerationId = options?.generationId ?? "";
     },
     getSyncState: async () => null,
     upsertSyncState: async () => undefined,
@@ -136,6 +158,7 @@ test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", asyn
   });
 
   assert.equal(deletedEntryId, "E-404");
+  assert.equal(deleteGenerationId, snapshotGenerationId);
 });
 
 test("sync 失敗時不主動覆寫 snapshotAt 與 counts", async () => {

@@ -47,6 +47,7 @@ interface RagicPageQuery {
 interface RagicReadRequestOptions {
   timeoutMs?: number;
   priority?: RagicReadPriority;
+  maxRetries?: number;
 }
 
 interface RagicActionButtonItem {
@@ -112,7 +113,8 @@ class RagicClient {
             timeout: this.resolveReadTimeoutMs(requestOptions.timeoutMs),
             params: { api: "true", offset },
           }),
-        requestOptions.priority ?? "user"
+        requestOptions.priority ?? "user",
+        { maxRetries: requestOptions.maxRetries }
       );
 
       const pageEntries = Object.entries(response.data).filter(
@@ -167,7 +169,8 @@ class RagicClient {
           // Ragic 多 where 條件要序列化成 `where=a&where=b`（不是預設的 `where[]=a&where[]=b`）
           paramsSerializer: { indexes: null },
         }),
-      requestOptions.priority ?? "user"
+      requestOptions.priority ?? "user",
+      { maxRetries: requestOptions.maxRetries }
     );
 
     const container = response.data as RagicRecord;
@@ -210,7 +213,8 @@ class RagicClient {
           timeout: this.resolveReadTimeoutMs(requestOptions.timeoutMs),
           params: { api: "true" },
         }),
-      requestOptions.priority ?? "user"
+      requestOptions.priority ?? "user",
+      { maxRetries: requestOptions.maxRetries }
     );
 
     const payload = response.data?.data ?? response.data;
@@ -398,7 +402,8 @@ class RagicClient {
             },
           }
         ),
-      requestOptions.priority ?? "user"
+      requestOptions.priority ?? "user",
+      { maxRetries: requestOptions.maxRetries }
     );
     const buttons = response.data?.actionButtons ?? [];
     return buttons
@@ -475,7 +480,8 @@ class RagicClient {
   private async runReadRequest<T>(
     label: string,
     request: () => Promise<T>,
-    priority: RagicReadPriority = "user"
+    priority: RagicReadPriority = "user",
+    options: { maxRetries?: number } = {}
   ): Promise<T> {
     // Retry 包在外面：每次 attempt 自己 acquire/release lane slot，
     // backoff sleep 不會佔住 lane（避免 4 個 background slot 都進入 retry sleep
@@ -487,7 +493,7 @@ class RagicClient {
     // 計數更準。寫入端 (runWriteRequest) 本來就是這個結構。
     return runWithReadRetry(
       () => ragicRequestScheduler.runRead(label, request, priority),
-      { label }
+      { label, maxRetries: options.maxRetries }
     );
   }
 

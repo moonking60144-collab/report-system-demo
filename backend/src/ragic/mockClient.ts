@@ -46,6 +46,7 @@ interface RagicPageQuery {
 interface RagicReadRequestOptions {
   timeoutMs?: number;
   priority?: RagicReadPriority;
+  maxRetries?: number;
 }
 
 export interface MockRagicClientOptions {

@@ -270,6 +270,40 @@ export function WorkReportTechnicalInfoPanel() {
             </div>
           </section>
 
+          <section className="dev-mode-dataflow">
+            <strong className="dev-mode-section-title">Demo 資料流</strong>
+            <div className="dev-mode-dataflow-grid">
+              <div className="dev-mode-dataflow-card">
+                <span className="dev-mode-dataflow-step">1</span>
+                <h3>上游替身</h3>
+                <p>
+                  <code>DEMO_MODE=true</code> 時改用 in-memory mock fixture，不連真實上游、不帶正式資料。
+                </p>
+              </div>
+              <div className="dev-mode-dataflow-card">
+                <span className="dev-mode-dataflow-step">2</span>
+                <h3>啟動同步</h3>
+                <p>
+                  後端啟動後自動同步 104 / 105，建立 SQLite read-model 的新 generation。
+                </p>
+              </div>
+              <div className="dev-mode-dataflow-card">
+                <span className="dev-mode-dataflow-step">3</span>
+                <h3>原子切換</h3>
+                <p>
+                  寫完新 generation 並 replay 期間變更後，才切換 active pointer，前景讀取不會看到半套資料。
+                </p>
+              </div>
+              <div className="dev-mode-dataflow-card">
+                <span className="dev-mode-dataflow-step">4</span>
+                <h3>前景讀取</h3>
+                <p>
+                  列表、詳情與分面統計優先讀 active generation；缺 snapshot 時才 fallback live read。
+                </p>
+              </div>
+            </div>
+          </section>
+
           <section className="dev-mode-ragic">
             <strong className="dev-mode-section-title">Ragic 欄位索引</strong>
             <RagicFieldInlineSearch

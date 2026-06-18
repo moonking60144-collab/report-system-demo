@@ -19,14 +19,16 @@ export class WorkReportEntryReadService {
     entryId: string,
     options: {
       refresh?: boolean;
+      allowSqliteFallbackOnRefresh?: boolean;
       ragicReadTimeoutMs?: number;
+      ragicReadMaxRetries?: number;
       /** Ragic 讀取 lane；背景任務（callback / sync / mutation projection）要傳 "background" 或 "sync"
        *  避免污染使用者 lane 的 circuit breaker。 */
       priority?: RagicReadPriority;
     } = {}
   ): Promise<WorkReportRecord> {
+    const sqliteRecord = await this.tryGetReportByEntryIdFromSqlite(formId, entryId);
     if (!options.refresh) {
-      const sqliteRecord = await this.tryGetReportByEntryIdFromSqlite(formId, entryId);
       if (sqliteRecord) {
         return sqliteRecord;
       }
@@ -34,10 +36,29 @@ export class WorkReportEntryReadService {
 
     const config = getFormConfig(formId);
     const useCache = !options.refresh;
-    const entryData = await ragicClient.getEntry(config.ragicPath, entryId, useCache, {
-      timeoutMs: options.ragicReadTimeoutMs,
-      priority: options.priority,
-    });
+    let entryData;
+    try {
+      entryData = await ragicClient.getEntry(config.ragicPath, entryId, useCache, {
+        timeoutMs: options.ragicReadTimeoutMs,
+        maxRetries: options.ragicReadMaxRetries,
+        priority: options.priority,
+      });
+    } catch (error) {
+      if (
+        options.refresh &&
+        options.allowSqliteFallbackOnRefresh &&
+        sqliteRecord &&
+        shouldFallbackToSqlite(error)
+      ) {
+        console.warn("[work-report-detail][refresh-sqlite-fallback]", {
+          formId,
+          entryId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return sqliteRecord;
+      }
+      throw error;
+    }
     if (!entryData) {
       throw new HttpError(404, `找不到報工資料：${entryId}`, "REPORT_NOT_FOUND");
     }
@@ -61,7 +82,7 @@ export class WorkReportEntryReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState)) {
+      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
         return null;
       }
       return await workReportSqliteRepository.getReportByEntryId(formId, entryId);
@@ -74,4 +95,11 @@ export class WorkReportEntryReadService {
       return null;
     }
   }
+}
+
+function shouldFallbackToSqlite(error: unknown): boolean {
+  if (error instanceof HttpError) {
+    return error.statusCode >= 500;
+  }
+  return true;
 }

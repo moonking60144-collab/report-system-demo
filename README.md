@@ -36,7 +36,40 @@ npm run dev
 
 ![系統架構圖](docs/architecture.png)
 
-讀寫分離（CQRS）：報工寫入先經 Backend 處理業務邏輯，再同步回 Ragic（唯一真實來源），同時重算寫入 SQLite 讀模型；前端讀取一律走讀模型，熱查詢從 300ms 以上壓到 10ms 以內。
+讀寫分離（CQRS）：報工寫入先經 Backend 處理業務邏輯，再同步回上游（唯一真實來源），同時投影到 SQLite 讀模型；前端熱查詢優先讀 SQLite active generation，缺 snapshot 或過舊時才 fallback 到上游。Demo mode 仍保留這條資料流，只把外部 SaaS 換成記憶體 mock fixture，不同步任何真實資料。
+
+### 資料流：SQLite generation swap
+
+Demo 版啟動後會在 1 秒內自動同步 Form 104 / 105 到 SQLite。同步不是在 live table 上長時間 `DELETE + INSERT`，而是寫入新的 `generation_id`，完成後才用很短的狀態更新把 `active_generation_id` 切過去。這讓前端讀取期間不會看到半套資料；同步失敗時，舊 generation 仍可讀。
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant UI as React UI
+  participant API as Express API
+  participant RM as SQLite read model
+  participant Sync as Sync worker
+  participant Upstream as Mock upstream / real SaaS
+
+  UI->>API: GET /api/forms/104/reports
+  API->>RM: read active_generation_id
+  alt active generation exists and fresh
+    RM-->>API: preview rows from active generation
+    API-->>UI: low-latency list response
+  else no readable snapshot
+    API->>Upstream: fallback live read
+    Upstream-->>API: current records
+    API-->>UI: live response
+  end
+
+  Sync->>Upstream: scan Form 104 / 105
+  Upstream-->>Sync: records
+  Sync->>RM: insert records with new generation_id
+  Sync->>RM: replay projection events captured during sync
+  Sync->>RM: promote active_generation_id
+  Sync-->>UI: SSE form updated
+  UI->>API: background refresh without clearing current screen
+```
 
 ---
 
@@ -51,6 +84,8 @@ npm run dev
 - **Read/Write retry** — 分讀寫策略，read 可重試、create 不重試（避免重複建立）
 
 ### 讀取分層（[backend/src/services/work-report/](backend/src/services/work-report/)）
+- **SQLite active generation**：列表、詳情、分面統計優先讀 `active_generation_id`，同步期間舊 snapshot 仍可服務前景請求
+- **Generation swap**：全量同步寫入新世代，完成後再切 active pointer，避免半套資料與 UI 閃爍
 - **三層快取**：node-cache（記憶體）+ full snapshot cache（檔案）+ SQLite read model
 - **Preview-first**：列表預設只讀主表欄位、面板互動才 on-demand full hydration
 - **Stale-while-revalidate** 模式 + 啟動預熱（demo 下關閉）
@@ -83,18 +118,26 @@ npm run dev
 
 | 元件 | 真實版 | Demo 版 |
 |---|---|---|
-| 上游讀寫 | HTTPS → `demo.local/...` | 記憶體 Map，毫秒回應 |
-| SQLite read model | 啟動同步 | 仍可用，但預設不預載（避免冷啟動延遲）|
+| 上游讀寫 | HTTPS → SaaS form API | 記憶體 Map，毫秒回應 |
+| SQLite read model | 啟動同步 / callback 投影 | Demo 啟動 1 秒後自動同步 104 / 105，讀取優先走 active generation |
 | Token bucket / scheduler | 真正排程 | 仍運作，stats 可從 [debug clients](backend/src/routes/debugClients.ts) 看到 |
 | SSE 推送 | 真實 | 真實 |
 | Idempotency | clientRowKey ↔ 上游 rowId | clientRowKey ↔ mock ID |
 | Form 16 連動 | 上游 workflow | mockClient.propagateForm16ToParentSubtable |
-| 預熱 / 自動同步 | 啟用 | 預設關閉（無外部 SaaS 可同步） |
+| 預熱 / 自動同步 | 啟用 | full-cache prewarm 關閉；104 / 105 SQLite auto-sync 開啟 |
 
 實作：
 - **替換點**：[backend/src/ragic/client.ts](backend/src/ragic/client.ts) 出口處 `createRagicClient()` 依 `env.DEMO_MODE` 決定 export `RagicClient` 還是 in-memory mock client
 - **業務邏輯零修改**：所有 routes / services / hooks 都用同一個 `ragicClient`，沒人知道底下是 mock 還是 SaaS
-- **環境變數注入**：[backend/src/config/env.ts](backend/src/config/env.ts) 在 `DEMO_MODE=true` 時自動填入必填的上游 env 預設值，免設定即可啟動
+- **環境變數注入**：[backend/src/config/env.ts](backend/src/config/env.ts) 在 `DEMO_MODE=true` 時自動填入必填的上游 env 預設值，並自動啟用 104 / 105 SQLite read-model + auto-sync
+
+啟動後可以用 log 確認 generation swap 已啟動：
+
+```text
+[sqlite-auto-sync-scheduled] { forms: [ '104', '105' ], ... }
+[work-report-debug] { scope: 'sync', action: 'succeeded', formId: '104', activeGenerationId: '...', syncedEntries: 80, syncedRows: 430 }
+[work-report-debug] { scope: 'sync', action: 'succeeded', formId: '105', activeGenerationId: '...', syncedEntries: 30, syncedRows: 76 }
+```
 
 ---
 
@@ -149,5 +192,3 @@ Demo 下可直接 curl 試：
 ```bash
 curl http://localhost:3000/api/forms/104/reports?limit=5
 ```
-
-

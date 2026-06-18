@@ -199,10 +199,17 @@ export function buildEntryWhereClauses(
   formId: string,
   options:
     | SqliteReportQueryOptions
-    | (ReportFacetQueryOptions & { entryId?: string })
+    | (ReportFacetQueryOptions & { entryId?: string }),
+  generationId?: string
 ): { whereClauses: string[]; whereParams: Array<string | number> } {
   const whereClauses: string[] = ["form_id = ?"];
   const whereParams: Array<string | number> = [formId];
+
+  const normalizedGenerationId = toNullableText(generationId);
+  if (normalizedGenerationId) {
+    whereClauses.push("generation_id = ?");
+    whereParams.push(normalizedGenerationId);
+  }
 
   const entryId = toNullableText(options.entryId);
   if (entryId) {

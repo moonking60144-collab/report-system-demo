@@ -97,12 +97,16 @@ if (isDemoMode) {
   process.env.RAGIC_SOURCE_MACHINE ??= "/default/forms51/1";
   process.env.RAGIC_SOURCE_OPERATOR ??= "/default/forms11/13";
   process.env.RAGIC_SOURCE_PROCESS ??= "/default/forms51/3";
-  // demo 下 SQLite read model 不預讀，所有讀取走 mock，看到的是「第一手」資料路徑
-  process.env.SQLITE_READ_FORMS ??= "";
-  // 啟動預熱不做（mock 即時回應，沒必要佔 lane）
+  // demo 預設直接展示 SQLite read-model + generation swap：
+  // 104/105 列表 / 詳情優先走本地 snapshot，server 啟動後再用第一輪 auto-sync 建好基準。
+  // 在第一輪 sync 完成前仍會 fallback 到 mock live 讀取，不會卡死。
+  process.env.SQLITE_READ_FORMS ??= "104,105";
+  process.env.SQLITE_AUTO_SYNC_FORMS ??= "104,105";
+  process.env.SQLITE_AUTO_SYNC_ENABLED ??= "true";
+  process.env.SQLITE_AUTO_SYNC_STARTUP_DELAY_MS ??= "1000";
+  // 啟動預熱不做；104 已切 SQLite read-model，full-cache prewarm 反而是舊路徑雜訊
   process.env.REPORT_FULL_CACHE_PREWARM_ON_START ??= "false";
   process.env.FORM16_SQLITE_AUTO_SYNC_ENABLED ??= "false";
-  process.env.SQLITE_AUTO_SYNC_ENABLED ??= "false";
   process.env.RUNTIME_HEALTH_LOG_ENABLED ??= "false";
   process.env.FORM16_ORPHAN_CLEANUP_ENABLED ??= "false";
   process.env.CORS_ORIGIN ??= "http://localhost:5173,http://localhost:5174";
@@ -278,6 +282,10 @@ export const env = {
   SQLITE_ENABLED: readBooleanEnv("SQLITE_ENABLED", true),
   SQLITE_READ_ENABLED: readBooleanEnv("SQLITE_READ_ENABLED", true),
   SQLITE_READ_FORMS: readStringListEnv("SQLITE_READ_FORMS", ["105"]),
+  SQLITE_READ_MAX_STALENESS_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("SQLITE_READ_MAX_STALENESS_MS", 2 * 60 * 60 * 1000))
+  ),
   SQLITE_DB_FILE:
     process.env.SQLITE_DB_FILE ?? "./.cache/work-report-read-model.v1.sqlite3",
   SQLITE_SYNC_BATCH_SIZE: Math.max(

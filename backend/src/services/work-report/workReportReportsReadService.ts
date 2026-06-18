@@ -12,6 +12,7 @@ import type {
   ReportQueryResult,
   WorkReportRecord,
 } from "../../types/workReport";
+import { HttpError } from "../../utils/httpError";
 import { reportFullSnapshotService } from "../reportFullSnapshotService";
 import { resolveSqliteFullReportsCacheState } from "./readModelState";
 import { mapFields, resolveCandidateFieldKeys } from "./queries/rowTransform";
@@ -224,6 +225,13 @@ export class WorkReportReportsReadService {
       if (sqliteResult) {
         return sqliteResult;
       }
+      if (this.support.shouldUseSqliteRead(formId)) {
+        throw new HttpError(
+          503,
+          "報表索引尚未可讀，請稍後重試或先執行同步。",
+          "SQLITE_READ_MODEL_UNAVAILABLE"
+        );
+      }
     }
 
     const sourceRecords = (await this.getFullReports(formId, { refresh: Boolean(options.refresh) })).data;
@@ -240,7 +248,7 @@ export class WorkReportReportsReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState)) {
+      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
         return null;
       }
 
@@ -268,7 +276,7 @@ export class WorkReportReportsReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState)) {
+      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
         return null;
       }
 
@@ -305,7 +313,7 @@ export class WorkReportReportsReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState)) {
+      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
         return null;
       }
       return await workReportSqliteRepository.getReports(formId, {

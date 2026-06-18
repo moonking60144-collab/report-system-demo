@@ -213,6 +213,68 @@
   font-size: 13px;
 }
 
+/* === Demo data flow === */
+
+.dev-mode-dataflow {
+  margin-bottom: 20px;
+  padding: 12px 16px 16px;
+  background: linear-gradient(135deg, rgba(31, 111, 235, 0.1), rgba(35, 134, 54, 0.08));
+  border: var(--dev-border-hairline) solid rgba(88, 166, 255, 0.24);
+  border-radius: var(--dev-radius-md);
+}
+
+.dev-mode-dataflow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dev-mode-dataflow-card {
+  position: relative;
+  min-height: 108px;
+  padding: 12px 14px 12px 44px;
+  border: var(--dev-border-hairline) solid var(--dev-border-subtle);
+  border-radius: var(--dev-radius-md);
+  background: rgba(13, 17, 23, 0.58);
+}
+
+.dev-mode-dataflow-step {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(88, 166, 255, 0.18);
+  color: var(--dev-accent-strong);
+  border: var(--dev-border-hairline) solid rgba(88, 166, 255, 0.4);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dev-mode-dataflow-card h3 {
+  margin: 0 0 6px;
+  color: var(--dev-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dev-mode-dataflow-card p {
+  margin: 0;
+  color: var(--dev-text-muted);
+  line-height: 1.55;
+  font-size: 12px;
+}
+
+.dev-mode-dataflow-card code {
+  color: var(--dev-accent-strong);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
 .dev-mode-quicklinks {
   margin-bottom: 20px;
 }

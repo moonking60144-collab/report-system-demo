@@ -85,7 +85,9 @@ export class WorkReportReadService {
     entryId: string,
     options: {
       refresh?: boolean;
+      allowSqliteFallbackOnRefresh?: boolean;
       ragicReadTimeoutMs?: number;
+      ragicReadMaxRetries?: number;
       priority?: RagicReadPriority;
     } = {}
   ): Promise<WorkReportRecord> {
