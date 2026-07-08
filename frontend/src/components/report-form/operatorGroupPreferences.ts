@@ -12,8 +12,8 @@ export const ALL_OPERATOR_GROUP_KEY = "__all__";
 const STORAGE_KEY = "work-report:operator-group-preference:v1";
 
 const DEFAULT_OPERATOR_GROUP_BY_FORM: Record<WorkReportFormId, string> = {
-  "104": "DEPT-PROCA",
-  "105": "DEPT-FORGE",
+  "104": "C02搓牙組",
+  "105": "C01鍛造組",
 };
 
 function normalizeText(value: unknown): string {

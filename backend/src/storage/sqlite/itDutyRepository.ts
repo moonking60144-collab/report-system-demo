@@ -1,6 +1,7 @@
 import type { Database } from "sqlite";
-import { sqliteClient } from "./sqliteClient";
+import { createConnectionSerializer, sqliteClient } from "./sqliteClient";
 import type {
+  ItDutyDayNote,
   ItDutyDaySwap,
   ItDutyDaySwapReason,
   ItDutyDebtEntry,
@@ -29,6 +30,8 @@ interface ItDutyOverrideRow {
 
 interface ItDutySettingRow {
   weeks_per_slot: number;
+  anchor_iso_week: string | null;
+  anchor_member_id: number | null;
   updated_at: string;
 }
 
@@ -40,6 +43,15 @@ interface ItDutyDaySwapRow {
   reason: string;
   paired_swap_id: number | null;
   note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ItDutyDayNoteRow {
+  id: number;
+  note_date: string;
+  note: string;
+  updated_by_label: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -87,6 +99,17 @@ function mapDaySwap(row: ItDutyDaySwapRow): ItDutyDaySwap {
   };
 }
 
+function mapDayNote(row: ItDutyDayNoteRow): ItDutyDayNote {
+  return {
+    id: row.id,
+    noteDate: row.note_date,
+    note: row.note,
+    updatedByLabel: row.updated_by_label,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function mapSetting(row: ItDutySettingRow): ItDutySetting {
   const weeks =
     typeof row.weeks_per_slot === "number" && Number.isFinite(row.weeks_per_slot)
@@ -94,8 +117,27 @@ function mapSetting(row: ItDutySettingRow): ItDutySetting {
       : 1;
   return {
     weeksPerSlot: Math.min(Math.max(weeks, MIN_WEEKS_PER_SLOT), MAX_WEEKS_PER_SLOT),
+    anchorIsoWeek: row.anchor_iso_week,
+    anchorMemberId: row.anchor_member_id,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * ISO 8601 週號計算（server side、不依賴 dayjs）
+ * 回傳 'YYYY-Www' 格式（W01..W53），用 local time（部署假設 server TZ = 台灣）。
+ */
+function formatIsoWeekFromDate(date: Date): string {
+  // 標準 ISO week 算法：先把 target 移到該週的 Thursday，再算 Thursday 在當年的第幾天
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayOfWeek = target.getDay() || 7; // 1..7，Monday=1，Sunday=7
+  target.setDate(target.getDate() + 4 - dayOfWeek); // 移到 ISO week 的 Thursday
+  const isoYear = target.getFullYear();
+  const yearStart = new Date(isoYear, 0, 1);
+  const weekNo = Math.ceil(
+    ((target.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7
+  );
+  return `${isoYear}-W${String(weekNo).padStart(2, "0")}`;
 }
 
 export interface ItDutyRepository {
@@ -162,33 +204,30 @@ export interface ItDutyRepository {
   deleteSwap(id: number): Promise<boolean>;
   /** 計算各對成員之間「未清算」的 leave 天數（debtor 欠 creditor 多少天） */
   listDebts(): Promise<ItDutyDebtEntry[]>;
+
+  // === 日級純備註（跟代班 / 債務系統完全解耦） ===
+  listAllDayNotes(): Promise<ItDutyDayNote[]>;
+  listDayNotesInRange(fromDate: string, toDate: string): Promise<ItDutyDayNote[]>;
+  getDayNote(noteDate: string): Promise<ItDutyDayNote | null>;
+  /** 同日已存 → 覆蓋；不存在 → 新建。輸入由 route 驗證、repo 不再重覆檢查 */
+  upsertDayNote(input: {
+    noteDate: string;
+    note: string;
+    updatedByLabel?: string | null;
+  }): Promise<ItDutyDayNote>;
+  deleteDayNote(noteDate: string): Promise<boolean>;
 }
 
 export function createItDutyRepository(
-  getDb: () => Promise<Database>
+  getDb: () => Promise<Database>,
+  getReadDb: () => Promise<Database> = getDb
 ): ItDutyRepository {
-  let writeChain: Promise<void> = Promise.resolve();
-
-  async function runSerializedWrite<T>(
-    operation: (db: Database) => Promise<T>
-  ): Promise<T> {
-    const scheduled = writeChain
-      .catch(() => {
-        // 避免前一次失敗讓後續寫入鏈卡死
-      })
-      .then(async () => operation(await getDb()));
-
-    writeChain = scheduled.then(
-      () => undefined,
-      () => undefined
-    );
-
-    return scheduled;
-  }
+  const { runSerializedWrite, withWriteTransaction } =
+    createConnectionSerializer(getDb);
 
   return {
     async listMembers() {
-      const db = await getDb();
+      const db = await getReadDb();
       const rows = await db.all<ItDutyMemberRow[]>(
         `
         SELECT id, name, sort_order, active, created_at, updated_at
@@ -200,7 +239,7 @@ export function createItDutyRepository(
     },
 
     async getMember(id) {
-      const db = await getDb();
+      const db = await getReadDb();
       const row = await db.get<ItDutyMemberRow>(
         `
         SELECT id, name, sort_order, active, created_at, updated_at
@@ -307,40 +346,34 @@ export function createItDutyRepository(
     },
 
     async reorderMembers(orderedIds) {
-      return runSerializedWrite(async (db) => {
-        await db.exec("BEGIN IMMEDIATE TRANSACTION");
-        try {
-          const now = new Date().toISOString();
-          for (let i = 0; i < orderedIds.length; i += 1) {
-            await db.run(
-              `
-              UPDATE it_duty_member
-              SET sort_order = ?, updated_at = ?
-              WHERE id = ?
-              `,
-              i,
-              now,
-              orderedIds[i]
-            );
-          }
-          await db.exec("COMMIT");
-        } catch (error) {
-          await db.exec("ROLLBACK");
-          throw error;
+      await withWriteTransaction(async (db) => {
+        const now = new Date().toISOString();
+        for (let i = 0; i < orderedIds.length; i += 1) {
+          await db.run(
+            `
+            UPDATE it_duty_member
+            SET sort_order = ?, updated_at = ?
+            WHERE id = ?
+            `,
+            i,
+            now,
+            orderedIds[i]
+          );
         }
-        const rows = await db.all<ItDutyMemberRow[]>(
-          `
-          SELECT id, name, sort_order, active, created_at, updated_at
-          FROM it_duty_member
-          ORDER BY sort_order ASC, id ASC
-          `
-        );
-        return rows.map(mapMember);
       });
+      const db = await getReadDb();
+      const rows = await db.all<ItDutyMemberRow[]>(
+        `
+        SELECT id, name, sort_order, active, created_at, updated_at
+        FROM it_duty_member
+        ORDER BY sort_order ASC, id ASC
+        `
+      );
+      return rows.map(mapMember);
     },
 
     async listOverridesInRange(fromIsoWeek, toIsoWeek) {
-      const db = await getDb();
+      const db = await getReadDb();
       const rows = await db.all<ItDutyOverrideRow[]>(
         `
         SELECT iso_week, member_id, note, propagate_forward, updated_at, updated_by_label
@@ -355,7 +388,7 @@ export function createItDutyRepository(
     },
 
     async listAllOverrides() {
-      const db = await getDb();
+      const db = await getReadDb();
       const rows = await db.all<ItDutyOverrideRow[]>(
         `
         SELECT iso_week, member_id, note, propagate_forward, updated_at, updated_by_label
@@ -367,7 +400,7 @@ export function createItDutyRepository(
     },
 
     async getMostRecentOverride(beforeOrEqualIsoWeek) {
-      const db = await getDb();
+      const db = await getReadDb();
       const row = await db.get<ItDutyOverrideRow>(
         `
         SELECT iso_week, member_id, note, propagate_forward, updated_at, updated_by_label
@@ -434,14 +467,86 @@ export function createItDutyRepository(
     },
 
     async getSetting() {
-      const db = await getDb();
+      const db = await getReadDb();
       const row = await db.get<ItDutySettingRow>(
-        "SELECT weeks_per_slot, updated_at FROM it_duty_setting WHERE id = 1"
+        `SELECT weeks_per_slot, anchor_iso_week, anchor_member_id, updated_at
+         FROM it_duty_setting WHERE id = 1`
       );
       if (!row) {
         // schema 啟動時就 INSERT OR IGNORE 一筆，理論上不該發生；fallback 預設值
-        return { weeksPerSlot: 1, updatedAt: "1970-01-01T00:00:00.000Z" };
+        return {
+          weeksPerSlot: 1,
+          anchorIsoWeek: null,
+          anchorMemberId: null,
+          updatedAt: "1970-01-01T00:00:00.000Z",
+        };
       }
+
+      // ===== Anchor seed / member invalidation =====
+      // 兩種需要動 anchor 的情境：
+      //   (1) anchor_iso_week IS NULL：第一次有 member、首次 seed
+      //   (2) anchor_member_id 不在 active members 內：member 被刪/停用、
+      //       需用最早 active member refill（保留 anchor_iso_week 不變）
+      const earliestActive = await db.get<{ id: number }>(
+        `SELECT id FROM it_duty_member
+         WHERE active = 1
+         ORDER BY sort_order ASC, id ASC
+         LIMIT 1`
+      );
+      const earliestActiveId = earliestActive?.id ?? null;
+
+      let nextAnchorIsoWeek = row.anchor_iso_week;
+      let nextAnchorMemberId = row.anchor_member_id;
+      let needWrite = false;
+
+      if (nextAnchorIsoWeek === null) {
+        // 情境 (1)：只有當下有 active member 才 seed；否則保持 NULL
+        if (earliestActiveId !== null) {
+          nextAnchorIsoWeek = formatIsoWeekFromDate(new Date());
+          nextAnchorMemberId = earliestActiveId;
+          needWrite = true;
+        }
+      } else {
+        // 情境 (2)：anchor 已存在但 member 失效（NULL 或不在 active list）
+        const memberStillActive =
+          nextAnchorMemberId !== null &&
+          (await db.get<{ id: number }>(
+            `SELECT id FROM it_duty_member
+             WHERE id = ? AND active = 1`,
+            nextAnchorMemberId
+          ));
+        if (!memberStillActive) {
+          if (earliestActiveId !== null) {
+            nextAnchorMemberId = earliestActiveId;
+            needWrite = true;
+          } else if (nextAnchorMemberId !== null) {
+            // 沒任何 active member → 把 anchor_member_id 設成 NULL
+            nextAnchorMemberId = null;
+            needWrite = true;
+          }
+        }
+      }
+
+      if (needWrite) {
+        const now = new Date().toISOString();
+        await runSerializedWrite(async (writeDb) => {
+          await writeDb.run(
+            `UPDATE it_duty_setting
+             SET anchor_iso_week = ?, anchor_member_id = ?, updated_at = ?
+             WHERE id = 1`,
+            nextAnchorIsoWeek,
+            nextAnchorMemberId,
+            now
+          );
+        });
+        return mapSetting({
+          ...row,
+          anchor_iso_week: nextAnchorIsoWeek,
+          anchor_member_id: nextAnchorMemberId,
+          updated_at: now,
+        });
+      }
+
       return mapSetting(row);
     },
 
@@ -452,20 +557,17 @@ export function createItDutyRepository(
           MAX_WEEKS_PER_SLOT
         );
         const now = new Date().toISOString();
+        // 只更新 weeks_per_slot；不動 anchor 欄位（anchor 只由 getSetting 維護）
         await db.run(
-          `
-          INSERT INTO it_duty_setting (id, weeks_per_slot, updated_at)
-          VALUES (1, ?, ?)
-          ON CONFLICT(id)
-          DO UPDATE SET
-            weeks_per_slot = excluded.weeks_per_slot,
-            updated_at = excluded.updated_at
-          `,
+          `UPDATE it_duty_setting
+           SET weeks_per_slot = ?, updated_at = ?
+           WHERE id = 1`,
           clamped,
           now
         );
         const row = await db.get<ItDutySettingRow>(
-          "SELECT weeks_per_slot, updated_at FROM it_duty_setting WHERE id = 1"
+          `SELECT weeks_per_slot, anchor_iso_week, anchor_member_id, updated_at
+           FROM it_duty_setting WHERE id = 1`
         );
         if (!row) {
           throw new Error("Failed to load it_duty_setting after upsert");
@@ -475,7 +577,7 @@ export function createItDutyRepository(
     },
 
     async listSwapsInRange(fromDate, toDate) {
-      const db = await getDb();
+      const db = await getReadDb();
       const rows = await db.all<ItDutyDaySwapRow[]>(
         `
         SELECT id, cover_date, original_member_id, cover_member_id,
@@ -491,7 +593,7 @@ export function createItDutyRepository(
     },
 
     async listAllSwaps() {
-      const db = await getDb();
+      const db = await getReadDb();
       const rows = await db.all<ItDutyDaySwapRow[]>(
         `
         SELECT id, cover_date, original_member_id, cover_member_id,
@@ -504,7 +606,7 @@ export function createItDutyRepository(
     },
 
     async getSwapById(id) {
-      const db = await getDb();
+      const db = await getReadDb();
       const row = await db.get<ItDutyDaySwapRow>(
         `
         SELECT id, cover_date, original_member_id, cover_member_id,
@@ -561,114 +663,99 @@ export function createItDutyRepository(
       if (!DATE_REGEX.test(input.coverDate)) {
         throw new Error(`Invalid coverDate: ${input.coverDate}`);
       }
-      return runSerializedWrite(async (db) => {
-        await db.exec("BEGIN IMMEDIATE TRANSACTION");
-        try {
-          // 1) 找目標 leave swap，必須 reason='leave' 且未配對
-          const leaveRow = await db.get<ItDutyDaySwapRow>(
-            `
-            SELECT id, cover_date, original_member_id, cover_member_id,
-                   reason, paired_swap_id, note, created_at, updated_at
-            FROM it_duty_day_swap
-            WHERE id = ? AND reason = 'leave' AND paired_swap_id IS NULL
-            `,
-            input.pairLeaveSwapId
+      return withWriteTransaction(async (db) => {
+        // 1) 找目標 leave swap，必須 reason='leave' 且未配對
+        const leaveRow = await db.get<ItDutyDaySwapRow>(
+          `
+          SELECT id, cover_date, original_member_id, cover_member_id,
+                 reason, paired_swap_id, note, created_at, updated_at
+          FROM it_duty_day_swap
+          WHERE id = ? AND reason = 'leave' AND paired_swap_id IS NULL
+          `,
+          input.pairLeaveSwapId
+        );
+        if (!leaveRow) {
+          throw new Error(
+            `Target leave swap not found or already paired: id=${input.pairLeaveSwapId}`
           );
-          if (!leaveRow) {
-            throw new Error(
-              `Target leave swap not found or already paired: id=${input.pairLeaveSwapId}`
-            );
-          }
-          // 2) 建 repay swap：原值班 = leave 的代班 (B)、代班 = leave 的原值班 (A)
-          const now = new Date().toISOString();
-          const result = await db.run(
-            `
-            INSERT INTO it_duty_day_swap (
-              cover_date, original_member_id, cover_member_id, reason,
-              paired_swap_id, note, created_at, updated_at
-            ) VALUES (?, ?, ?, 'repay', ?, ?, ?, ?)
-            `,
-            input.coverDate,
-            leaveRow.cover_member_id,
-            leaveRow.original_member_id,
-            leaveRow.id,
-            input.note ?? null,
-            now,
-            now
-          );
-          const repayId = result.lastID;
-          if (typeof repayId !== "number") {
-            throw new Error("Failed to insert repay swap");
-          }
-          // 3) 雙向 link
-          await db.run(
-            `UPDATE it_duty_day_swap SET paired_swap_id = ? WHERE id = ?`,
-            repayId,
-            leaveRow.id
-          );
-          const updatedLeave = await db.get<ItDutyDaySwapRow>(
-            `
-            SELECT id, cover_date, original_member_id, cover_member_id,
-                   reason, paired_swap_id, note, created_at, updated_at
-            FROM it_duty_day_swap WHERE id = ?
-            `,
-            leaveRow.id
-          );
-          const newRepay = await db.get<ItDutyDaySwapRow>(
-            `
-            SELECT id, cover_date, original_member_id, cover_member_id,
-                   reason, paired_swap_id, note, created_at, updated_at
-            FROM it_duty_day_swap WHERE id = ?
-            `,
-            repayId
-          );
-          if (!updatedLeave || !newRepay) {
-            throw new Error("Failed to reload swap rows after pairing");
-          }
-          await db.exec("COMMIT");
-          return {
-            leave: mapDaySwap(updatedLeave),
-            repay: mapDaySwap(newRepay),
-          };
-        } catch (error) {
-          await db.exec("ROLLBACK");
-          throw error;
         }
+        // 2) 建 repay swap：原值班 = leave 的代班 (B)、代班 = leave 的原值班 (A)
+        const now = new Date().toISOString();
+        const result = await db.run(
+          `
+          INSERT INTO it_duty_day_swap (
+            cover_date, original_member_id, cover_member_id, reason,
+            paired_swap_id, note, created_at, updated_at
+          ) VALUES (?, ?, ?, 'repay', ?, ?, ?, ?)
+          `,
+          input.coverDate,
+          leaveRow.cover_member_id,
+          leaveRow.original_member_id,
+          leaveRow.id,
+          input.note ?? null,
+          now,
+          now
+        );
+        const repayId = result.lastID;
+        if (typeof repayId !== "number") {
+          throw new Error("Failed to insert repay swap");
+        }
+        // 3) 雙向 link
+        await db.run(
+          `UPDATE it_duty_day_swap SET paired_swap_id = ? WHERE id = ?`,
+          repayId,
+          leaveRow.id
+        );
+        const updatedLeave = await db.get<ItDutyDaySwapRow>(
+          `
+          SELECT id, cover_date, original_member_id, cover_member_id,
+                 reason, paired_swap_id, note, created_at, updated_at
+          FROM it_duty_day_swap WHERE id = ?
+          `,
+          leaveRow.id
+        );
+        const newRepay = await db.get<ItDutyDaySwapRow>(
+          `
+          SELECT id, cover_date, original_member_id, cover_member_id,
+                 reason, paired_swap_id, note, created_at, updated_at
+          FROM it_duty_day_swap WHERE id = ?
+          `,
+          repayId
+        );
+        if (!updatedLeave || !newRepay) {
+          throw new Error("Failed to reload swap rows after pairing");
+        }
+        return {
+          leave: mapDaySwap(updatedLeave),
+          repay: mapDaySwap(newRepay),
+        };
       });
     },
 
     async deleteSwap(id) {
       // 刪除一筆 swap 時，若有配對，連配對方一起刪 — 避免變成 orphan repay
       // (例如刪 leave 留 repay → B 突然「被代班」沒任何 leave 對應，邏輯上沒意義)
-      return runSerializedWrite(async (db) => {
-        await db.exec("BEGIN IMMEDIATE TRANSACTION");
-        try {
-          const swap = await db.get<{ id: number; paired_swap_id: number | null }>(
-            "SELECT id, paired_swap_id FROM it_duty_day_swap WHERE id = ?",
-            id
-          );
-          if (!swap) {
-            await db.exec("COMMIT");
-            return false;
-          }
-          if (swap.paired_swap_id) {
-            await db.run(
-              "DELETE FROM it_duty_day_swap WHERE id = ?",
-              swap.paired_swap_id
-            );
-          }
-          await db.run("DELETE FROM it_duty_day_swap WHERE id = ?", id);
-          await db.exec("COMMIT");
-          return true;
-        } catch (error) {
-          await db.exec("ROLLBACK");
-          throw error;
+      return withWriteTransaction(async (db) => {
+        const swap = await db.get<{ id: number; paired_swap_id: number | null }>(
+          "SELECT id, paired_swap_id FROM it_duty_day_swap WHERE id = ?",
+          id
+        );
+        if (!swap) {
+          return false;
         }
+        if (swap.paired_swap_id) {
+          await db.run(
+            "DELETE FROM it_duty_day_swap WHERE id = ?",
+            swap.paired_swap_id
+          );
+        }
+        await db.run("DELETE FROM it_duty_day_swap WHERE id = ?", id);
+        return true;
       });
     },
 
     async listDebts() {
-      const db = await getDb();
+      const db = await getReadDb();
       // 未配對的 leave 才算未清算
       const rows = await db.all<
         Array<{ original_member_id: number; cover_member_id: number; cnt: number }>
@@ -687,9 +774,96 @@ export function createItDutyRepository(
         unsettledDays: r.cnt,
       }));
     },
+
+    // === 日級純備註 ===
+    // 輸入驗證（date 格式、空字串、長度）統一由 route 層處理，repo 不再重覆。
+
+    async listAllDayNotes() {
+      const db = await getReadDb();
+      const rows = await db.all<ItDutyDayNoteRow[]>(
+        `
+        SELECT id, note_date, note, updated_by_label, created_at, updated_at
+        FROM it_duty_day_note
+        ORDER BY note_date ASC
+        `
+      );
+      return rows.map(mapDayNote);
+    },
+
+    async listDayNotesInRange(fromDate, toDate) {
+      const db = await getReadDb();
+      const rows = await db.all<ItDutyDayNoteRow[]>(
+        `
+        SELECT id, note_date, note, updated_by_label, created_at, updated_at
+        FROM it_duty_day_note
+        WHERE note_date >= ? AND note_date <= ?
+        ORDER BY note_date ASC
+        `,
+        fromDate,
+        toDate
+      );
+      return rows.map(mapDayNote);
+    },
+
+    async getDayNote(noteDate) {
+      const db = await getReadDb();
+      const row = await db.get<ItDutyDayNoteRow>(
+        `
+        SELECT id, note_date, note, updated_by_label, created_at, updated_at
+        FROM it_duty_day_note
+        WHERE note_date = ?
+        `,
+        noteDate
+      );
+      return row ? mapDayNote(row) : null;
+    },
+
+    async upsertDayNote(input) {
+      return runSerializedWrite(async (db) => {
+        const now = new Date().toISOString();
+        await db.run(
+          `
+          INSERT INTO it_duty_day_note (note_date, note, updated_by_label, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(note_date) DO UPDATE SET
+            note = excluded.note,
+            updated_by_label = excluded.updated_by_label,
+            updated_at = excluded.updated_at
+          `,
+          input.noteDate,
+          input.note,
+          input.updatedByLabel ?? null,
+          now,
+          now
+        );
+        const row = await db.get<ItDutyDayNoteRow>(
+          `
+          SELECT id, note_date, note, updated_by_label, created_at, updated_at
+          FROM it_duty_day_note
+          WHERE note_date = ?
+          `,
+          input.noteDate
+        );
+        if (!row) {
+          throw new Error("day_note missing after upsert");
+        }
+        return mapDayNote(row);
+      });
+    },
+
+    async deleteDayNote(noteDate) {
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          "DELETE FROM it_duty_day_note WHERE note_date = ?",
+          noteDate
+        );
+        return typeof result.changes === "number" && result.changes > 0;
+      });
+    },
   };
 }
 
 export const itDutyRepository: ItDutyRepository = createItDutyRepository(() =>
-  sqliteClient.getDb()
+  sqliteClient.getDb(),
+  () => sqliteClient.getReadDb()
 );

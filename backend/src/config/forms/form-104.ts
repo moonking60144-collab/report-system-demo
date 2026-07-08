@@ -3,7 +3,7 @@ import { FormConfig } from "../../types/formConfig";
 
 export const FORM_104_CONFIG: FormConfig = {
   formId: "104",
-  formName: "[104] Work Order Report — Process A",
+  formName: "[104] 工令單搓牙報工+排程",
   ragicPath: env.RAGIC_FORM_104_PATH,
   mainFields: {
     // NOTE: /forms API 的分頁結果目前回欄位「名稱」鍵，不是欄位 ID。
@@ -36,7 +36,7 @@ export const FORM_104_CONFIG: FormConfig = {
     finishedWireSize: "成品線徑",
     status: "工令狀態",
     ragicUnfinishedStatus: "更新[未結案]判斷",
-    misCloseStatus: "結案狀態",
+    misCloseStatus: "[MIS]結案狀態",
     workOrderRemark: "工令單備註",
     productUsageType: "產品料號用途種類",
     moldCondition: "模具況狀",
@@ -143,6 +143,7 @@ export const FORM_104_CONFIG: FormConfig = {
     subtableId: "_subtable_1002178",
     requiredFields: [
       "date",
+      "processCode",
       "machineId",
       "operatorId",
       "startTime",

@@ -50,7 +50,9 @@ systemNoticeRouter.post(
     const body = req.body as Record<string, unknown> | undefined;
     const username = body?.username;
     const password = body?.password;
-    const result = await systemNoticeService.login(username, password);
+    const result = await systemNoticeService.login(username, password, {
+      rateLimitKey: req.ip || req.socket.remoteAddress || "unknown",
+    });
     res.json({ data: result });
   })
 );

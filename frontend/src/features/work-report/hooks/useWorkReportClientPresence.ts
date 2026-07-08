@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ackDebugClientCommands,
+  fetchDebugClientCommands,
   reportDebugClientDisconnect,
   reportDebugClientPresence,
   sendDebugClientDisconnectBeacon,
   type DebugClientCommand,
   type DebugClientPresence,
 } from "../../../api/debugClients";
-import { getOrCreateClientBootId, getOrCreateClientId, getOrCreateTabId } from "../debug/clientIdentity";
+import { getOrCreateClientBootId, getOrCreateClientId, getOrCreateTabId } from "../../../utils/clientIdentity";
 
 // presence 改事件驅動：SSE 連線當 heartbeat（backend /events route 會寫 presence.connected），
 // 此 hook 只在狀態變動（path/form/entry/topView/realtime 翻）時送 presence 補 state 欄位。
@@ -35,6 +37,7 @@ export function useWorkReportClientPresence({
   const tabId = useMemo(() => getOrCreateTabId(), []);
   const clientBootId = useMemo(() => getOrCreateClientBootId(), []);
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null);
+  const [blockedReason, setBlockedReason] = useState<string | null>(null);
   const [serverBootId, setServerBootId] = useState<string | null>(null);
   const latestStateRef = useRef({
     currentPath,
@@ -73,11 +76,25 @@ export function useWorkReportClientPresence({
     const syncPresenceState = (presence: DebugClientPresence) => {
       setServerBootId(String(presence.serverBootIdAtConnect ?? "").trim() || null);
       setMaintenanceMessage(presence.maintenanceMessage ?? null);
+      setBlockedReason(presence.blocked ? presence.blockedReason ?? "blocked" : null);
     };
 
-    const applyCommands = (commands: DebugClientCommand[]) => {
+    const ackCommands = async (commands: DebugClientCommand[]) => {
+      if (commands.length === 0) return;
+      await ackDebugClientCommands({
+        clientId,
+        tabId,
+        clientBootId,
+        commandIds: commands.map((command) => command.id),
+      });
+    };
+
+    const applyCommands = async (commands: DebugClientCommand[]) => {
+      const appliedCommands: DebugClientCommand[] = [];
       for (const command of commands) {
+        appliedCommands.push(command);
         if (command.type === "force-refresh") {
+          await ackCommands(appliedCommands);
           window.location.reload();
           return;
         }
@@ -89,10 +106,21 @@ export function useWorkReportClientPresence({
           setMaintenanceMessage(null);
           continue;
         }
+        if (command.type === "set-blocked") {
+          setBlockedReason(command.reason ?? command.message ?? "blocked");
+          continue;
+        }
+        if (command.type === "clear-blocked") {
+          setBlockedReason(null);
+          continue;
+        }
         if (command.type === "force-session-expired") {
+          await ackCommands(appliedCommands);
           latestStateRef.current.onForceSessionExpired?.("forced-by-admin");
+          return;
         }
       }
+      await ackCommands(appliedCommands);
     };
 
     const sendPresence = async () => {
@@ -110,7 +138,10 @@ export function useWorkReportClientPresence({
       });
       if (!cancelled) {
         syncPresenceState(result.presence);
-        applyCommands(result.commands);
+        const commands = await fetchDebugClientCommands({ clientId, tabId, clientBootId });
+        if (!cancelled) {
+          await applyCommands(commands);
+        }
       }
     };
     sendPresenceRef.current = sendPresence;
@@ -127,7 +158,7 @@ export function useWorkReportClientPresence({
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const handleDisconnect = () => {
-      const payload = { clientId, tabId };
+      const payload = { clientId, tabId, clientBootId };
       const accepted = sendDebugClientDisconnectBeacon(payload);
       if (!accepted) {
         void reportDebugClientDisconnect(payload).catch(() => {
@@ -166,6 +197,8 @@ export function useWorkReportClientPresence({
     clientId,
     tabId,
     maintenanceMessage,
+    blocked: Boolean(blockedReason),
+    blockedReason,
     serverBootId,
   };
 }

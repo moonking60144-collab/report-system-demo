@@ -159,12 +159,14 @@ export function useWorkReportListData({
   const previewRequestIdRef = useRef(0);
   const hydrateRequestIdRef = useRef(0);
   const previewRequestActiveRef = useRef(false);
+  const foregroundPreviewRequestActiveRef = useRef(false);
   const hydrateRequestActiveRef = useRef(false);
 
   const resetAsyncRequestState = useCallback(() => {
     previewRequestIdRef.current += 1;
     hydrateRequestIdRef.current += 1;
     previewRequestActiveRef.current = false;
+    foregroundPreviewRequestActiveRef.current = false;
     hydrateRequestActiveRef.current = false;
   }, []);
 
@@ -182,13 +184,22 @@ export function useWorkReportListData({
   const loadReports = useCallback(
     async (
       forceRefresh = false,
-      options: { throwOnError?: boolean } = {}
+      options: { throwOnError?: boolean; mode?: "foreground" | "background" } = {}
     ): Promise<void> => {
+      const isBackground = options.mode === "background";
+      if (isBackground && foregroundPreviewRequestActiveRef.current) {
+        return;
+      }
       const requestId = previewRequestIdRef.current + 1;
       previewRequestIdRef.current = requestId;
       previewRequestActiveRef.current = true;
-      setLoading(true);
-      setError(null);
+      if (!isBackground) {
+        foregroundPreviewRequestActiveRef.current = true;
+        setLoading(true);
+      }
+      if (!isBackground) {
+        setError(null);
+      }
 
       try {
         const offset = (page - 1) * pageSize;
@@ -225,14 +236,17 @@ export function useWorkReportListData({
         setRecords(dedupeRecordsById(response.data.map((record) => normalizeRecord(record, false))));
         setHasMore(response.meta.hasMore);
         setPreviewTotalCount(response.meta.totalCount ?? response.meta.count);
+        setError(null);
       } catch (err) {
         if (previewRequestIdRef.current !== requestId) {
           return;
         }
-        setError(getErrorMessage(err));
-        setRecords([]);
-        setHasMore(false);
-        setPreviewTotalCount(0);
+        if (!isBackground) {
+          setError(getErrorMessage(err));
+          setRecords([]);
+          setHasMore(false);
+          setPreviewTotalCount(0);
+        }
         if (options.throwOnError) {
           throw err;
         }
@@ -240,7 +254,8 @@ export function useWorkReportListData({
         if (previewRequestIdRef.current === requestId) {
           previewRequestActiveRef.current = false;
         }
-        if (previewRequestIdRef.current === requestId) {
+        if (previewRequestIdRef.current === requestId && !isBackground) {
+          foregroundPreviewRequestActiveRef.current = false;
           setLoading(false);
         }
       }
@@ -269,7 +284,11 @@ export function useWorkReportListData({
   );
 
   const hydrateAllRecords = useCallback(
-    async (forceRefresh = false): Promise<WorkReportRecord[]> => {
+    async (
+      forceRefresh = false,
+      options: { mode?: "foreground" | "background" } = {}
+    ): Promise<WorkReportRecord[]> => {
+      const isBackground = options.mode === "background";
       if (hydration.isHydratingAllRecords) {
         return allRecords;
       }
@@ -282,10 +301,12 @@ export function useWorkReportListData({
       hydrateRequestIdRef.current = requestId;
       hydrateRequestActiveRef.current = true;
 
-      dispatchHydration({
-        type: "start",
-        clearCount: !hydration.hasHydratedAllRecords,
-      });
+      if (!isBackground) {
+        dispatchHydration({
+          type: "start",
+          clearCount: !hydration.hasHydratedAllRecords,
+        });
+      }
 
       try {
         const response = await fetchWorkReportsFull(currentFormId, forceRefresh);
@@ -376,6 +397,7 @@ export function useWorkReportListData({
     previewRequestIdRef.current += 1;
     hydrateRequestIdRef.current += 1;
     previewRequestActiveRef.current = false;
+    foregroundPreviewRequestActiveRef.current = false;
     hydrateRequestActiveRef.current = false;
     const cachedHydratedState = nextFormId
       ? hydratedFormCacheRef.current[nextFormId]

@@ -1,6 +1,6 @@
 import type { CreateReportTaskStatus, WorkReportItem, WorkReportRecord } from "../../api/workReport";
 
-export type WorkReportMutationTaskKind = "create" | "update";
+export type WorkReportMutationTaskKind = "create" | "update" | "delete" | "delete-batch";
 
 export type HydrationSource = "network" | "cache" | "sqlite" | null;
 export type BackendCacheState = "fresh" | "stale" | "building" | null;
@@ -29,6 +29,7 @@ export interface CreateTaskMonitor {
   message: string;
   updatedAt: string;
   rowId?: string;
+  stale?: boolean;
 }
 
 export interface GlobalFilters {

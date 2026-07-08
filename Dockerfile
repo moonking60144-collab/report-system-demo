@@ -57,11 +57,13 @@ ENV NODE_ENV=production \
     SERVE_FRONTEND_FROM_BACKEND=true \
     FRONTEND_STATIC_DIR=/app/frontend/dist \
     DEMO_MODE=true \
+    TRUST_PROXY=1 \
     SQLITE_DB_FILE=/data/work-report-read-model.v1.sqlite3 \
     REPORT_FULL_CACHE_FILE=/data/reports-104-full.v1.json \
     CREATE_TASK_STORE_FILE=/data/create-report-tasks.v1.json \
     RAGIC_CALLBACK_TASK_STORE_FILE=/data/ragic-callback-tasks.v1.json \
     WORK_REPORT_TASK_REGISTRY_STORE_FILE=/data/work-report-task-registry.v1.json \
+    FORM16_WRITE_REVERIFY_STORE_FILE=/data/form16-write-reverify.v1.json \
     SYSTEM_NOTICE_FILE=/data/system-notice.v1.json
 
 COPY --from=backend-builder /app/backend/package.json ./package.json

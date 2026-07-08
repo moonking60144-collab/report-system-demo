@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getErrorCode, isUnauthorized } from "../../../api/apiErrors";
 import { useTranslation } from "react-i18next";
 import type { WorkReportFrontendEventAction } from "../debug/workReportDeveloperContract";
 import {
@@ -14,6 +15,16 @@ import type { NoticeState } from "../types";
 import { getErrorMessage } from "../utils";
 import { pushFrontendEvent } from "../logging/frontendEventLog";
 import { cacheSystemNoticeAvailabilitySnapshot } from "../systemAvailability";
+import {
+  readSystemNoticeAdminToken,
+  writeSystemNoticeAdminToken,
+} from "../../../utils/systemNoticeAdminSession";
+import { SystemNoticePanelHeader } from "./system-notice/SystemNoticePanelHeader";
+import { SystemNoticeLoadingState } from "./system-notice/SystemNoticeLoadingState";
+import { SystemNoticeNoticeContent } from "./system-notice/SystemNoticeNoticeContent";
+import { SystemNoticeEditorForm } from "./system-notice/SystemNoticeEditorForm";
+import { SystemNoticePopup } from "./system-notice/SystemNoticePopup";
+import { SystemNoticeLoginModal } from "./system-notice/SystemNoticeLoginModal";
 
 interface NoticeDraft {
   enabled: boolean;
@@ -28,7 +39,6 @@ interface NoticeDraft {
   forceRefreshAfterSave: boolean;
 }
 
-const SYSTEM_NOTICE_TOKEN_STORAGE_KEY = "work-report:system-notice-admin-token:v1";
 const SYSTEM_NOTICE_DISMISSED_REVISION_STORAGE_KEY = "work-report:system-notice-dismissed-revision:v1";
 const SYSTEM_NOTICE_TOAST_SEEN_REVISION_STORAGE_KEY = "work-report:system-notice-toast-seen-revision:v1";
 const SYSTEM_NOTICE_FORCE_REFRESH_HANDLED_TOKEN_STORAGE_KEY =
@@ -36,30 +46,12 @@ const SYSTEM_NOTICE_FORCE_REFRESH_HANDLED_TOKEN_STORAGE_KEY =
 const SYSTEM_NOTICE_EDITOR_PREFS_STORAGE_KEY =
   "work-report:system-notice-editor-prefs:v1";
 
-function readStoredToken(): string {
-  if (typeof window === "undefined") {
-    return "";
-  }
-  try {
-    return String(window.sessionStorage.getItem(SYSTEM_NOTICE_TOKEN_STORAGE_KEY) ?? "").trim();
-  } catch {
-    return "";
-  }
+function writeStoredToken(token: string): void {
+  writeSystemNoticeAdminToken(token, "session");
 }
 
-function writeStoredToken(token: string): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    if (!token) {
-      window.sessionStorage.removeItem(SYSTEM_NOTICE_TOKEN_STORAGE_KEY);
-      return;
-    }
-    window.sessionStorage.setItem(SYSTEM_NOTICE_TOKEN_STORAGE_KEY, token);
-  } catch {
-    // NOTE: sessionStorage 寫入失敗時不阻塞主要流程
-  }
+function readStoredToken(): string {
+  return readSystemNoticeAdminToken();
 }
 
 function readDismissedRevision(): string {
@@ -647,15 +639,19 @@ export function SystemNoticePanel({
         if (!cancelled) {
           setTokenVerified(true);
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setToken("");
-          writeStoredToken("");
-          setEditing(false);
-          setLoginModalOpen(false);
-          setLoginError(null);
-          setSaveError(null);
-          setSaveNotice(null);
+          // 只有 401（token 真失效）才清；timeout / backend 暫時沒回應保留
+          // token，下次操作再驗（避免 backend 慢 10 秒就把管理者登出）
+          if (isUnauthorized(error)) {
+            setToken("");
+            writeStoredToken("");
+            setEditing(false);
+            setLoginModalOpen(false);
+            setLoginError(null);
+            setSaveError(null);
+            setSaveNotice(null);
+          }
           setTokenVerified(true);
         }
       }
@@ -717,14 +713,51 @@ export function SystemNoticePanel({
   const isNoticeContentVisible = !isDismissedByDevice || editing;
   const inlineStatusMessage =
     statusNotice && String(statusNotice.message ?? "").trim() ? statusNotice.message : null;
-  const inlineStatusPrefix =
-    statusNotice?.type === "success"
-      ? "✓"
-      : statusNotice?.type === "warn" || statusNotice?.type === "error"
-        ? "!"
-        : "↻";
+  const inlineStatusType = statusNotice?.type ?? "success";
   const isInlineStatusSpinning = statusNotice?.type === "loading";
   const shouldShowHeaderActions = Boolean(notice) || editing;
+  const handleNormalizeDateTimeInput = useCallback((_field: "startAtInput" | "endAtInput", rawValue: string) => {
+    return parseFlexibleDateTimeInput(rawValue).normalizedInput;
+  }, []);
+  const handleSetForceRefreshAfterSave = useCallback((checked: boolean) => {
+    setDraft((prev) => {
+      const nextDraft = {
+        ...prev,
+        forceRefreshAfterSave: checked,
+      };
+      writeSystemNoticeEditorPrefs({
+        forceRefreshAfterSave: nextDraft.forceRefreshAfterSave,
+      });
+      return nextDraft;
+    });
+  }, []);
+  const handleToggleEditMode = useCallback(() => {
+    if (editing) {
+      setEditing(false);
+      setLoginModalOpen(false);
+      setLoginError(null);
+      setSaveError(null);
+      setSaveNotice(null);
+      return;
+    }
+
+    if (!token || !tokenVerified) {
+      setLoginModalOpen(true);
+      setLoginError(null);
+      setSaveError(null);
+      setSaveNotice(null);
+      return;
+    }
+
+    setEditing(true);
+    setLoginError(null);
+    setSaveError(null);
+    setSaveNotice(null);
+  }, [editing, token, tokenVerified]);
+  const handleCloseLoginModal = useCallback(() => {
+    setLoginModalOpen(false);
+    setLoginError(null);
+  }, []);
 
   useEffect(() => {
     noticeRevisionRef.current = String(notice?.revision ?? "").trim();
@@ -843,10 +876,11 @@ export function SystemNoticePanel({
         level: "error",
       });
       setSaveError(message);
+      const code = getErrorCode(saveErrorValue);
       if (
-        message.includes("401") ||
-        message.includes("NOTICE_TOKEN_INVALID") ||
-        message.includes("NOTICE_TOKEN_MISSING")
+        isUnauthorized(saveErrorValue) ||
+        code === "NOTICE_TOKEN_INVALID" ||
+        code === "NOTICE_TOKEN_MISSING"
       ) {
         setToken("");
         writeStoredToken("");
@@ -882,508 +916,113 @@ export function SystemNoticePanel({
     writeToastSeenRevision(noticeRevision);
   }, [noticeRevision, toastSeenRevision]);
 
+  const emptyTitleText = t("workReport:systemNotice.emptyTitle");
+  const emptyMessageText = t("workReport:systemNotice.emptyMessage");
+  const effectiveRangeText = notice
+    ? t("workReport:systemNotice.effectiveRange", {
+        start: formatDisplayDateTime(notice.startAt),
+        end: formatDisplayDateTime(notice.endAt),
+      })
+    : "";
+  const updatedMetaText = notice
+    ? t("workReport:systemNotice.updatedMeta", {
+        time: formatDisplayDateTime(notice.updatedAt),
+        user: notice.updatedBy || "--",
+      })
+    : "";
+
   return (
     <section className={`system-notice-panel${isDismissedByDevice && !editing ? " is-collapsed" : ""}`} aria-live="polite">
-      <header className="system-notice-panel-header">
-        <div className="system-notice-panel-title-wrap">
-          <strong className="system-notice-panel-title">{t("workReport:systemNotice.title")}</strong>
-          {notice && (
-            <span
-              className={`system-notice-status-chip ${
-                activeState ? "is-active" : "is-inactive"
-              }`}
-            >
-              {activeState
-                ? t("workReport:systemNotice.status.active")
-                : t("workReport:systemNotice.status.inactive")}
-            </span>
-          )}
-          {inlineStatusMessage ? (
-            <span
-              className={`system-notice-inline-status-pill system-notice-inline-status-pill--${
-                statusNotice?.type ?? "success"
-              }`}
-            >
-              <span
-                className={`system-notice-inline-status-icon ${
-                  isInlineStatusSpinning ? "is-spinning" : ""
-                }`}
-                aria-hidden="true"
-              >
-                {inlineStatusPrefix}
-              </span>{" "}
-              {inlineStatusMessage}
-            </span>
-          ) : null}
-        </div>
-        {shouldShowHeaderActions && (
-          <div className="system-notice-panel-actions">
-            {notice && activeState && !editing && (
-              <button
-                type="button"
-                className="system-notice-dismiss-btn"
-                onClick={isDismissedByDevice ? handleReopenDismissedNotice : handleDismissNoticeForDevice}
-              >
-                {isDismissedByDevice
-                  ? t("workReport:systemNotice.actions.showNotice")
-                  : t("workReport:systemNotice.actions.dismiss")}
-              </button>
-            )}
-            <button
-              type="button"
-              className="system-notice-edit-btn"
-              onClick={() => {
-                if (editing) {
-                  setEditing(false);
-                  setLoginModalOpen(false);
-                  setLoginError(null);
-                  setSaveError(null);
-                  setSaveNotice(null);
-                  return;
-                }
+      <SystemNoticePanelHeader
+        noticeExists={Boolean(notice)}
+        activeState={activeState}
+        shouldShowHeaderActions={shouldShowHeaderActions}
+        showDismissButton={Boolean(notice) && activeState && !editing}
+        dismissButtonText={
+          isDismissedByDevice
+            ? t("workReport:systemNotice.actions.showNotice")
+            : t("workReport:systemNotice.actions.dismiss")
+        }
+        editing={editing}
+        inlineStatusMessage={inlineStatusMessage}
+        inlineStatusType={inlineStatusType}
+        isInlineStatusSpinning={isInlineStatusSpinning}
+        onDismissToggle={
+          isDismissedByDevice ? handleReopenDismissedNotice : handleDismissNoticeForDevice
+        }
+        onEditToggle={handleToggleEditMode}
+      />
 
-                if (!token || !tokenVerified) {
-                  setLoginModalOpen(true);
-                  setLoginError(null);
-                  setSaveError(null);
-                  setSaveNotice(null);
-                  return;
-                }
-
-                setEditing(true);
-                setLoginError(null);
-                setSaveError(null);
-                setSaveNotice(null);
-              }}
-            >
-              {editing ? t("common:actions.cancel") : t("workReport:systemNotice.actions.edit")}
-            </button>
-          </div>
-        )}
-      </header>
-
-      {loading && <p className="system-notice-meta">{t("workReport:systemNotice.loading")}</p>}
-      {!loading && error && (
-        <p className="system-notice-error">
-          {t("workReport:systemNotice.errors.loadFailed", { error })}
-        </p>
-      )}
+      <SystemNoticeLoadingState loading={loading} error={error} />
 
       {!loading && !error && notice && isNoticeContentVisible && (
-        <div className={`system-notice-content level-${notice.level}`}>
-          <p className="system-notice-title">{notice.title || t("workReport:systemNotice.emptyTitle")}</p>
-          <p className="system-notice-message">
-            {notice.message || t("workReport:systemNotice.emptyMessage")}
-          </p>
-          <p className="system-notice-meta">
-            {t("workReport:systemNotice.effectiveRange", {
-              start: formatDisplayDateTime(notice.startAt),
-              end: formatDisplayDateTime(notice.endAt),
-            })}
-          </p>
-          <p className="system-notice-meta">
-            {t("workReport:systemNotice.updatedMeta", {
-              time: formatDisplayDateTime(notice.updatedAt),
-              user: notice.updatedBy || "--",
-            })}
-          </p>
-          {notice.linkUrl && (
-            <p className="system-notice-link-row">
-              <a href={notice.linkUrl} target="_blank" rel="noreferrer">
-                {notice.linkText || notice.linkUrl}
-              </a>
-            </p>
-          )}
-        </div>
+        <SystemNoticeNoticeContent
+          notice={notice}
+          emptyTitle={emptyTitleText}
+          emptyMessage={emptyMessageText}
+          effectiveRange={effectiveRangeText}
+          updatedMeta={updatedMetaText}
+          className={`system-notice-content level-${notice.level}`}
+        />
       )}
-
-
 
       {editing && token && (
-        <div className="system-notice-editor">
-          <div className="system-notice-edit-form">
-            <label className="system-notice-checkbox">
-              <input
-                type="checkbox"
-                checked={draft.enabled}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, enabled: event.target.checked }))
-                }
-              />
-              <span>{t("workReport:systemNotice.fields.enabled")}</span>
-            </label>
-
-            <label className="system-notice-checkbox">
-              <input
-                type="checkbox"
-                checked={draft.forceRefreshAfterSave}
-                onChange={(event) =>
-                  setDraft((prev) => {
-                    const nextDraft = {
-                      ...prev,
-                      forceRefreshAfterSave: event.target.checked,
-                    };
-                    writeSystemNoticeEditorPrefs({
-                      forceRefreshAfterSave: nextDraft.forceRefreshAfterSave,
-                    });
-                    return nextDraft;
-                  })
-                }
-              />
-              <span>{t("workReport:systemNotice.fields.forceRefreshAfterSave")}</span>
-            </label>
-
-            <label className="system-notice-checkbox">
-              <input
-                type="checkbox"
-                checked={maintenanceModeChecked}
-                onChange={(event) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    maintenanceDecision: event.target.checked
-                      ? "manual-on"
-                      : "manual-off",
-                  }))
-                }
-              />
-              <span>{t("workReport:systemNotice.fields.maintenanceMode")}</span>
-            </label>
-            <div
-              className={`system-notice-maintenance-hint is-${
-                draft.maintenanceDecision === "auto"
-                  ? maintenanceSuggestion.suggested
-                    ? "suggested"
-                    : "neutral"
-                  : maintenanceModeChecked
-                    ? "manual-on"
-                    : "manual-off"
-              }`}
-            >
-              <strong>
-                {draft.maintenanceDecision === "auto"
-                  ? maintenanceSuggestion.suggested
-                    ? t("workReport:systemNotice.maintenance.autoDetected")
-                    : t("workReport:systemNotice.maintenance.autoNotDetected")
-                  : maintenanceModeChecked
-                    ? t("workReport:systemNotice.maintenance.manualEnabled")
-                    : t("workReport:systemNotice.maintenance.manualDisabled")}
-              </strong>
-              <span>
-                {draft.maintenanceDecision === "auto"
-                  ? maintenanceSuggestion.suggested
-                    ? t("workReport:systemNotice.maintenance.autoDetectedDetail", {
-                        reasons: maintenanceSuggestion.reasons.join(" / "),
-                      })
-                    : t("workReport:systemNotice.maintenance.autoNotDetectedDetail")
-                  : t("workReport:systemNotice.maintenance.manualOverrideDetail")}
-              </span>
-              {draft.maintenanceDecision !== "auto" ? (
-                <button
-                  type="button"
-                  className="system-notice-maintenance-reset-btn"
-                  onClick={() =>
-                    setDraft((prev) => ({
-                      ...prev,
-                      maintenanceDecision: "auto",
-                    }))
-                  }
-                >
-                  {t("workReport:systemNotice.maintenance.resetToAuto")}
-                </button>
-              ) : null}
-            </div>
-
-            <label>
-              <span>{t("workReport:systemNotice.fields.level")}</span>
-              <select
-                value={draft.level}
-                onChange={(event) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    level: event.target.value as SystemNoticeLevel,
-                  }))
-                }
-              >
-                <option value="info">{t("workReport:systemNotice.levels.info")}</option>
-                <option value="warn">{t("workReport:systemNotice.levels.warn")}</option>
-                <option value="error">{t("workReport:systemNotice.levels.error")}</option>
-              </select>
-            </label>
-
-            <label>
-              <span>{t("workReport:systemNotice.fields.title")}</span>
-              <input
-                type="text"
-                value={draft.title}
-                onChange={(event) => setDraft((prev) => ({ ...prev, title: event.target.value }))}
-              />
-            </label>
-
-            <label>
-              <span>{t("workReport:systemNotice.fields.message")}</span>
-              <textarea
-                rows={3}
-                value={draft.message}
-                onChange={(event) =>
-                  setDraft((prev) => ({ ...prev, message: event.target.value }))
-                }
-              />
-            </label>
-
-            <div className="system-notice-datetime-grid">
-              <label>
-                <span>{t("workReport:systemNotice.fields.startAt")}</span>
-                <div className="system-notice-datetime-input-wrap">
-                  <input
-                    type="text"
-                    value={draft.startAtInput}
-                    placeholder={t("workReport:systemNotice.fields.dateTimePlaceholder")}
-                    onChange={(event) =>
-                      setDraft((prev) => ({ ...prev, startAtInput: event.target.value }))
-                    }
-                    onBlur={(event) =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        startAtInput: parseFlexibleDateTimeInput(event.target.value).normalizedInput,
-                      }))
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="system-notice-datetime-picker-btn"
-                    onClick={() => openDateTimePicker("startAtInput")}
-                    aria-label={t("workReport:systemNotice.fields.openDateTimePicker")}
-                    title={t("workReport:systemNotice.fields.openDateTimePicker")}
-                  >
-                    📅
-                  </button>
-                  <input
-                    ref={startAtPickerInputRef}
-                    type="datetime-local"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    className="system-notice-datetime-picker-native"
-                    value={startAtPickerValue}
-                    onChange={(event) => handleDateTimePickerChange("startAtInput", event.target.value)}
-                  />
-                </div>
-              </label>
-              <label>
-                <span>{t("workReport:systemNotice.fields.endAt")}</span>
-                <div className="system-notice-datetime-input-wrap">
-                  <input
-                    type="text"
-                    value={draft.endAtInput}
-                    placeholder={t("workReport:systemNotice.fields.dateTimePlaceholder")}
-                    onChange={(event) =>
-                      setDraft((prev) => ({ ...prev, endAtInput: event.target.value }))
-                    }
-                    onBlur={(event) =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        endAtInput: parseFlexibleDateTimeInput(event.target.value).normalizedInput,
-                      }))
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="system-notice-datetime-picker-btn"
-                    onClick={() => openDateTimePicker("endAtInput")}
-                    aria-label={t("workReport:systemNotice.fields.openDateTimePicker")}
-                    title={t("workReport:systemNotice.fields.openDateTimePicker")}
-                  >
-                    📅
-                  </button>
-                  <input
-                    ref={endAtPickerInputRef}
-                    type="datetime-local"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    className="system-notice-datetime-picker-native"
-                    value={endAtPickerValue}
-                    onChange={(event) => handleDateTimePickerChange("endAtInput", event.target.value)}
-                  />
-                </div>
-              </label>
-            </div>
-            <p className="system-notice-field-hint">
-              {t("workReport:systemNotice.fields.dateTimeHint")}
-            </p>
-            {dateTimeInputError ? (
-              <p className="system-notice-error">{dateTimeInputError}</p>
-            ) : null}
-
-            <div className="system-notice-datetime-grid">
-              <label>
-                <span>{t("workReport:systemNotice.fields.linkText")}</span>
-                <input
-                  type="text"
-                  value={draft.linkText}
-                  onChange={(event) =>
-                    setDraft((prev) => ({ ...prev, linkText: event.target.value }))
-                  }
-                />
-              </label>
-              <label>
-                <span>{t("workReport:systemNotice.fields.linkUrl")}</span>
-                <input
-                  type="url"
-                  value={draft.linkUrl}
-                  onChange={(event) =>
-                    setDraft((prev) => ({ ...prev, linkUrl: event.target.value }))
-                  }
-                />
-              </label>
-            </div>
-
-            {saveError && (
-              <p className="system-notice-error">
-                {t("workReport:systemNotice.errors.saveFailed", { error: saveError })}
-              </p>
-            )}
-            {saveNotice && <p className="system-notice-success">{saveNotice}</p>}
-
-            <div className="system-notice-editor-actions">
-              <button
-                type="button"
-                className="system-notice-submit-btn"
-                onClick={() => void handleSaveNotice()}
-                disabled={saving}
-              >
-                {saving
-                  ? t("common:actions.saving")
-                  : t("workReport:systemNotice.actions.save")}
-              </button>
-              <button
-                type="button"
-                className="system-notice-logout-btn"
-                onClick={handleLogout}
-              >
-                {t("workReport:systemNotice.actions.logout")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {noticePopupOpen && notice && !editing && (
-        <div className="system-notice-popup-backdrop" onClick={handleCloseNoticePopup}>
-          <section
-            className={`system-notice-popup level-${notice.level}`}
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("workReport:systemNotice.title")}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              type="button"
-              className="system-notice-popup-close-btn"
-              aria-label={t("common:actions.cancel")}
-              onClick={handleCloseNoticePopup}
-            >
-              ×
-            </button>
-            <p className="system-notice-title">{notice.title || t("workReport:systemNotice.emptyTitle")}</p>
-            <p className="system-notice-message">
-              {notice.message || t("workReport:systemNotice.emptyMessage")}
-            </p>
-            <p className="system-notice-meta">
-              {t("workReport:systemNotice.effectiveRange", {
-                start: formatDisplayDateTime(notice.startAt),
-                end: formatDisplayDateTime(notice.endAt),
-              })}
-            </p>
-            <p className="system-notice-meta">
-              {t("workReport:systemNotice.updatedMeta", {
-                time: formatDisplayDateTime(notice.updatedAt),
-                user: notice.updatedBy || "--",
-              })}
-            </p>
-            {notice.linkUrl && (
-              <p className="system-notice-link-row">
-                <a href={notice.linkUrl} target="_blank" rel="noreferrer">
-                  {notice.linkText || notice.linkUrl}
-                </a>
-              </p>
-            )}
-          </section>
-        </div>
-      )}
-
-      {loginModalOpen && (
-        <div
-          className="system-notice-login-modal-backdrop"
-          onClick={() => {
-            setLoginModalOpen(false);
-            setLoginError(null);
+        <SystemNoticeEditorForm
+          draft={draft}
+          maintenanceSuggestion={maintenanceSuggestion}
+          maintenanceModeChecked={maintenanceModeChecked}
+          dateTimeState={{
+            startAtPickerValue,
+            endAtPickerValue,
+            dateTimeInputError,
+            saveError,
+            saveNotice,
+            saving,
           }}
-        >
-          <section
-            className="system-notice-login-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("workReport:systemNotice.actions.login")}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="system-notice-login-modal-header">
-              <strong>{t("workReport:systemNotice.actions.login")}</strong>
-              <button
-                type="button"
-                className="system-notice-login-close-btn"
-                onClick={() => {
-                  setLoginModalOpen(false);
-                  setLoginError(null);
-                }}
-              >
-                {t("common:actions.cancel")}
-              </button>
-            </header>
-
-            <div className="system-notice-login">
-              <label>
-                <span>{t("workReport:systemNotice.fields.username")}</span>
-                <input
-                  type="text"
-                  value={loginDraft.username}
-                  onChange={(event) =>
-                    setLoginDraft((prev) => ({ ...prev, username: event.target.value }))
-                  }
-                />
-              </label>
-              <label>
-                <span>{t("workReport:systemNotice.fields.password")}</span>
-                <input
-                  type="password"
-                  value={loginDraft.password}
-                  onChange={(event) =>
-                    setLoginDraft((prev) => ({ ...prev, password: event.target.value }))
-                  }
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      void handleLogin();
-                    }
-                  }}
-                />
-              </label>
-              {loginError && (
-                <p className="system-notice-error">
-                  {t("workReport:systemNotice.errors.loginFailed", { error: loginError })}
-                </p>
-              )}
-              <button
-                type="button"
-                className="system-notice-submit-btn"
-                onClick={() => void handleLogin()}
-                disabled={submittingLogin}
-              >
-                {submittingLogin
-                  ? t("common:actions.saving")
-                  : t("workReport:systemNotice.actions.login")}
-              </button>
-            </div>
-          </section>
-        </div>
+          dateTimeRefs={{
+            startAtPickerInputRef,
+            endAtPickerInputRef,
+          }}
+          handlers={{
+            setDraft,
+            openDateTimePicker,
+            handleDateTimePickerChange,
+            normalizeDateTimeInput: handleNormalizeDateTimeInput,
+            resetMaintenanceDecision: () => {
+              setDraft((prev) => ({ ...prev, maintenanceDecision: "auto" }));
+            },
+            onSave: () => {
+              void handleSaveNotice();
+            },
+            onLogout: handleLogout,
+            setForceRefreshAfterSave: handleSetForceRefreshAfterSave,
+          }}
+        />
       )}
+
+      <SystemNoticePopup
+        open={noticePopupOpen && Boolean(notice) && !editing}
+        notice={notice}
+        onClose={handleCloseNoticePopup}
+        emptyTitle={emptyTitleText}
+        emptyMessage={emptyMessageText}
+        effectiveRange={effectiveRangeText}
+        updatedMeta={updatedMetaText}
+      />
+
+      <SystemNoticeLoginModal
+        open={loginModalOpen}
+        username={loginDraft.username}
+        password={loginDraft.password}
+        loginError={loginError}
+        submittingLogin={submittingLogin}
+        onUsernameChange={(username) => setLoginDraft((prev) => ({ ...prev, username }))}
+        onPasswordChange={(password) => setLoginDraft((prev) => ({ ...prev, password }))}
+        onSubmit={() => {
+          void handleLogin();
+        }}
+        onClose={handleCloseLoginModal}
+      />
     </section>
   );
 }

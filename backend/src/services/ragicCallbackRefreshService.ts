@@ -34,6 +34,8 @@ const ragicCallbackRefreshServiceDeps: RagicCallbackRefreshServiceDeps = {
   deleteEntrySnapshot: workReportSqliteRepository.deleteEntrySnapshot.bind(workReportSqliteRepository),
   publishWorkReportUpdated,
   publishWorkReportFormUpdated,
+  getEntrySnapshot:
+    workReportSqliteRepository.getReportByEntryId.bind(workReportSqliteRepository),
   getRecentMutationProjection(formId, entryId, windowMs) {
     return recentMutationProjectionWindow.getRecent(formId, entryId, windowMs);
   },

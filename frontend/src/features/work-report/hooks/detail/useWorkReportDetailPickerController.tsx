@@ -88,6 +88,10 @@ interface UseWorkReportDetailPickerControllerArgs {
   inlineProcessOptions: FormOptionItem[];
   inputOptionPickerOptions: FormOptionItem[];
   shiftTypePickerOptions: FormOptionItem[];
+  plannedIdlePickerOptions: FormOptionItem[];
+  setupAdjustTypePickerOptions: FormOptionItem[];
+  countSetupTimeFlagPickerOptions: FormOptionItem[];
+  containerUnitPickerOptions: FormOptionItem[];
 }
 
 function buildMachineMetaLines(option: FormOptionItem): string[] {
@@ -119,6 +123,10 @@ export function useWorkReportDetailPickerController({
   inlineProcessOptions,
   inputOptionPickerOptions,
   shiftTypePickerOptions,
+  plannedIdlePickerOptions,
+  setupAdjustTypePickerOptions,
+  countSetupTimeFlagPickerOptions,
+  containerUnitPickerOptions,
 }: UseWorkReportDetailPickerControllerArgs) {
   const [machineGroupOverrideByForm, setMachineGroupOverrideByForm] = useState<
     Partial<Record<WorkReportFormId, string>>
@@ -297,27 +305,65 @@ export function useWorkReportDetailPickerController({
     () => mapBasicPickerOptions(shiftTypePickerOptions),
     [shiftTypePickerOptions]
   );
+  const plannedIdlePickerBaseOptions = useMemo<DetailPickerOption[]>(
+    () => mapBasicPickerOptions(plannedIdlePickerOptions),
+    [plannedIdlePickerOptions]
+  );
+  const setupAdjustTypePickerBaseOptions = useMemo<DetailPickerOption[]>(
+    () => mapBasicPickerOptions(setupAdjustTypePickerOptions),
+    [setupAdjustTypePickerOptions]
+  );
+  const countSetupTimeFlagPickerBaseOptions = useMemo<DetailPickerOption[]>(
+    () => mapBasicPickerOptions(countSetupTimeFlagPickerOptions),
+    [countSetupTimeFlagPickerOptions]
+  );
+  const containerUnitPickerBaseOptions = useMemo<DetailPickerOption[]>(
+    () => mapBasicPickerOptions(containerUnitPickerOptions),
+    [containerUnitPickerOptions]
+  );
   const filteredLinkedPickerOptions = useMemo<DetailPickerOption[]>(() => {
-    const options =
-      linkedPickerState?.key === "processCode"
-        ? processPickerBaseOptions
-        : linkedPickerState?.key === "operatorId"
-          ? operatorPickerBaseOptions
-          : linkedPickerState?.key === "inputOptions"
-            ? inputOptionPickerBaseOptions
-            : linkedPickerState?.key === "shiftType"
-              ? shiftTypePickerBaseOptions
-              : linkedPickerState?.key === "machineId"
-                ? machinePickerBaseOptions
-                : machinePickerBaseOptions;
+    let options = machinePickerBaseOptions;
+    switch (linkedPickerState?.key) {
+      case "processCode":
+        options = processPickerBaseOptions;
+        break;
+      case "operatorId":
+        options = operatorPickerBaseOptions;
+        break;
+      case "inputOptions":
+        options = inputOptionPickerBaseOptions;
+        break;
+      case "shiftType":
+        options = shiftTypePickerBaseOptions;
+        break;
+      case "plannedIdle":
+        options = plannedIdlePickerBaseOptions;
+        break;
+      case "setupAdjustType":
+        options = setupAdjustTypePickerBaseOptions;
+        break;
+      case "countSetupTimeFlag":
+        options = countSetupTimeFlagPickerBaseOptions;
+        break;
+      case "containerUnit":
+        options = containerUnitPickerBaseOptions;
+        break;
+      default:
+        options = machinePickerBaseOptions;
+        break;
+    }
     return filterPickerOptionsByKeyword(options, deferredLinkedPickerSearch);
   }, [
+    containerUnitPickerBaseOptions,
+    countSetupTimeFlagPickerBaseOptions,
     deferredLinkedPickerSearch,
     inputOptionPickerBaseOptions,
     linkedPickerState?.key,
     machinePickerBaseOptions,
     operatorPickerBaseOptions,
+    plannedIdlePickerBaseOptions,
     processPickerBaseOptions,
+    setupAdjustTypePickerBaseOptions,
     shiftTypePickerBaseOptions,
   ]);
 
@@ -359,6 +405,38 @@ export function useWorkReportDetailPickerController({
           searchPlaceholder: t("workReport:detailPage.shiftTypePickerSearchPlaceholder"),
           emptyText: t("workReport:detailPage.shiftTypePickerEmpty"),
         };
+      case "plannedIdle":
+        return {
+          title: t("workReport:detailPage.plannedIdlePickerTitle"),
+          hint: t("workReport:detailPage.plannedIdlePickerHint"),
+          searchLabel: t("workReport:detailPage.plannedIdlePickerSearchLabel"),
+          searchPlaceholder: t("workReport:detailPage.plannedIdlePickerSearchPlaceholder"),
+          emptyText: t("workReport:detailPage.plannedIdlePickerEmpty"),
+        };
+      case "setupAdjustType":
+        return {
+          title: t("workReport:detailPage.setupAdjustTypePickerTitle"),
+          hint: t("workReport:detailPage.setupAdjustTypePickerHint"),
+          searchLabel: t("workReport:detailPage.setupAdjustTypePickerSearchLabel"),
+          searchPlaceholder: t("workReport:detailPage.setupAdjustTypePickerSearchPlaceholder"),
+          emptyText: t("workReport:detailPage.setupAdjustTypePickerEmpty"),
+        };
+      case "countSetupTimeFlag":
+        return {
+          title: t("workReport:detailPage.countSetupTimeFlagPickerTitle"),
+          hint: t("workReport:detailPage.countSetupTimeFlagPickerHint"),
+          searchLabel: t("workReport:detailPage.countSetupTimeFlagPickerSearchLabel"),
+          searchPlaceholder: t("workReport:detailPage.countSetupTimeFlagPickerSearchPlaceholder"),
+          emptyText: t("workReport:detailPage.countSetupTimeFlagPickerEmpty"),
+        };
+      case "containerUnit":
+        return {
+          title: t("workReport:detailPage.containerUnitPickerTitle"),
+          hint: t("workReport:detailPage.containerUnitPickerHint"),
+          searchLabel: t("workReport:detailPage.containerUnitPickerSearchLabel"),
+          searchPlaceholder: t("workReport:detailPage.containerUnitPickerSearchPlaceholder"),
+          emptyText: t("workReport:detailPage.containerUnitPickerEmpty"),
+        };
       default:
         return {
           title: t("workReport:detailPage.machinePickerTitle"),
@@ -384,14 +462,26 @@ export function useWorkReportDetailPickerController({
         return editingRowDraft?.inputOptions ?? "";
       case "shiftType":
         return editingRowDraft?.shiftType ?? "";
+      case "plannedIdle":
+        return editingRowDraft?.plannedIdle ?? "";
+      case "setupAdjustType":
+        return editingRowDraft?.setupAdjustType ?? "";
+      case "countSetupTimeFlag":
+        return editingRowDraft?.countSetupTimeFlag ?? "";
+      case "containerUnit":
+        return editingRowDraft?.containerUnit ?? "";
       default:
         return editingRowDraft?.machineId ?? "";
     }
   }, [
+    editingRowDraft?.containerUnit,
+    editingRowDraft?.countSetupTimeFlag,
     editingRowDraft?.inputOptions,
     editingRowDraft?.machineId,
     editingRowDraft?.operatorId,
+    editingRowDraft?.plannedIdle,
     editingRowDraft?.processCode,
+    editingRowDraft?.setupAdjustType,
     editingRowDraft?.shiftType,
     linkedPickerState,
   ]);
@@ -442,15 +532,31 @@ export function useWorkReportDetailPickerController({
         : null;
     }
 
-    return null;
+    const selectedValue = linkedPickerSelectedValue;
+    const selected =
+      linkedPickerState.key === "plannedIdle"
+        ? plannedIdlePickerBaseOptions.find((option) => option.value === selectedValue)
+        : linkedPickerState.key === "setupAdjustType"
+          ? setupAdjustTypePickerBaseOptions.find((option) => option.value === selectedValue)
+          : linkedPickerState.key === "countSetupTimeFlag"
+            ? countSetupTimeFlagPickerBaseOptions.find((option) => option.value === selectedValue)
+            : linkedPickerState.key === "containerUnit"
+              ? containerUnitPickerBaseOptions.find((option) => option.value === selectedValue)
+              : null;
+    return selected ?? null;
   }, [
+    containerUnitPickerBaseOptions,
+    countSetupTimeFlagPickerBaseOptions,
     editingRowDraft?.machineId,
     editingRowDraft?.operatorId,
     editingRowDraft?.processCode,
     inlineMachineOptions,
     inlineOperatorOptions,
     inlineProcessOptions,
+    linkedPickerSelectedValue,
     linkedPickerState,
+    plannedIdlePickerBaseOptions,
+    setupAdjustTypePickerBaseOptions,
   ]);
 
   const linkedPickerTopContent = useMemo<ReactNode>(() => {

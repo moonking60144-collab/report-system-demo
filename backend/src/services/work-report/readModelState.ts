@@ -1,4 +1,5 @@
 import { READ_MODEL_SCHEMA_VERSION } from "../../storage/sqlite/readModelSchema";
+import { env } from "../../config/env";
 
 export interface SqliteReadableSyncState {
   status: string;
@@ -42,6 +43,9 @@ export function resolveSqliteFullReportsCacheState(
     return "building";
   }
   if (syncState?.status === "failed") {
+    return "stale";
+  }
+  if (isSqliteSnapshotStale(syncState, env.SQLITE_READ_MAX_STALENESS_MS)) {
     return "stale";
   }
   return "fresh";

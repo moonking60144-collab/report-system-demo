@@ -42,8 +42,8 @@ function syncWorkReport16(recordId) {
         var prodTypeText = normalizeText(prodTypeValue);
         var processText = normalizeText(processValue);
         var combined = [prodTypeText, processText].filter(Boolean).join("|");
-        var matches104 = containsAny(combined, ["TI", "Process A"]);
-        var matches105 = containsAny(combined, ["HF", "Process B"]);
+        var matches104 = containsAny(combined, ["TI", "搓牙"]);
+        var matches105 = containsAny(combined, ["HF", "打頭"]);
 
         if (matches104 && !matches105) {
             return {

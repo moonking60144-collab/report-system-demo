@@ -1,4 +1,5 @@
 import { env } from "../../../config/env";
+import { ragicClient } from "../../../ragic/client";
 import { FormConfig } from "../../../types/formConfig";
 import { workReportReadService } from "../workReportReadService";
 
@@ -10,11 +11,13 @@ const operatorOptionMapCache = new Map<
 >();
 
 const operatorOptionMapRefreshTasks = new Map<string, Promise<void>>();
+let operatorOptionMapGeneration = 0;
 
 async function refreshOperatorOptionMap(
   formId: string,
   cacheKey: string
 ): Promise<Map<string, string>> {
+  const generation = operatorOptionMapGeneration;
   const options = await workReportReadService.getFormOptions(formId, ["operatorId"]);
   const operatorOptions = options.operatorId ?? [];
   const operatorMap = new Map<string, string>();
@@ -23,10 +26,12 @@ async function refreshOperatorOptionMap(
     operatorMap.set(item.value, item.display || item.label || item.value);
   }
 
-  operatorOptionMapCache.set(cacheKey, {
-    cachedAt: Date.now(),
-    map: operatorMap,
-  });
+  if (operatorOptionMapGeneration === generation) {
+    operatorOptionMapCache.set(cacheKey, {
+      cachedAt: Date.now(),
+      map: operatorMap,
+    });
+  }
   return operatorMap;
 }
 
@@ -83,3 +88,41 @@ export async function getOperatorOptionMap(
 
   return refreshOperatorOptionMap(formId, cacheKey);
 }
+
+export function clearOperatorOptionMapCache(sourceFormPath?: string): void {
+  if (!sourceFormPath) {
+    operatorOptionMapGeneration += 1;
+    operatorOptionMapCache.clear();
+    operatorOptionMapRefreshTasks.clear();
+    return;
+  }
+
+  const normalizedSourcePath = normalizeFormPath(sourceFormPath);
+  const cacheKeys = Array.from(operatorOptionMapCache.keys()).filter((key) =>
+    isOperatorSourceCacheKey(key, normalizedSourcePath)
+  );
+  const refreshKeys = Array.from(operatorOptionMapRefreshTasks.keys()).filter((key) =>
+    isOperatorSourceCacheKey(key, normalizedSourcePath)
+  );
+  if (cacheKeys.length === 0 && refreshKeys.length === 0) {
+    return;
+  }
+
+  operatorOptionMapGeneration += 1;
+  for (const key of cacheKeys) {
+    operatorOptionMapCache.delete(key);
+  }
+  for (const key of refreshKeys) {
+    operatorOptionMapRefreshTasks.delete(key);
+  }
+}
+
+function isOperatorSourceCacheKey(cacheKey: string, normalizedSourcePath: string): boolean {
+  return normalizeFormPath(cacheKey.split(":").slice(1).join(":")) === normalizedSourcePath;
+}
+
+function normalizeFormPath(formPath: string): string {
+  return formPath.trim().replace(/\/+$/, "");
+}
+
+ragicClient.onFormCacheCleared(clearOperatorOptionMapCache);

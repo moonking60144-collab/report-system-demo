@@ -62,7 +62,7 @@ function makeSwap(
 
 describe("calculateDutyForDay", () => {
   test("沒成員 → empty", () => {
-    const result = calculateDutyForDay("2026-05-06", [], [], []);
+    const result = calculateDutyForDay("2026-05-06", [], [], [], { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member).toBeNull();
     expect(result.baseMember).toBeNull();
     expect(result.swap).toBeNull();
@@ -71,7 +71,7 @@ describe("calculateDutyForDay", () => {
 
   test("沒 swap → 回該週 base member", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
-    const opts = { autoAnchorIsoWeek: "2026-W19" };
+    const opts = { anchorIsoWeek: "2026-W19", anchorMemberId: 1 };
     // 2026-05-06 is W19 (Mon May 4 ~ Sun May 10) → base = A
     const result = calculateDutyForDay(
       "2026-05-06",
@@ -88,7 +88,7 @@ describe("calculateDutyForDay", () => {
   test("該天有 leave swap → 回 cover member, base 仍是該週 base", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const swap = makeSwap("2026-05-06", 1, 2);
-    const opts = { autoAnchorIsoWeek: "2026-W19" };
+    const opts = { anchorIsoWeek: "2026-W19", anchorMemberId: 1 };
     const result = calculateDutyForDay(
       "2026-05-06",
       members,
@@ -115,7 +115,8 @@ describe("calculateDutyForDay", () => {
       "2026-05-06",
       members,
       overrides,
-      [swap]
+      [swap],
+      { anchorIsoWeek: null, anchorMemberId: null }
     );
     // 該天還是 B 在代班（swap 還在）
     expect(result.member?.name).toBe("B");
@@ -128,7 +129,7 @@ describe("calculateDutyForDay", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     // Repay swap: B 原本 5/18 值，A 代班還班
     const swap = makeSwap("2026-05-18", 2, 1, "repay", 999);
-    const opts = { autoAnchorIsoWeek: "2026-W19", weeksPerSlot: 1 };
+    const opts = { anchorIsoWeek: "2026-W19", anchorMemberId: 1, weeksPerSlot: 1 };
     // 2026-05-18 是 W21（A 又輪到值班，但 swap 把它變成... 實際應 A 已經本來就值班 W21
     // 這個測試重點是 swap.coverMember 蓋過 base
     const result = calculateDutyForDay(
@@ -148,7 +149,7 @@ describe("calculateDutyForDay", () => {
       makeMember(2, "B", 1, false), // B 已停用
     ];
     const swap = makeSwap("2026-05-06", 1, 2);
-    const result = calculateDutyForDay("2026-05-06", members, [], [swap]);
+    const result = calculateDutyForDay("2026-05-06", members, [], [swap], { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member?.id).toBe(2);
     expect(result.member?.active).toBe(false);
     expect(result.swap?.id).toBe(swap.id);
@@ -157,14 +158,14 @@ describe("calculateDutyForDay", () => {
   test("swap 指向已刪除的 member（members 列表沒有）→ member null", () => {
     const members = [makeMember(1, "A", 0)];
     const swap = makeSwap("2026-05-06", 1, 999); // 999 不存在
-    const result = calculateDutyForDay("2026-05-06", members, [], [swap]);
+    const result = calculateDutyForDay("2026-05-06", members, [], [swap], { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member).toBeNull();
     expect(result.swap?.id).toBe(swap.id);
   });
 
   test("接受 dayjs 物件 / Date / string", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
-    const opts = { autoAnchorIsoWeek: "2026-W19" };
+    const opts = { anchorIsoWeek: "2026-W19", anchorMemberId: 1 };
     expect(
       calculateDutyForDay(dayjs("2026-05-06"), members, [], [], opts).member
         ?.name
@@ -181,7 +182,7 @@ describe("calculateDutyForDay", () => {
   test("swap 不命中當天 → 不影響 base member", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const swap = makeSwap("2026-05-07", 1, 2);
-    const opts = { autoAnchorIsoWeek: "2026-W19" };
+    const opts = { anchorIsoWeek: "2026-W19", anchorMemberId: 1 };
     // 查 5/6（前一天），swap 在 5/7
     const result = calculateDutyForDay(
       "2026-05-06",
@@ -200,7 +201,7 @@ describe("findNextDutyDateForMember", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
     };
     // W19=A, W20=B, W21=A → 從 5/4 找 B → 5/11
@@ -212,7 +213,7 @@ describe("findNextDutyDateForMember", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
     };
     // W19=A 進行中。找 A → 不能回 5/4-5/10（這輪），要 5/18 (W21)
@@ -224,7 +225,7 @@ describe("findNextDutyDateForMember", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
       blockedDates: new Set(["2026-05-11"]),
     };
@@ -246,7 +247,7 @@ describe("findNextDutyDateForMember", () => {
     ]);
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
       blockedDates,
     };
@@ -259,7 +260,7 @@ describe("findNextDutyDateForMember", () => {
     const members = [makeMember(1, "A", 0)];
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
     };
     const result = findNextDutyDateForMember(999, members, [], [], opts);
@@ -272,7 +273,7 @@ describe("findNextDutyDateForMember", () => {
     const swap = makeSwap("2026-05-11", 2, 1);
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 1,
       blockedDates: new Set(["2026-05-11"]),
     };
@@ -285,7 +286,7 @@ describe("findNextDutyDateForMember", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const opts = {
       fromDate: "2026-05-04",
-      autoAnchorIsoWeek: "2026-W19",
+      anchorIsoWeek: "2026-W19", anchorMemberId: 1,
       weeksPerSlot: 2,
     };
     // W19+W20 = A; W21+W22 = B; W23+W24 = A

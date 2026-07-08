@@ -90,6 +90,12 @@ export const WorkReportStatusArea = memo(function WorkReportStatusArea({
     error,
     summarySnapshotText,
   });
+  const getTaskMonitorStatusLabel = (task: CreateTaskMonitor): string =>
+    task.stale === true
+      ? t("workReport:status.taskStatusUnknown")
+      : getCreateTaskStatusText(task.status, uiLanguage, t);
+  const getTaskMonitorStatusClass = (task: CreateTaskMonitor): string =>
+    task.stale === true ? "pending" : task.status;
 
   const shouldPromoteNoticeIntoSystemNoticeCard = Boolean(notice?.displayAsHumanStatus);
   const humanNoteStatus =
@@ -178,8 +184,8 @@ export const WorkReportStatusArea = memo(function WorkReportStatusArea({
               })}
             </span>
             {taskMonitor.latestTaskMonitor && (
-              <span className={`task-status task-status--${taskMonitor.latestTaskMonitor.status}`}>
-                {getCreateTaskStatusText(taskMonitor.latestTaskMonitor.status, uiLanguage, t)}
+              <span className={`task-status task-status--${getTaskMonitorStatusClass(taskMonitor.latestTaskMonitor)}`}>
+                {getTaskMonitorStatusLabel(taskMonitor.latestTaskMonitor)}
               </span>
             )}
           </button>
@@ -201,9 +207,9 @@ export const WorkReportStatusArea = memo(function WorkReportStatusArea({
               </header>
               <ul className="task-monitor-list">
                 {taskMonitor.createTaskMonitors.map((task) => (
-                  <li key={task.taskId} className={`task-monitor-item task-monitor-item--${task.status}`}>
-                    <span className={`task-status task-status--${task.status}`}>
-                      {getCreateTaskStatusText(task.status, uiLanguage, t)}
+                  <li key={task.taskId} className={`task-monitor-item task-monitor-item--${getTaskMonitorStatusClass(task)}`}>
+                    <span className={`task-status task-status--${getTaskMonitorStatusClass(task)}`}>
+                      {getTaskMonitorStatusLabel(task)}
                     </span>
                     <span className="task-label">
                       {t("workReport:status.taskLabel", {

@@ -30,7 +30,7 @@ export async function pollDowntimeTaskUntilDone(
       const task = await fetchDowntimeTask(taskId);
       if (task.status === "success") return { ok: true };
       if (task.status === "failed") {
-        return { ok: false, errorMessage: task.message ?? "任務失敗" };
+        return { ok: false, errorMessage: task.errorMessage ?? task.message ?? "任務失敗" };
       }
     } catch {
       // query failed, keep polling

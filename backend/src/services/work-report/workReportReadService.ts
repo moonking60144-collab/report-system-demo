@@ -89,6 +89,7 @@ export class WorkReportReadService {
       ragicReadTimeoutMs?: number;
       ragicReadMaxRetries?: number;
       priority?: RagicReadPriority;
+      persistRefreshToSqlite?: boolean;
     } = {}
   ): Promise<WorkReportRecord> {
     return this.entryReadService.getReportByEntryId(formId, entryId, options);

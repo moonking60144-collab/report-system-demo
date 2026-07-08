@@ -4,7 +4,7 @@ import type {
   WorkReportFrontendEventAction,
   WorkReportFrontendEventCategory,
 } from "../debug/workReportDeveloperContract";
-import { getOrCreateClientId, getOrCreateTabId } from "../debug/clientIdentity";
+import { getOrCreateClientId, getOrCreateTabId } from "../../../utils/clientIdentity";
 import { resolveWorkReportFrontendEventCategory } from "../debug/workReportDeveloperContract";
 
 export type FrontendEventLogLevel = "info" | "warn" | "error";

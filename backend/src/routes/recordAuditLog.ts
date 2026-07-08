@@ -6,6 +6,7 @@ import {
   type RecordAuditLogEntry,
   type RecordAuditScope,
 } from "../storage/sqlite/recordAuditLogRepository";
+import { verifySystemNoticeBearerToken } from "./systemNoticeAuth";
 
 const recordAuditLogRouter = Router();
 
@@ -47,6 +48,7 @@ function computeChangedFields(entry: RecordAuditLogEntry): string[] {
 recordAuditLogRouter.get(
   "/audit/records",
   asyncHandler(async (req, res) => {
+    verifySystemNoticeBearerToken(req.header("authorization"));
     const scope = String(req.query.scope ?? "").trim() as RecordAuditScope;
     if (!VALID_SCOPES.includes(scope)) {
       throw new HttpError(400, "scope 必須是 work-report 或 downtime", "INVALID_QUERY_PARAM");

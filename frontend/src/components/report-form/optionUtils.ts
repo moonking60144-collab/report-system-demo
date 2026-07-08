@@ -21,7 +21,7 @@ export function withCurrentValue(
 }
 
 /** 過濾只保留「使用中」的機台；當前值若非使用中（報廢 / 售出），
- *  補回清單頂部、label 加狀態 suffix（例：「P10 - Process A Machine（報廢）」），
+ *  補回清單頂部、label 加狀態 suffix（例：「P10 - 搓牙機（報廢）」），
  *  讓舊資料仍能正確顯示，但使用者**新選**時只能從使用中清單裡挑。
  *
  *  Why: Ragic 狀態欄目前三值「使用中 / 報廢 / 售出」，只有使用中算可派工機台。

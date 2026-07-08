@@ -1,9 +1,11 @@
 import { env, resolveWritePath, shouldUseSqliteReadForForm } from "../config/env";
 import { getFormConfig } from "../config/forms";
 import { ragicClient } from "../ragic/client";
-import { ReportWritePayload } from "../types/workReport";
+import type { ReportWritePayload, WorkReportRecord } from "../types/workReport";
 import { HttpError } from "../utils/httpError";
+import { workReportSqliteRepository } from "../storage/sqlite/workReportSqliteRepository";
 import { reportFullSnapshotService } from "./reportFullSnapshotService";
+import { hasReadableSqliteSnapshot } from "./work-report/readModelState";
 import {
   throwRagicHttpError,
   writeToRagic,
@@ -35,6 +37,61 @@ import { validateReportPayload } from "./work-report/mutation/validateReportPayl
 import { resolveForm16RequiredFields } from "./work-report/create/resolveForm16RequiredFields";
 import { workReportReadService } from "./work-report/workReportReadService";
 import { workReportEditingPresenceService } from "./workReportEditingPresenceService";
+import type { RagicReadPriority } from "../infra/ragicRequestScheduler";
+import { isRetryableReadError } from "../infra/ragicReadRetry";
+
+const ENTRY_CONFLICT_IGNORED_KEYS = new Set(["lastUpdatedAt", "filterLastUpdatedAt"]);
+const CLOSED_WORK_ORDER_STATUS = "已結案";
+
+interface EntryConflictPreconditionOptions {
+  priority?: RagicReadPriority;
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+
+function resolveRecordLastUpdatedAt(record: WorkReportRecord | null | undefined): string {
+  return String((record as Record<string, unknown> | null | undefined)?.lastUpdatedAt ?? "").trim();
+}
+
+function normalizeEntryConflictComparableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeEntryConflictComparableValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value ?? null;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key, nextValue]) => {
+        if (ENTRY_CONFLICT_IGNORED_KEYS.has(key)) {
+          return false;
+        }
+        if (key.endsWith("Display")) {
+          return false;
+        }
+        return nextValue !== undefined;
+      })
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nextValue]) => [
+        key,
+        normalizeEntryConflictComparableValue(nextValue),
+      ])
+  );
+}
+
+function buildEntryConflictFingerprint(record: WorkReportRecord): string {
+  return JSON.stringify(normalizeEntryConflictComparableValue(record));
+}
+
+function isRagicStaleCheckUnavailable(error: unknown): boolean {
+  const candidate = error as { code?: unknown; message?: unknown };
+  return (
+    isRetryableReadError(error) ||
+    (typeof candidate.message === "string" &&
+      /(?:timeout of \d+ms exceeded|ECONNABORTED)/i.test(candidate.message))
+  );
+}
 
 class WorkReportService {
   async createReport(
@@ -60,6 +117,7 @@ class WorkReportService {
             validateReportPayload,
             normalizePayloadForWrite,
             getRawEntry,
+            getFormOptions: workReportReadService.getFormOptions.bind(workReportReadService),
             buildSubtableRowData,
             resolveForm16RequiredFields,
             logCreateOperatorDiagnostics,
@@ -357,18 +415,52 @@ class WorkReportService {
   async assertEntryNotModified(
     formId: string,
     entryId: string,
-    expectedEntryLastUpdatedAt?: string
+    expectedEntryLastUpdatedAt?: string,
+    options: EntryConflictPreconditionOptions = {}
   ): Promise<void> {
     const expected = String(expectedEntryLastUpdatedAt ?? "").trim();
     if (!expected) {
       return;
     }
 
-    const latestRecord = await workReportReadService.getReportByEntryId(formId, entryId, {
-      refresh: true,
-    });
-    const latestUpdatedAt = String((latestRecord as Record<string, unknown>)?.lastUpdatedAt ?? "").trim();
+    let latestRecord: WorkReportRecord;
+    try {
+      latestRecord = await workReportReadService.getReportByEntryId(formId, entryId, {
+        refresh: true,
+        priority: options.priority ?? "mutation",
+        ragicReadTimeoutMs: options.timeoutMs ?? env.RAGIC_MUTATION_READ_TIMEOUT_MS,
+        ragicReadMaxRetries: options.maxRetries ?? env.RAGIC_MUTATION_READ_MAX_RETRIES,
+      });
+    } catch (error) {
+      if (isRagicStaleCheckUnavailable(error)) {
+        throw new HttpError(
+          504,
+          "確認工令最新狀態逾時，尚未執行寫入，請重新整理後重試。",
+          "RAGIC_STALE_CHECK_UNAVAILABLE"
+        );
+      }
+      throw error;
+    }
+    const latestUpdatedAt = resolveRecordLastUpdatedAt(latestRecord);
     if (latestUpdatedAt === expected) {
+      return;
+    }
+
+    const expectedSnapshot = await this.getExpectedEntrySnapshotFromReadModel(
+      formId,
+      entryId,
+      expected
+    );
+    if (
+      expectedSnapshot &&
+      buildEntryConflictFingerprint(expectedSnapshot) === buildEntryConflictFingerprint(latestRecord)
+    ) {
+      console.info("[work-report-mutation][timestamp-drift-allowed]", {
+        formId,
+        entryId,
+        expectedLastUpdatedAt: expected,
+        latestLastUpdatedAt: latestUpdatedAt,
+      });
       return;
     }
 
@@ -426,6 +518,80 @@ class WorkReportService {
         );
       }
       throw error;
+    }
+  }
+
+  async assertCreateEntryAcceptsReports(
+    formId: string,
+    entryId: string
+  ): Promise<void> {
+    let record: WorkReportRecord;
+    try {
+      record = await workReportReadService.getReportByEntryId(formId, entryId, {
+        refresh: true,
+        priority: "mutation",
+        ragicReadTimeoutMs: env.RAGIC_MUTATION_READ_TIMEOUT_MS,
+        ragicReadMaxRetries: env.RAGIC_MUTATION_READ_MAX_RETRIES,
+      });
+    } catch (error) {
+      console.warn("[work-report-create][entry-status-precheck-failed]", {
+        formId,
+        entryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new HttpError(
+        409,
+        "暫時無法從 Ragic 取得最新工令狀態，這筆報工尚未寫入；請稍後重送。",
+        "ENTRY_STATUS_UNKNOWN"
+      );
+    }
+
+    const status = String((record as Record<string, unknown>).status ?? "").trim();
+    if (status !== CLOSED_WORK_ORDER_STATUS) {
+      return;
+    }
+
+    throw new HttpError(
+      409,
+      "這筆工令已結案，不能新增報工；請刷新工令後確認狀態。",
+      "ENTRY_CLOSED"
+    );
+  }
+
+  async assertBatchCreateEntryAcceptsReports(
+    formId: string,
+    entryId: string
+  ): Promise<void> {
+    await this.assertCreateEntryAcceptsReports(formId, entryId);
+  }
+
+  private async getExpectedEntrySnapshotFromReadModel(
+    formId: string,
+    entryId: string,
+    expectedLastUpdatedAt: string
+  ): Promise<WorkReportRecord | null> {
+    if (!shouldUseSqliteReadForForm(formId)) {
+      return null;
+    }
+
+    try {
+      const syncState = await workReportSqliteRepository.getSyncState(formId);
+      if (!hasReadableSqliteSnapshot(syncState)) {
+        return null;
+      }
+
+      const snapshotRecord = await workReportSqliteRepository.getReportByEntryId(formId, entryId);
+      if (!snapshotRecord || resolveRecordLastUpdatedAt(snapshotRecord) !== expectedLastUpdatedAt) {
+        return null;
+      }
+      return snapshotRecord;
+    } catch (error) {
+      console.warn("[work-report-mutation][entry-snapshot-read-failed]", {
+        formId,
+        entryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
     }
   }
 

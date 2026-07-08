@@ -82,6 +82,8 @@ export async function fetchSystemNoticeSession(
     headers: {
       Authorization: `Bearer ${token}`,
     },
+    // 開機驗證沒 timeout 的話，backend 暫時沒回應會讓「驗證登入狀態中」無限卡住
+    timeout: 10_000,
   });
   return response.data.data;
 }
@@ -138,6 +140,7 @@ export interface SystemNoticeAdminUser {
   createdAt: string;
   updatedAt: string;
   createdBy: string | null;
+  isProtected: boolean;
 }
 
 export async function listSystemNoticeUsers(

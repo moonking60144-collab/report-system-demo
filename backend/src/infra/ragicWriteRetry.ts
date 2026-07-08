@@ -1,5 +1,8 @@
 import { AxiosError } from "axios";
 import { env } from "../config/env";
+import { createLogger } from "../observability/logger";
+
+const log = createLogger("ragic-write-retry");
 
 const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -84,7 +87,8 @@ export async function runWithWriteRetry<T>(
       }
 
       const waitMs = calculateBackoffDelay(baseDelayMs, attempt);
-      console.warn("[ragic-write-retry]", {
+      log.warn({
+        event: "retry",
         label,
         attempt: attempt + 1,
         maxRetries,

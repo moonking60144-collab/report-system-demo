@@ -28,7 +28,7 @@ interface WorkOrderContextCardProps {
 
 const KPI_FIELDS: ContextField[] = [
   { key: "machineCode", label: "目前機台" },
-  { key: "currentMaterial", label: "來料" },
+  { key: "forgingMother", label: "鍛造母件" },
   { key: "plannedEndDate", label: "指定結束日" },
   { key: "producedQtyStat", label: "已生產數量統計(pc)" },
   { key: "pendingQty", label: "待生產數量" },
@@ -44,7 +44,7 @@ const DETAIL_GROUPS: ContextGroup[] = [
       { key: "processName", label: "主製程簡稱" },
       { key: "defaultProcessCode", label: "子製程別代碼" },
       { key: "status", label: "工令狀態" },
-      { key: "misCloseStatus", label: "結案狀態" },
+      { key: "misCloseStatus", label: "[MIS]結案狀態" },
     ],
   },
   {

@@ -6,6 +6,7 @@ import {
   workReportTaskRegistryService,
   type WorkReportQueueTaskType,
 } from "./work-report/workReportTaskRegistryService";
+import { workReportEntryMutationQueue } from "./work-report/workReportEntryMutationQueue";
 
 const TASK_SNAPSHOT_VERSION = "v1";
 
@@ -63,7 +64,7 @@ interface TaskSnapshotPayload {
 
 class CreateReportTaskService {
   private readonly tasks = new Map<string, CreateReportTask>();
-  private readonly queueChainByKey = new Map<string, Promise<void>>();
+  private readonly queueChainByKey = workReportEntryMutationQueue;
   private readonly taskIdByClientMutationId = new Map<string, string>();
   private persistChain: Promise<void> = Promise.resolve();
   private initializedPromise: Promise<void> | null = null;
@@ -132,21 +133,9 @@ class CreateReportTaskService {
     this.pruneHistory();
     this.schedulePersist();
 
-    const currentChain = this.queueChainByKey.get(input.queueKey) ?? Promise.resolve();
-    const nextChain = currentChain
-      .catch(() => {
-        // NOTE: 保持 queue 持續可用，避免前一筆失敗中斷後續任務。
-      })
-      .then(async () => {
-        await this.runTask(taskId, input.worker);
-      });
-
-    this.queueChainByKey.set(input.queueKey, nextChain);
-    void nextChain.finally(() => {
-      if (this.queueChainByKey.get(input.queueKey) === nextChain) {
-        this.queueChainByKey.delete(input.queueKey);
-      }
-    });
+    void this.queueChainByKey.enqueue(input.queueKey, () =>
+      this.runTask(taskId, input.worker)
+    );
 
     return this.copyTask(task);
   }
@@ -173,7 +162,7 @@ class CreateReportTaskService {
       running: 0,
       success: 0,
       failed: 0,
-      activeQueueKeyCount: this.queueChainByKey.size,
+      activeQueueKeyCount: this.queueChainByKey.activeKeyCount,
     };
 
     for (const task of this.tasks.values()) {
@@ -189,6 +178,15 @@ class CreateReportTaskService {
     }
 
     return counts;
+  }
+
+  async flush(): Promise<void> {
+    await this.persistChain.catch((error) => {
+      console.warn("[create-task][flush-failed]", {
+        filePath: this.resolveStoreFilePath(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   private async runTask(
@@ -290,6 +288,7 @@ class CreateReportTaskService {
       }
 
       const recoveredCount = this.recoverInterruptedTasks();
+      await workReportTaskRegistryService.initialize();
       this.syncAllTasksToRegistry();
       this.pruneHistory();
       this.schedulePersist();

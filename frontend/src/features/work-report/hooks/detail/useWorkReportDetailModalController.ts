@@ -25,6 +25,7 @@ interface UseWorkReportDetailModalControllerArgs {
   formId: WorkReportFormId | null;
   safeEntryId: string | null;
   workOrderNo?: string | null;
+  expectedEntryLastUpdatedAt?: string;
   hasActiveMutationTask: boolean;
   hasBlockingMutationTask: boolean;
   ensureOptionsLoaded: (options?: { silent?: boolean }) => Promise<unknown>;
@@ -52,6 +53,7 @@ interface UseWorkReportDetailModalControllerArgs {
     createdAt: string;
     editSessionId?: string;
     editLockVersion?: number;
+    expectedEntryLastUpdatedAt?: string;
   }) => void;
   clearPendingMutationReplay: () => void;
   isRetryableMutationError: (error: unknown) => boolean;
@@ -82,6 +84,7 @@ export function useWorkReportDetailModalController({
   formId,
   safeEntryId,
   workOrderNo,
+  expectedEntryLastUpdatedAt,
   hasActiveMutationTask,
   hasBlockingMutationTask,
   ensureOptionsLoaded,
@@ -195,12 +198,14 @@ export function useWorkReportDetailModalController({
             entryId: safeEntryId,
             payload,
             clientMutationId,
+            expectedEntryLastUpdatedAt,
             attempts: 0,
             createdAt: new Date().toISOString(),
           });
           const accepted = await createReportAccepted(formId, safeEntryId, payload, {
             clientMutationId,
             workOrderNo,
+            expectedEntryLastUpdatedAt,
           });
           saveRetryableMutationRecord({
             taskId: accepted.taskId,
@@ -211,6 +216,7 @@ export function useWorkReportDetailModalController({
             workOrderNo,
             payload,
             clientMutationId,
+            expectedEntryLastUpdatedAt,
             createdAt: new Date().toISOString(),
           });
           clearPendingMutationReplay();
@@ -288,6 +294,7 @@ export function useWorkReportDetailModalController({
           rowId: modalState.row.rowId,
           payload,
           clientMutationId,
+          expectedEntryLastUpdatedAt,
           editSessionId: currentEditSessionId,
           editLockVersion: editLockVersion ?? undefined,
           attempts: 0,
@@ -296,6 +303,7 @@ export function useWorkReportDetailModalController({
         const accepted = await updateReportAccepted(formId, safeEntryId, modalState.row.rowId, payload, {
           clientMutationId,
           workOrderNo,
+          expectedEntryLastUpdatedAt,
           editSessionId: currentEditSessionId,
           editLockVersion: editLockVersion ?? undefined,
         });
@@ -309,6 +317,7 @@ export function useWorkReportDetailModalController({
           workOrderNo,
           payload,
           clientMutationId,
+          expectedEntryLastUpdatedAt,
           editSessionId: currentEditSessionId,
           editLockVersion: editLockVersion ?? undefined,
           createdAt: new Date().toISOString(),
@@ -360,6 +369,7 @@ export function useWorkReportDetailModalController({
       createClientMutationId,
       currentEditSessionId,
       editLockVersion,
+      expectedEntryLastUpdatedAt,
       formId,
       logDetailEvent,
       modalState.mode,

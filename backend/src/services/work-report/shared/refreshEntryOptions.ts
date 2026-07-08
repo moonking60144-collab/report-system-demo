@@ -4,11 +4,14 @@ import type { RagicReadPriority } from "../../../infra/ragicRequestScheduler";
 /**
  * 根據 priority 選對應的 Ragic read timeout env。
  * - user: 使用者即時讀，短 timeout
+ * - mutation: 寫入前 precondition，獨立 lane / bucket，避免被一般 user refresh 或 sync 擠住
  * - sync: 全表 bulk 讀，最長 timeout
  * - background: 背景單筆 entry 讀，中等 timeout
  */
 function resolveRefreshTimeoutMs(priority: RagicReadPriority): number {
   switch (priority) {
+    case "mutation":
+      return env.RAGIC_MUTATION_READ_TIMEOUT_MS;
     case "sync":
       return env.RAGIC_SYNC_READ_TIMEOUT_MS;
     case "background":

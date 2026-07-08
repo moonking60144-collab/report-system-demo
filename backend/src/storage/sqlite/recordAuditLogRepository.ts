@@ -1,5 +1,5 @@
 import type { Database } from "sqlite";
-import { sqliteClient } from "./sqliteClient";
+import { createConnectionSerializer, sqliteClient } from "./sqliteClient";
 
 export type RecordAuditScope = "work-report" | "downtime";
 export type RecordAuditAction = "update" | "delete";
@@ -112,30 +112,33 @@ const MAX_LIMIT = 500;
 export function createRecordAuditLogRepository(
   dbProvider: () => Promise<Database>
 ): RecordAuditLogRepository {
+  const { runSerializedWrite } = createConnectionSerializer(dbProvider);
+
   return {
     async insert(input) {
-      const db = await dbProvider();
       const occurredAt = input.occurredAt ?? new Date().toISOString();
-      await db.run(
-        `INSERT INTO record_audit_log
-           (scope, form_id, entry_id, row_id, action,
-            actor_client_id, actor_tab_id, actor_ip, actor_label,
-            task_id, before_snapshot_json, after_patch_json, occurred_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        input.scope,
-        input.formId,
-        input.entryId,
-        input.rowId ?? null,
-        input.action,
-        input.actorClientId ?? null,
-        input.actorTabId ?? null,
-        input.actorIp ?? null,
-        input.actorLabel ?? null,
-        input.taskId ?? null,
-        safeStringify(input.beforeSnapshot),
-        safeStringify(input.afterPatch),
-        occurredAt
-      );
+      await runSerializedWrite(async (db) => {
+        await db.run(
+          `INSERT INTO record_audit_log
+             (scope, form_id, entry_id, row_id, action,
+              actor_client_id, actor_tab_id, actor_ip, actor_label,
+              task_id, before_snapshot_json, after_patch_json, occurred_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          input.scope,
+          input.formId,
+          input.entryId,
+          input.rowId ?? null,
+          input.action,
+          input.actorClientId ?? null,
+          input.actorTabId ?? null,
+          input.actorIp ?? null,
+          input.actorLabel ?? null,
+          input.taskId ?? null,
+          safeStringify(input.beforeSnapshot),
+          safeStringify(input.afterPatch),
+          occurredAt
+        );
+      });
     },
 
     async listByRecord(params) {
@@ -168,12 +171,13 @@ export function createRecordAuditLogRepository(
     },
 
     async cleanupOlderThan(thresholdIso) {
-      const db = await dbProvider();
-      const result = await db.run(
-        `DELETE FROM record_audit_log WHERE occurred_at < ?`,
-        thresholdIso
-      );
-      return typeof result.changes === "number" ? result.changes : 0;
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `DELETE FROM record_audit_log WHERE occurred_at < ?`,
+          thresholdIso
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
     },
   };
 }

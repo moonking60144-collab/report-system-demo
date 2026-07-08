@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { ReloadOutlined } from "@ant-design/icons";
 import { ConfigProvider, Modal, message, theme as antdTheme } from "antd";
 import dayjs from "dayjs";
 import {
   deleteItDutyOverride,
   deleteItDutySwap,
+  fetchItDutyDayNotes,
   fetchItDutyDebts,
   fetchItDutyMembers,
   fetchItDutyOverrides,
   fetchItDutySetting,
   fetchItDutySwaps,
   updateItDutySetting,
+  type ItDutyDayNote,
   type ItDutyDaySwap,
   type ItDutyDebtEntry,
   type ItDutyMember,
@@ -23,7 +26,7 @@ import { ItDutyScheduleTable } from "../components/ItDutyScheduleTable";
 import { ItDutyHeroCards } from "../components/ItDutyHeroCards";
 import { ItDutyMonthCalendar } from "../components/ItDutyMonthCalendar";
 import { ItDutyThemeToggle } from "../components/ItDutyThemeToggle";
-import { ItDutyDaySwapModal } from "../components/ItDutyDaySwapModal";
+import { ItDutyDayModal } from "../components/ItDutyDayModal";
 import { ItDutyDebtPanel } from "../components/ItDutyDebtPanel";
 import { ItDutyRepayModal } from "../components/ItDutyRepayModal";
 import { findNextDutyDateForMember } from "../utils/dayResolver";
@@ -65,8 +68,13 @@ export function ItDutyPage() {
   const [members, setMembers] = useState<ItDutyMember[]>([]);
   const [overrides, setOverrides] = useState<ItDutyOverride[]>([]);
   const [daySwaps, setDaySwaps] = useState<ItDutyDaySwap[]>([]);
+  const [dayNotes, setDayNotes] = useState<ItDutyDayNote[]>([]);
   const [debts, setDebts] = useState<ItDutyDebtEntry[]>([]);
   const [weeksPerSlot, setWeeksPerSlot] = useState(1);
+  // Rotation anchor — 後端 it_duty_setting 持久化的初始錨點。
+  // 第一次有 active member 時 seed、後續不動 → 解決時間漂移
+  const [anchorIsoWeek, setAnchorIsoWeek] = useState<string | null>(null);
+  const [anchorMemberId, setAnchorMemberId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [memberModalOpen, setMemberModalOpen] = useState(false);
   const [assignTarget, setAssignTarget] = useState<AssignTarget | null>(null);
@@ -90,19 +98,28 @@ export function ItDutyPage() {
       // Day swap 全抓不分範圍：debt panel 需要對應到所有未配對 leave，
       // 範圍限制會讓「N 天前的舊請假找不到 leave 配對 → 還班 dead-end」。
       // IT 內部表使用量小，全 fetch 完全沒效能負擔。
-      const [memberList, overrideList, setting, swapList, debtList] =
+      // dayNotes 跟 daySwaps 對齊全 fetch — 量小、月曆翻到哪都顯示。
+      // 非關鍵裝飾資料：個別包 catch 給 fallback 空陣列，避免它失敗時整頁 error。
+      const [memberList, overrideList, setting, swapList, debtList, dayNoteList] =
         await Promise.all([
           fetchItDutyMembers(),
           fetchItDutyOverrides({ from: earliestWeek, to: latestWeek }),
           fetchItDutySetting(),
           fetchItDutySwaps(),
           fetchItDutyDebts(),
+          fetchItDutyDayNotes().catch((error) => {
+            console.warn("[itDuty] dayNotes fetch failed (non-fatal)", error);
+            return [];
+          }),
         ]);
       setMembers(memberList);
       setOverrides(overrideList);
       setWeeksPerSlot(setting.weeksPerSlot);
+      setAnchorIsoWeek(setting.anchorIsoWeek);
+      setAnchorMemberId(setting.anchorMemberId);
       setDaySwaps(swapList);
       setDebts(debtList);
+      setDayNotes(dayNoteList);
     } catch (error) {
       console.error("[itDuty] load failed", error);
       void message.error(t("errors.loadFailed"));
@@ -110,6 +127,18 @@ export function ItDutyPage() {
       setLoading(false);
     }
   }, [currentIsoWeek, futureWeeks, t]);
+
+  // 純 dayNote CRUD 用這個就好，不必拉 members / overrides / swaps / debts
+  const reloadDayNotes = useCallback(async () => {
+    try {
+      const list = await fetchItDutyDayNotes();
+      setDayNotes(list);
+    } catch (error) {
+      console.error("[itDuty] reload dayNotes failed", error);
+      // 存已經成功（DB 有資料），這裡只是 reload 失敗 → 提醒使用者重整就會看到
+      void message.warning(t("errors.loadFailed"));
+    }
+  }, [t]);
 
   useEffect(() => {
     void loadData();
@@ -221,6 +250,12 @@ export function ItDutyPage() {
           <p className="itduty-page-subtitle">{t("page.subtitle")}</p>
         </div>
         <div className="itduty-page-header__right">
+          <Link className="itduty-btn" to="/dev">
+            返回 Dev 模式
+          </Link>
+          <Link className="itduty-btn" to="/it/sop">
+            SOP 文件
+          </Link>
           <ItDutyThemeToggle mode={themeMode} onChange={setThemeMode} />
         </div>
       </header>
@@ -231,7 +266,10 @@ export function ItDutyPage() {
           members={members}
           overrides={overrides}
           daySwaps={daySwaps}
+          dayNotes={dayNotes}
           weeksPerSlot={weeksPerSlot}
+          anchorIsoWeek={anchorIsoWeek}
+          anchorMemberId={anchorMemberId}
           onAssign={(isoWeek, currentOverride, defaultMemberId) =>
             setAssignTarget({ isoWeek, currentOverride, defaultMemberId })
           }
@@ -245,7 +283,10 @@ export function ItDutyPage() {
           members={members}
           overrides={overrides}
           daySwaps={daySwaps}
+          dayNotes={dayNotes}
           weeksPerSlot={weeksPerSlot}
+          anchorIsoWeek={anchorIsoWeek}
+          anchorMemberId={anchorMemberId}
           onChangeMonth={setCalendarMonth}
           onAssign={(isoWeek, currentOverride, defaultMemberId) =>
             setAssignTarget({ isoWeek, currentOverride, defaultMemberId })
@@ -271,7 +312,8 @@ export function ItDutyPage() {
               daySwaps,
               {
                 blockedDates,
-                autoAnchorIsoWeek: currentIsoWeek,
+                anchorIsoWeek,
+                anchorMemberId,
                 weeksPerSlot,
               }
             );
@@ -362,6 +404,8 @@ export function ItDutyPage() {
           overrides={overrides}
           daySwaps={daySwaps}
           weeksPerSlot={weeksPerSlot}
+          anchorIsoWeek={anchorIsoWeek}
+          anchorMemberId={anchorMemberId}
           searchQuery={searchQuery}
           onAssign={(isoWeek, currentOverride, defaultMemberId) =>
             setAssignTarget({ isoWeek, currentOverride, defaultMemberId })
@@ -387,14 +431,20 @@ export function ItDutyPage() {
         onSaved={() => void loadData()}
       />
 
-      <ItDutyDaySwapModal
+      <ItDutyDayModal
         open={daySwapTarget !== null}
         date={daySwapTarget?.date ?? null}
         baseMember={daySwapTarget?.baseMember ?? null}
         existingSwap={daySwapTarget?.existingSwap ?? null}
+        existingDayNote={
+          daySwapTarget?.date
+            ? dayNotes.find((n) => n.noteDate === daySwapTarget.date) ?? null
+            : null
+        }
         members={members}
         onClose={() => setDaySwapTarget(null)}
-        onSaved={() => void loadData()}
+        onSwapSaved={() => void loadData()}
+        onDayNoteSaved={() => void reloadDayNotes()}
       />
 
       <ItDutyRepayModal

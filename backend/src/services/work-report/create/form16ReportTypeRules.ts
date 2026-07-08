@@ -1,14 +1,14 @@
 import { HttpError } from "../../../utils/httpError";
 
 export const FORM16_REPORT_TYPE_OPTIONS = new Set<string>([
-  "HF-Forge",
-  "TI-ProcessA",
-  "PROC-LM",
-  "PROC-EP",
-  "CH-ManualInspect",
-  "CH-MachineInspect",
-  "PA-Pack",
-  "SP-Stock",
+  "HF鍛造",
+  "TI搓牙",
+  "3F加工-LM",
+  "3F加工-EP",
+  "CH人工全檢A",
+  "CH機台全檢H",
+  "PA包裝",
+  "SP備貨",
 ]);
 
 export const FORM16_FIELD_NAME_CANDIDATES = {
@@ -20,14 +20,14 @@ export const FORM16_REQUIRED_FALLBACK_BY_REPORT_TYPE: Record<
   string,
   { depUnit: string; prodType: string }
 > = {
-  "HF-Forge": { depUnit: "DEPT-FORGE", prodType: "HF" },
-  "TI-ProcessA": { depUnit: "DEPT-PROCA", prodType: "TI" },
-  "PROC-LM": { depUnit: "DEPT-PROCA", prodType: "TI" },
-  "PROC-EP": { depUnit: "DEPT-PROCA", prodType: "TI" },
-  "CH-MachineInspect": { depUnit: "DEPT-QC", prodType: "CH" },
-  "CH-ManualInspect": { depUnit: "DEPT-WAREHOUSE", prodType: "PA" },
-  "PA-Pack": { depUnit: "DEPT-WAREHOUSE", prodType: "PA" },
-  "SP-Stock": { depUnit: "DEPT-WAREHOUSE", prodType: "PA" },
+  HF鍛造: { depUnit: "C01鍛造組", prodType: "HF" },
+  TI搓牙: { depUnit: "C02搓牙組", prodType: "TI" },
+  "3F加工-LM": { depUnit: "C02搓牙組", prodType: "TI" },
+  "3F加工-EP": { depUnit: "C02搓牙組", prodType: "TI" },
+  CH機台全檢H: { depUnit: "Q03全檢組", prodType: "CH" },
+  CH人工全檢A: { depUnit: "D02倉儲組", prodType: "PA" },
+  PA包裝: { depUnit: "D02倉儲組", prodType: "PA" },
+  SP備貨: { depUnit: "D02倉儲組", prodType: "PA" },
 };
 
 export function mapProcessCodeToReportType(processCode: string): string | null {
@@ -36,29 +36,29 @@ export function mapProcessCodeToReportType(processCode: string): string | null {
     return null;
   }
   if (normalized.startsWith("HF")) {
-    return "HF-Forge";
+    return "HF鍛造";
   }
   if (normalized.startsWith("LM")) {
-    return "PROC-LM";
+    return "3F加工-LM";
   }
   if (normalized.startsWith("EP")) {
-    return "PROC-EP";
+    return "3F加工-EP";
   }
   if (normalized.startsWith("PA")) {
-    return "PA-Pack";
+    return "PA包裝";
   }
   if (normalized.startsWith("SP")) {
-    return "SP-Stock";
+    return "SP備貨";
   }
   if (normalized.startsWith("CH")) {
-    return "CH-ManualInspect";
+    return "CH人工全檢A";
   }
   if (
     normalized.startsWith("TI") ||
     normalized.startsWith("WP") ||
     normalized.startsWith("BU")
   ) {
-    return "TI-ProcessA";
+    return "TI搓牙";
   }
   return null;
 }

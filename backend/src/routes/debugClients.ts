@@ -10,6 +10,7 @@ import { HttpError } from "../utils/httpError";
 const debugClientsRouter = Router();
 const MAX_DEBUG_CLIENT_ID_LENGTH = 128;
 const MAX_DEBUG_TAB_ID_LENGTH = 128;
+const MAX_DEBUG_CLIENT_BOOT_ID_LENGTH = 128;
 const MAX_DEBUG_ACTION_LENGTH = 128;
 
 function parseRequiredBoundedValue(
@@ -34,6 +35,54 @@ function parseRequiredBoundedValue(
     );
   }
   return normalized;
+}
+
+function parseCommandClientIdentity(body: Record<string, unknown>): {
+  clientId: string;
+  tabId: string;
+  clientBootId: string;
+} {
+  const clientId = parseRequiredBoundedValue(body.clientId, {
+    fieldName: "clientId",
+    maxLength: MAX_DEBUG_CLIENT_ID_LENGTH,
+    missingMessage: "缺少 clientId 或 tabId",
+    missingCode: "DEBUG_CLIENT_ID_REQUIRED",
+    tooLongCode: "DEBUG_CLIENT_FIELD_TOO_LONG",
+  });
+  const tabId = parseRequiredBoundedValue(body.tabId, {
+    fieldName: "tabId",
+    maxLength: MAX_DEBUG_TAB_ID_LENGTH,
+    missingMessage: "缺少 clientId 或 tabId",
+    missingCode: "DEBUG_CLIENT_ID_REQUIRED",
+    tooLongCode: "DEBUG_CLIENT_FIELD_TOO_LONG",
+  });
+  const clientBootId = parseRequiredBoundedValue(body.clientBootId, {
+    fieldName: "clientBootId",
+    maxLength: MAX_DEBUG_CLIENT_BOOT_ID_LENGTH,
+    missingMessage: "缺少 clientBootId",
+    missingCode: "DEBUG_CLIENT_BOOT_ID_REQUIRED",
+    tooLongCode: "DEBUG_CLIENT_FIELD_TOO_LONG",
+  });
+  return { clientId, tabId, clientBootId };
+}
+
+function assertCommandClientIdentity(body: Record<string, unknown>): {
+  clientId: string;
+  tabId: string;
+  clientBootId: string;
+} {
+  const identity = parseCommandClientIdentity(body);
+  const presence = workReportClientPresenceStore.getClient(
+    identity.clientId,
+    identity.tabId
+  ).presence;
+  if (!presence) {
+    throw new HttpError(404, "找不到 client presence", "DEBUG_CLIENT_NOT_FOUND");
+  }
+  if (presence.clientBootId !== identity.clientBootId) {
+    throw new HttpError(403, "clientBootId 不符合目前 tab session", "DEBUG_CLIENT_BOOT_ID_MISMATCH");
+  }
+  return identity;
 }
 
 debugClientsRouter.post(
@@ -72,11 +121,44 @@ debugClientsRouter.post(
       deployVersionAtConnect: SERVER_DEPLOY_VERSION,
     });
 
-    const commands = workReportClientPresenceStore.consumeCommands(clientId, tabId);
     res.json({
       data: {
         presence,
+      },
+    });
+  })
+);
+
+debugClientsRouter.post(
+  "/debug/clients/commands/fetch",
+  asyncHandler(async (req, res) => {
+    const identity = assertCommandClientIdentity((req.body ?? {}) as Record<string, unknown>);
+    const commands = workReportClientPresenceStore.getCommands(identity.clientId, identity.tabId);
+    res.json({
+      data: {
         commands,
+      },
+    });
+  })
+);
+
+debugClientsRouter.post(
+  "/debug/clients/commands/ack",
+  asyncHandler(async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const identity = assertCommandClientIdentity(body);
+    const commandIds = Array.isArray(body.commandIds)
+      ? body.commandIds.map((id) => String(id ?? "").trim()).filter((id) => id)
+      : [];
+    const acked = workReportClientPresenceStore.ackCommands(
+      identity.clientId,
+      identity.tabId,
+      commandIds
+    );
+    res.json({
+      data: {
+        accepted: true,
+        acked,
       },
     });
   })
@@ -85,24 +167,14 @@ debugClientsRouter.post(
 debugClientsRouter.post(
   "/debug/clients/disconnect",
   asyncHandler(async (req, res) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const clientId = parseRequiredBoundedValue(body.clientId, {
-      fieldName: "clientId",
-      maxLength: MAX_DEBUG_CLIENT_ID_LENGTH,
-      missingMessage: "缺少 clientId 或 tabId",
-      missingCode: "DEBUG_CLIENT_ID_REQUIRED",
-      tooLongCode: "DEBUG_CLIENT_FIELD_TOO_LONG",
-    });
-    const tabId = parseRequiredBoundedValue(body.tabId, {
-      fieldName: "tabId",
-      maxLength: MAX_DEBUG_TAB_ID_LENGTH,
-      missingMessage: "缺少 clientId 或 tabId",
-      missingCode: "DEBUG_CLIENT_ID_REQUIRED",
-      tooLongCode: "DEBUG_CLIENT_FIELD_TOO_LONG",
-    });
+    const identity = assertCommandClientIdentity((req.body ?? {}) as Record<string, unknown>);
 
-    const identity = resolveRequestClientIdentity(req);
-    const presence = workReportClientPresenceStore.markDisconnected(clientId, tabId, identity.effectiveIp);
+    const requestIdentity = resolveRequestClientIdentity(req);
+    const presence = workReportClientPresenceStore.markDisconnected(
+      identity.clientId,
+      identity.tabId,
+      requestIdentity.effectiveIp
+    );
     res.status(202).json({
       data: {
         accepted: true,
@@ -223,7 +295,9 @@ debugClientsRouter.post(
       type !== "force-refresh" &&
       type !== "force-session-expired" &&
       type !== "set-maintenance-message" &&
-      type !== "clear-maintenance-message"
+      type !== "clear-maintenance-message" &&
+      type !== "set-blocked" &&
+      type !== "clear-blocked"
     ) {
       throw new HttpError(400, "不支援的 debug command type", "DEBUG_CLIENT_COMMAND_INVALID");
     }

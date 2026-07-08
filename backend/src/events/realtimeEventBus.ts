@@ -1,23 +1,18 @@
 import { EventEmitter } from "events";
+import type {
+  RagicDefinitionsSyncPayload,
+  RealtimeEventPayload,
+} from "@shared-types/realtime";
 
-export type RealtimeEventType =
-  | "work-report-form-updated"
-  | "work-report-entry-updated"
-  | "system-notice-force-refresh"
-  | "system-notice-content-updated";
-
-export interface RealtimeEventPayload {
-  id: string;
-  type: RealtimeEventType;
-  occurredAt: string;
-  formId?: string;
-  entryId?: string;
-  forceRefreshToken?: string;
-  /** system-notice-content-updated 用：notice 改完後的新 revision */
-  noticeRevision?: number;
-}
+export type {
+  RagicDefinitionsSyncPayload,
+  RagicDefinitionsSyncStatus,
+  RealtimeEventPayload,
+  RealtimeEventType,
+} from "@shared-types/realtime";
 
 type RealtimeEventListener = (payload: RealtimeEventPayload) => void;
+let lastRagicDefinitionsSyncEvent: RealtimeEventPayload | null = null;
 
 class RealtimeEventBus {
   private readonly emitter = new EventEmitter();
@@ -83,4 +78,19 @@ export function publishSystemNoticeContentUpdated(revision: number): RealtimeEve
     type: "system-notice-content-updated",
     noticeRevision: revision,
   });
+}
+
+export function publishRagicDefinitionsSyncStatus(
+  payload: RagicDefinitionsSyncPayload
+): RealtimeEventPayload {
+  const eventPayload = realtimeEventBus.publish({
+    type: "ragic-definitions-sync-status",
+    ragicDefinitions: payload,
+  });
+  lastRagicDefinitionsSyncEvent = eventPayload;
+  return eventPayload;
+}
+
+export function getLastRagicDefinitionsSyncStatus(): RealtimeEventPayload | null {
+  return lastRagicDefinitionsSyncEvent;
 }

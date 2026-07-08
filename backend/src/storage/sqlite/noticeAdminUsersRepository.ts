@@ -1,5 +1,5 @@
 import type { Database } from "sqlite";
-import { sqliteClient } from "./sqliteClient";
+import { createConnectionSerializer, sqliteClient } from "./sqliteClient";
 
 export interface NoticeAdminUser {
   id: number;
@@ -55,20 +55,7 @@ export interface NoticeAdminUsersRepository {
 export function createNoticeAdminUsersRepository(
   getDb: () => Promise<Database>
 ): NoticeAdminUsersRepository {
-  let writeChain: Promise<void> = Promise.resolve();
-
-  async function runSerializedWrite<T>(
-    operation: (db: Database) => Promise<T>
-  ): Promise<T> {
-    const scheduled = writeChain
-      .catch(() => undefined)
-      .then(async () => operation(await getDb()));
-    writeChain = scheduled.then(
-      () => undefined,
-      () => undefined
-    );
-    return scheduled;
-  }
+  const { runSerializedWrite } = createConnectionSerializer(getDb);
 
   return {
     async count() {

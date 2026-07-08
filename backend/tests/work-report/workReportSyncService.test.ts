@@ -94,9 +94,9 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
   assert.deepEqual(refreshedEntries, ["E-1", "E-2"]);
   assert.match(snapshotGenerationId, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(replayUpsertGenerationIds, [snapshotGenerationId, snapshotGenerationId]);
-  assert.deepEqual(countGenerationIds, [snapshotGenerationId]);
-  assert.deepEqual(markedSeqs, [12]);
-  assert.deepEqual(cleanedSeqs, [12]);
+  assert.deepEqual(countGenerationIds, [snapshotGenerationId, snapshotGenerationId]);
+  assert.deepEqual(markedSeqs, [10, 12]);
+  assert.deepEqual(cleanedSeqs, [10, 12]);
 
   const runningPatch = syncStatePatches[0];
   assert.equal(runningPatch.status, "running");
@@ -111,6 +111,92 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
   assert.equal(successPatch.totalRows, 4);
   assert.equal(typeof successPatch.snapshotAt, "string");
   assert.equal(successPatch.readModelVersion, READ_MODEL_SCHEMA_VERSION);
+});
+
+test("sync promote 前最後一刻 enqueue 的 mutation 會在 promote 後補 replay", async () => {
+  const syncStatePatches: Array<Record<string, unknown>> = [];
+  const replayWindows: Array<[number, number]> = [];
+  const refreshedEntries: string[] = [];
+  const replayUpsertGenerationIds: string[] = [];
+  const markedSeqs: number[] = [];
+  const cleanedSeqs: number[] = [];
+  const countResults = [
+    { entryCount: 0, rowCount: 0 },
+    { entryCount: 1, rowCount: 2 },
+  ];
+  let snapshotGenerationId = "";
+  let latestSeqCall = 0;
+  const latestSeqs = [0, 0, 1];
+
+  const service = new WorkReportSyncService({
+    generateTaskId: () => "sync-105-race",
+    scanFormRecords: async () => [],
+    refreshEntry: async (_formId, entryId) => {
+      refreshedEntries.push(entryId);
+      return {
+        id: entryId,
+        workOrderNo: `WO-${entryId}`,
+        customerPartNo: null,
+        erpPartNo: null,
+        status: "未結案",
+        reports: [],
+      };
+    },
+    replaceFormSnapshot: async (_formId, _records, syncedAt) => {
+      snapshotGenerationId = syncedAt;
+      return { entryCount: 0, rowCount: 0 };
+    },
+    upsertEntrySnapshot: async (_formId, _record, _syncedAt, options) => {
+      replayUpsertGenerationIds.push(options?.generationId ?? "");
+      return { rowCount: 2 };
+    },
+    deleteEntrySnapshot: async () => undefined,
+    getSyncState: async () => null,
+    upsertSyncState: async (patch) => {
+      syncStatePatches.push({ ...patch });
+    },
+    getLatestProjectionSeq: async () => {
+      const value = latestSeqs[Math.min(latestSeqCall, latestSeqs.length - 1)];
+      latestSeqCall += 1;
+      return value;
+    },
+    getOldestPendingProjectionSeq: async () => null,
+    listPendingProjectionEntries: async (_formId, afterSeq, upToSeq) => {
+      replayWindows.push([afterSeq, upToSeq]);
+      if (afterSeq === 0 && upToSeq === 1) {
+        return [{ entryId: "E-RACE", latestSeq: 1 }];
+      }
+      return [];
+    },
+    markProjectionRangeProcessed: async (_formId, upToSeq) => {
+      markedSeqs.push(upToSeq);
+    },
+    cleanupProcessedProjectionEvents: async (_formId, upToSeq) => {
+      cleanedSeqs.push(upToSeq);
+    },
+    getFormSnapshotCounts: async () => countResults.shift() ?? { entryCount: 1, rowCount: 2 },
+    publishWorkReportFormUpdated: () => undefined,
+  });
+
+  const task = await service.requestSync("105", {
+    triggeredBy: "test",
+    waitForCompletion: true,
+  });
+
+  assert.equal(task.status, "success");
+  assert.equal(task.syncedEntries, 1);
+  assert.equal(task.syncedRows, 2);
+  assert.deepEqual(replayWindows, [[0, 1]]);
+  assert.deepEqual(refreshedEntries, ["E-RACE"]);
+  assert.deepEqual(replayUpsertGenerationIds, [snapshotGenerationId]);
+  assert.deepEqual(markedSeqs, [1]);
+  assert.deepEqual(cleanedSeqs, [1]);
+
+  const successPatches = syncStatePatches.filter((patch) => patch.status === "success");
+  assert.equal(successPatches.length, 2);
+  assert.equal(successPatches.at(-1)?.activeGenerationId, snapshotGenerationId);
+  assert.equal(successPatches.at(-1)?.totalEntries, 1);
+  assert.equal(successPatches.at(-1)?.totalRows, 2);
 });
 
 test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", async () => {

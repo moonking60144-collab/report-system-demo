@@ -24,6 +24,10 @@
  * - 短任務（< 30s）、失敗可以容忍直接丟（callback / projection / log push）
  * - Route handler 已經回了 client 200，背景做完即可，不需要持久狀態
  */
+import { createLogger } from "../observability/logger";
+
+const log = createLogger("background-task");
+
 export function runBackgroundTask(
   label: string,
   work: () => Promise<void>,
@@ -37,14 +41,16 @@ export function runBackgroundTask(
       try {
         onError?.(error);
       } catch (handlerError) {
-        console.error("[background-task][onError-failed]", {
+        log.error({
+          event: "onError.failed",
           label,
           originalError: error instanceof Error ? error.message : String(error),
           handlerError: handlerError instanceof Error ? handlerError.message : String(handlerError),
         });
       }
       // 最外層再多一層保險：確保不會 unhandledRejection
-      console.error("[background-task][failed]", {
+      log.error({
+        event: "failed",
         label,
         error: error instanceof Error ? error.message : String(error),
       });

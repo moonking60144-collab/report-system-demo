@@ -91,7 +91,7 @@ export function useWorkReportDetailRefreshController({
     logDetailEvent("realtime", "refresh-immediate", "即時刷新立即套用", {
       phase: "immediate",
     });
-    void loadEntry({ silent: true, forceRefresh: false });
+    void loadEntry({ mode: "background", forceRefresh: false });
   }, [
     editingRowId,
     formId,
@@ -173,7 +173,7 @@ export function useWorkReportDetailRefreshController({
       type: "success",
       message: t("workReport:messages.realtimeRefreshApplied"),
     });
-    void loadEntry({ silent: true, forceRefresh: false });
+    void loadEntry({ mode: "background", forceRefresh: false });
   }, [
     editingRowId,
     hasActiveMutationTask,
@@ -214,7 +214,7 @@ export function useWorkReportDetailRefreshController({
       });
       const run = async () => {
         try {
-          await loadEntry({ silent: true, forceRefresh: false });
+          await loadEntry({ mode: "background", forceRefresh: false });
         } finally {
           pendingFallbackRefreshRef.current = false;
         }

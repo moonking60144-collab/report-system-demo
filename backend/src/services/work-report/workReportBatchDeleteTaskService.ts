@@ -1,10 +1,16 @@
 import { randomUUID } from "crypto";
 import { env } from "../../config/env";
+import { createLogger } from "../../observability/logger";
 import { HttpError } from "../../utils/httpError";
+import { pruneTerminalTaskHistory } from "./localTaskHistory";
+import { workReportEntryMutationQueue } from "./workReportEntryMutationQueue";
 import {
   workReportTaskRegistryService,
   type WorkReportQueueTaskStatus,
+  type WorkReportQueueTaskType,
 } from "./workReportTaskRegistryService";
+
+const log = createLogger("work-report-batch-delete");
 
 interface BatchDeleteFailedItem {
   rowId: string;
@@ -14,6 +20,7 @@ interface BatchDeleteFailedItem {
 
 interface WorkReportBatchDeleteTask {
   taskId: string;
+  taskType: Extract<WorkReportQueueTaskType, "delete-report" | "delete-report-batch">;
   formId: string;
   entryId: string;
   workOrderNo?: string;
@@ -24,6 +31,7 @@ interface WorkReportBatchDeleteTask {
   failedCount: number;
   failedItems: BatchDeleteFailedItem[];
   status: WorkReportQueueTaskStatus;
+  phase: "deleting" | "finalizing";
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -35,6 +43,7 @@ interface WorkReportBatchDeleteTask {
 }
 
 interface RequestBatchDeleteInput {
+  taskType?: Extract<WorkReportQueueTaskType, "delete-report" | "delete-report-batch">;
   formId: string;
   entryId: string;
   workOrderNo?: string;
@@ -44,6 +53,7 @@ interface RequestBatchDeleteInput {
   actorIp?: string;
   actorLabel?: string;
   concurrency?: number;
+  beforeRun?: () => Promise<void>;
   deleteRow: (rowId: string) => Promise<{ rowId: string }>;
   finalizeAfterDelete?: (summary: {
     formId: string;
@@ -92,7 +102,7 @@ function resolveDeleteError(error: unknown): {
 
 class WorkReportBatchDeleteTaskService {
   private readonly tasks = new Map<string, WorkReportBatchDeleteTask>();
-  private readonly queueChainByKey = new Map<string, Promise<void>>();
+  private readonly queueChainByKey = workReportEntryMutationQueue;
 
   requestBatchDelete(input: RequestBatchDeleteInput): Pick<
     WorkReportBatchDeleteTask,
@@ -105,18 +115,21 @@ class WorkReportBatchDeleteTaskService {
 
     const taskId = randomUUID();
     const createdAt = new Date().toISOString();
+    const taskType = input.taskType ?? "delete-report-batch";
     const task: WorkReportBatchDeleteTask = {
       taskId,
+      taskType,
       formId: input.formId,
       entryId: input.entryId,
       ...(input.workOrderNo ? { workOrderNo: input.workOrderNo } : {}),
-      queueKey: `delete-batch:${input.formId}:${input.entryId}`,
+      queueKey: `${input.formId}:${input.entryId}`,
       rowIds,
       requestedCount: rowIds.length,
       deletedCount: 0,
       failedCount: 0,
       failedItems: [],
       status: "pending",
+      phase: "deleting",
       createdAt,
       updatedAt: createdAt,
       ...(input.actorClientId ? { actorClientId: input.actorClientId } : {}),
@@ -128,20 +141,9 @@ class WorkReportBatchDeleteTaskService {
     this.tasks.set(taskId, task);
     this.syncTaskToRegistry(task);
 
-    const currentChain = this.queueChainByKey.get(task.queueKey) ?? Promise.resolve();
-    const nextChain = currentChain
-      .catch(() => {
-        // NOTE: 保持 queue 可持續接受後續批次刪除。
-      })
-      .then(async () => {
-        await this.runTask(taskId, input);
-      });
-    this.queueChainByKey.set(task.queueKey, nextChain);
-    void nextChain.finally(() => {
-      if (this.queueChainByKey.get(task.queueKey) === nextChain) {
-        this.queueChainByKey.delete(task.queueKey);
-      }
-    });
+    void this.queueChainByKey.enqueue(task.queueKey, () =>
+      this.runTask(taskId, input)
+    );
 
     return {
       taskId,
@@ -157,9 +159,11 @@ class WorkReportBatchDeleteTaskService {
       return;
     }
 
+    const taskStartedAtMs = Date.now();
     const startedAt = new Date().toISOString();
     this.patchTask(taskId, {
       status: "running",
+      phase: "deleting",
       startedAt,
       updatedAt: startedAt,
     });
@@ -176,6 +180,44 @@ class WorkReportBatchDeleteTaskService {
         )
       )
     );
+    log.info({
+      event: "batch-delete.started",
+      taskId,
+      formId: task.formId,
+      entryId: task.entryId,
+      requestedCount: task.requestedCount,
+      concurrency,
+    });
+
+    try {
+      await input.beforeRun?.();
+    } catch (error) {
+      const normalizedError = resolveDeleteError(error);
+      failedItems.push({
+        rowId: "*precondition*",
+        errorCode: normalizedError.code,
+        errorMessage: normalizedError.message,
+      });
+      const finishedAt = new Date().toISOString();
+      log.warn({
+        event: "batch-delete.precondition-failed",
+        taskId,
+        formId: task.formId,
+        entryId: task.entryId,
+        errorCode: normalizedError.code,
+        error: normalizedError.message,
+        elapsedMs: Date.now() - taskStartedAtMs,
+      });
+      this.patchTask(taskId, {
+        status: "failed",
+        finishedAt,
+        updatedAt: finishedAt,
+        deletedCount: 0,
+        failedCount: failedItems.length,
+        failedItems,
+      });
+      return;
+    }
 
     let cursor = 0;
     const runWorker = async (): Promise<void> => {
@@ -183,15 +225,38 @@ class WorkReportBatchDeleteTaskService {
         const currentIndex = cursor;
         cursor += 1;
         const rowId = rowIds[currentIndex];
+        const rowStartedAtMs = Date.now();
         try {
           await input.deleteRow(rowId);
           deletedRowIds.push(rowId);
+          log.info({
+            event: "batch-delete.row-deleted",
+            taskId,
+            formId: task.formId,
+            entryId: task.entryId,
+            rowId,
+            rowIndex: currentIndex + 1,
+            requestedCount: task.requestedCount,
+            elapsedMs: Date.now() - rowStartedAtMs,
+          });
         } catch (error) {
           const normalizedError = resolveDeleteError(error);
           failedItems.push({
             rowId,
             errorCode: normalizedError.code,
             errorMessage: normalizedError.message,
+          });
+          log.warn({
+            event: "batch-delete.row-failed",
+            taskId,
+            formId: task.formId,
+            entryId: task.entryId,
+            rowId,
+            rowIndex: currentIndex + 1,
+            requestedCount: task.requestedCount,
+            errorCode: normalizedError.code,
+            error: normalizedError.message,
+            elapsedMs: Date.now() - rowStartedAtMs,
           });
         } finally {
           this.patchTask(taskId, {
@@ -211,6 +276,20 @@ class WorkReportBatchDeleteTaskService {
     );
 
     if (deletedRowIds.length > 0) {
+      const finalizeStartedAtMs = Date.now();
+      this.patchTask(taskId, {
+        phase: "finalizing",
+        updatedAt: new Date().toISOString(),
+      });
+      log.info({
+        event: "batch-delete.finalize.started",
+        taskId,
+        formId: task.formId,
+        entryId: task.entryId,
+        requestedCount: task.requestedCount,
+        deletedCount: deletedRowIds.length,
+        failedCount: failedItems.length,
+      });
       try {
         await input.finalizeAfterDelete?.({
           formId: task.formId,
@@ -220,12 +299,29 @@ class WorkReportBatchDeleteTaskService {
           deletedRowIds: [...deletedRowIds],
           failedCount: failedItems.length,
         });
+        log.info({
+          event: "batch-delete.finalize.done",
+          taskId,
+          formId: task.formId,
+          entryId: task.entryId,
+          deletedCount: deletedRowIds.length,
+          elapsedMs: Date.now() - finalizeStartedAtMs,
+        });
       } catch (error) {
         const normalizedError = resolveDeleteError(error);
         failedItems.push({
           rowId: "*finalize*",
           errorCode: normalizedError.code,
           errorMessage: normalizedError.message,
+        });
+        log.warn({
+          event: "batch-delete.finalize.failed",
+          taskId,
+          formId: task.formId,
+          entryId: task.entryId,
+          errorCode: normalizedError.code,
+          error: normalizedError.message,
+          elapsedMs: Date.now() - finalizeStartedAtMs,
         });
       }
     }
@@ -241,6 +337,16 @@ class WorkReportBatchDeleteTaskService {
       deletedCount,
       failedCount,
       failedItems,
+    });
+    log[failedCount === 0 ? "info" : "warn"]({
+      event: "batch-delete.done",
+      taskId,
+      formId: task.formId,
+      entryId: task.entryId,
+      requestedCount,
+      deletedCount,
+      failedCount,
+      elapsedMs: Date.now() - taskStartedAtMs,
     });
   }
 
@@ -258,30 +364,58 @@ class WorkReportBatchDeleteTaskService {
     };
     this.tasks.set(taskId, nextTask);
     this.syncTaskToRegistry(nextTask);
+    pruneTerminalTaskHistory(this.tasks);
   }
 
   private syncTaskToRegistry(task: WorkReportBatchDeleteTask): void {
+    const isSingleDelete = task.taskType === "delete-report";
+    const preconditionFailedItem = task.failedItems.find(
+      (item) => item.rowId === "*precondition*"
+    );
     const progressLabel = `${task.deletedCount + task.failedCount}/${task.requestedCount}`;
     const successLabel = `${task.deletedCount}/${task.requestedCount}`;
+    const finalizingProgressLabel =
+      task.failedCount === 0
+        ? `已刪除 ${task.deletedCount}/${task.requestedCount}`
+        : `已處理 ${progressLabel}`;
     const failedSummary =
-      task.failedItems.length > 0
+      preconditionFailedItem
+        ? ""
+        : task.failedItems.length > 0
         ? `｜失敗 rowId: ${task.failedItems
             .slice(0, 5)
             .map((item) => item.rowId)
             .join(", ")}`
         : "";
 
-    const message =
-      task.status === "pending"
+    const message = isSingleDelete
+      ? task.status === "pending"
+        ? "刪除報工排隊中"
+        : task.status === "running"
+          ? task.phase === "finalizing"
+            ? "刪除報工收尾中（正在回算工令）"
+            : "刪除報工進行中"
+          : preconditionFailedItem
+            ? "刪除報工前置檢查失敗"
+          : task.status === "success"
+            ? "刪除報工完成"
+            : "刪除報工失敗"
+      : task.status === "pending"
         ? `批次刪除排隊中（0/${task.requestedCount}）`
         : task.status === "running"
-          ? `批次刪除進行中（${progressLabel}）`
+          ? task.phase === "finalizing"
+            ? `批次刪除收尾中（${finalizingProgressLabel}，正在回算工令）`
+            : `批次刪除進行中（${progressLabel}）`
+          : preconditionFailedItem
+            ? "批次刪除前置檢查失敗"
           : task.status === "success"
             ? `批次刪除完成（${successLabel}）`
             : `批次刪除部分失敗（成功 ${task.deletedCount} / ${task.requestedCount}，失敗 ${task.failedCount}）${failedSummary}`;
 
     const errorMessage =
-      task.status === "failed"
+      preconditionFailedItem
+        ? `${isSingleDelete ? "刪除報工" : "批次刪除"}尚未開始，前置檢查失敗：${preconditionFailedItem.errorMessage}`
+        : task.status === "failed"
         ? task.failedItems
             .slice(0, 5)
             .map((item) => `${item.rowId}: ${item.errorMessage}`)
@@ -290,19 +424,25 @@ class WorkReportBatchDeleteTaskService {
 
     workReportTaskRegistryService.upsertTask({
       taskId: task.taskId,
-      taskType: "delete-report-batch",
+      taskType: task.taskType,
       status: task.status,
       formId: task.formId,
       workOrderNo: task.workOrderNo ?? null,
       entryId: task.entryId,
-      rowId: null,
+      rowId: isSingleDelete ? task.rowIds[0] ?? null : null,
       queueKey: task.queueKey,
       createdAt: task.createdAt,
       startedAt: task.startedAt ?? null,
       finishedAt: task.finishedAt ?? null,
       updatedAt: task.updatedAt,
       message,
-      errorCode: task.status === "failed" ? "BATCH_DELETE_PARTIAL_FAILURE" : null,
+      errorCode:
+        preconditionFailedItem?.errorCode ??
+        (task.status === "failed"
+          ? isSingleDelete
+            ? task.failedItems[0]?.errorCode ?? "DELETE_REPORT_FAILED"
+            : "BATCH_DELETE_PARTIAL_FAILURE"
+          : null),
       errorMessage,
       actorClientId: task.actorClientId ?? null,
       actorTabId: task.actorTabId ?? null,

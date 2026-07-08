@@ -32,6 +32,7 @@ export const WORK_REPORT_FRONTEND_EVENT_CONTRACT = {
   "list-sse-disconnected": { category: "realtime", scope: "list" },
   "auto-refresh-started": { category: "realtime", scope: "list" },
   "auto-refresh-completed": { category: "realtime", scope: "list" },
+  "auto-refresh-failed": { category: "realtime", scope: "list" },
 
   "inline-edit-opened": { category: "ui", scope: "detail" },
   "inline-create-opened": { category: "ui", scope: "detail" },
@@ -62,6 +63,7 @@ export const WORK_REPORT_FRONTEND_EVENT_CONTRACT = {
   "detail-delete-lock-acquired": { category: "api", scope: "detail" },
   "detail-delete-lock-failed": { category: "api", scope: "detail" },
   "detail-delete-request-started": { category: "api", scope: "detail" },
+  "detail-delete-accepted": { category: "task", scope: "detail" },
   "detail-delete-succeeded": { category: "api", scope: "detail" },
   "detail-delete-refresh-started": { category: "realtime", scope: "detail" },
   "detail-delete-refresh-completed": { category: "realtime", scope: "detail" },
@@ -127,6 +129,7 @@ export const WORK_REPORT_REQUIRED_FRONTEND_EVENT_ACTIONS = {
     "list-sse-disconnected",
     "auto-refresh-started",
     "auto-refresh-completed",
+    "auto-refresh-failed",
   ],
   detail: [
     "inline-edit-opened",
@@ -156,6 +159,7 @@ export const WORK_REPORT_REQUIRED_FRONTEND_EVENT_ACTIONS = {
     "detail-delete-lock-acquired",
     "detail-delete-lock-failed",
     "detail-delete-request-started",
+    "detail-delete-accepted",
     "detail-delete-succeeded",
     "detail-delete-refresh-started",
     "detail-delete-refresh-completed",

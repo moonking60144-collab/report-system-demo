@@ -25,6 +25,7 @@ export class WorkReportEntryReadService {
       /** Ragic 讀取 lane；背景任務（callback / sync / mutation projection）要傳 "background" 或 "sync"
        *  避免污染使用者 lane 的 circuit breaker。 */
       priority?: RagicReadPriority;
+      persistRefreshToSqlite?: boolean;
     } = {}
   ): Promise<WorkReportRecord> {
     const sqliteRecord = await this.tryGetReportByEntryIdFromSqlite(formId, entryId);
@@ -69,7 +70,11 @@ export class WorkReportEntryReadService {
       config.linkedFields,
       options.priority ?? "user"
     );
-    return transformRow({ entryId, data: entryData }, config, linkedSources);
+    const record = transformRow({ entryId, data: entryData }, config, linkedSources);
+    if (options.refresh && options.persistRefreshToSqlite) {
+      await this.persistRefreshedEntrySnapshot(formId, entryId, record);
+    }
+    return record;
   }
 
   private async tryGetReportByEntryIdFromSqlite(
@@ -82,7 +87,7 @@ export class WorkReportEntryReadService {
 
     try {
       const syncState = await workReportSqliteRepository.getSyncState(formId);
-      if (!this.support.isSqliteSnapshotReady(syncState, { allowStale: true })) {
+      if (!this.support.isSqliteSnapshotReady(syncState)) {
         return null;
       }
       return await workReportSqliteRepository.getReportByEntryId(formId, entryId);
@@ -93,6 +98,30 @@ export class WorkReportEntryReadService {
         error: error instanceof Error ? error.message : String(error),
       });
       return null;
+    }
+  }
+
+  private async persistRefreshedEntrySnapshot(
+    formId: string,
+    entryId: string,
+    record: WorkReportRecord
+  ): Promise<void> {
+    // WHY: 只在已成功刷新到 Ragic 最新資料時才更新 entry snapshot，
+    // 避免用可能過期的快取資料蓋掉 SQLite 既有真實快照；若快照寫入失敗則僅記錄告警不中斷讀取流程，
+    // 以確保讀取可用性優先於本地同步成功率。
+    if (!this.support.shouldUseSqliteRead(formId)) {
+      return;
+    }
+
+    const snapshotAt = new Date().toISOString();
+    try {
+      await workReportSqliteRepository.upsertEntrySnapshot(formId, record, snapshotAt);
+    } catch (error) {
+      console.warn("[work-report-detail][refresh-snapshot-write-failed]", {
+        formId,
+        entryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }

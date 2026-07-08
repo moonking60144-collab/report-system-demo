@@ -28,29 +28,35 @@ interface ConcurrencyLaneMetrics {
   totalFailures: number;
 }
 
-export type RagicReadPriority = "user" | "sync" | "background";
+export type RagicReadPriority = "user" | "mutation" | "sync" | "background";
 
 export interface RagicRequestSchedulerStats {
   readActive: number;
   readPending: number;
+  mutationActive: number;
+  mutationPending: number;
   syncActive: number;
   syncPending: number;
   backgroundActive: number;
   backgroundPending: number;
   writeActive: number;
   writePending: number;
-  // Latency 拆四 lane（之前只露 read/write，sync 跟 background 看不到 P50/P95）
+  // Latency 拆五 lane（user/mutation/sync/background/write），避免互動 mutation 被一般讀取平均值蓋掉。
   readLatencyMsP50: number;
   readLatencyMsP95: number;
+  mutationLatencyMsP50: number;
+  mutationLatencyMsP95: number;
   syncLatencyMsP50: number;
   syncLatencyMsP95: number;
   backgroundLatencyMsP50: number;
   backgroundLatencyMsP95: number;
   writeLatencyMsP50: number;
   writeLatencyMsP95: number;
-  // Total / failure 也同步拆四（form16 background 流量、sync 流量原本看不到）
+  // Total / failure 也同步拆五（mutation precondition 不能和一般 user read 混在一起）
   readTotalRequests: number;
   readTotalFailures: number;
+  mutationTotalRequests: number;
+  mutationTotalFailures: number;
   syncTotalRequests: number;
   syncTotalFailures: number;
   backgroundTotalRequests: number;
@@ -58,14 +64,30 @@ export interface RagicRequestSchedulerStats {
   writeTotalRequests: number;
   writeTotalFailures: number;
   readCircuitState: CircuitState;
+  mutationCircuitState: CircuitState;
   syncCircuitState: CircuitState;
   backgroundCircuitState: CircuitState;
   writeCircuitState: CircuitState;
-  // 全域 token bucket（橫跨 4 條 lane 的 Ragic outbound rate limiter）
+  // 相容舊 health payload 的 aggregate token bucket 指標。
   globalRateLimiterAvailableTokens: number;
   globalRateLimiterPendingWaiters: number;
   globalRateLimiterCapacity: number;
   globalRateLimiterRefillPerSecond: number;
+  // 前景 bucket：user read + write，保留互動操作速率預算。
+  foregroundRateLimiterAvailableTokens: number;
+  foregroundRateLimiterPendingWaiters: number;
+  foregroundRateLimiterCapacity: number;
+  foregroundRateLimiterRefillPerSecond: number;
+  // Mutation bucket：寫入前 live precondition 用；不和一般 user refresh 或 sync 搶 token。
+  mutationRateLimiterAvailableTokens: number;
+  mutationRateLimiterPendingWaiters: number;
+  mutationRateLimiterCapacity: number;
+  mutationRateLimiterRefillPerSecond: number;
+  // 背景 bucket：sync + background，避免背景任務餓死前景。
+  backgroundRateLimiterAvailableTokens: number;
+  backgroundRateLimiterPendingWaiters: number;
+  backgroundRateLimiterCapacity: number;
+  backgroundRateLimiterRefillPerSecond: number;
 }
 
 class ConcurrencyLane {
@@ -118,7 +140,7 @@ class ConcurrencyLane {
     options?: { isFailureCounted?: (err: unknown) => boolean }
   ): Promise<T> {
     // 在 acquire 之前先檢查 breaker，OPEN 狀態直接 fast-fail，不佔 concurrency slot
-    this.breaker.checkBeforeRun();
+    this.breaker.checkBeforeQueue();
 
     const release = await this.acquire();
     let releaseCalled = false;
@@ -155,6 +177,8 @@ class ConcurrencyLane {
       if (counted) {
         this.totalFailures += 1;
         this.breaker.recordFailure();
+      } else {
+        this.breaker.releaseHalfOpenProbe();
       }
       throw error;
     } finally {
@@ -241,6 +265,12 @@ class RagicRequestScheduler {
     env.RAGIC_READ_CONCURRENCY,
     env.RAGIC_METRICS_WINDOW_SIZE
   );
+  // mutation lane：寫入前 live precondition，不能被一般列表 refresh 或 sync 擠住。
+  private readonly mutationLane = new ConcurrencyLane(
+    "mutation",
+    env.RAGIC_MUTATION_READ_CONCURRENCY,
+    env.RAGIC_METRICS_WINDOW_SIZE
+  );
   // sync lane：auto-sync 專用，獨立 pool 不影響使用者
   private readonly syncLane = new ConcurrencyLane(
     "sync",
@@ -258,12 +288,20 @@ class RagicRequestScheduler {
     env.RAGIC_WRITE_CONCURRENCY,
     env.RAGIC_METRICS_WINDOW_SIZE
   );
-  // 全域 token bucket：限制 4 條 lane 加總後對 Ragic 的每秒請求上限。
-  // ConcurrencyLane 限「同時 in-flight」數，bucket 限「每秒 outbound 速率」，正交設計。
-  // 寫入 / 讀取共用同一個 bucket，因為 Ragic 限流是混 read/write 看 total。
-  private readonly globalRateLimiter = new TokenBucket({
-    refillPerSecond: env.RAGIC_GLOBAL_RATE_PER_SECOND,
-    capacity: env.RAGIC_GLOBAL_BURST_CAPACITY,
+  // 前景與背景使用不同 token bucket。ConcurrencyLane 限「同時 in-flight」數；
+  // bucket 限「每秒 outbound 速率」。拆 bucket 的目的不是提高總吞吐，而是保留
+  // user/write 的互動預算，避免 full sync / field-index refresh 吃光最後 token。
+  private readonly foregroundRateLimiter = new TokenBucket({
+    refillPerSecond: env.RAGIC_FOREGROUND_RATE_PER_SECOND,
+    capacity: env.RAGIC_FOREGROUND_BURST_CAPACITY,
+  });
+  private readonly mutationRateLimiter = new TokenBucket({
+    refillPerSecond: env.RAGIC_MUTATION_RATE_PER_SECOND,
+    capacity: env.RAGIC_MUTATION_BURST_CAPACITY,
+  });
+  private readonly backgroundRateLimiter = new TokenBucket({
+    refillPerSecond: env.RAGIC_BACKGROUND_RATE_PER_SECOND,
+    capacity: env.RAGIC_BACKGROUND_BURST_CAPACITY,
   });
 
   async runRead<T>(
@@ -278,7 +316,7 @@ class RagicRequestScheduler {
         // 不必白等 rate limiter token。
         // Timeout 用 RAGIC_QUEUE_TIMEOUT_MS：lane slot 已被佔用，等 token 太久就放棄
         // 避免 lane.active 被 token-bucket-waiter 長期佔住失真。
-        await this.globalRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
+        await this.pickRateLimiter(priority).acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
         return task();
       },
       // TokenBucketAcquireTimeoutError 是 local backpressure，不算 Ragic failure
@@ -289,7 +327,7 @@ class RagicRequestScheduler {
   async runWrite<T>(_label: string, task: () => Promise<T>): Promise<T> {
     return this.writeLane.run(
       async () => {
-        await this.globalRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
+        await this.foregroundRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
         return task();
       },
       { isFailureCounted: isCountedAsRagicFailure }
@@ -298,29 +336,62 @@ class RagicRequestScheduler {
 
   /** 給 health endpoint / monitor 用 */
   getRateLimiterStats(): ReturnType<TokenBucket["getStats"]> {
-    return this.globalRateLimiter.getStats();
+    return this.getAggregateRateLimiterStats();
   }
 
   private pickReadLane(priority: RagicReadPriority): ConcurrencyLane {
+    if (priority === "mutation") return this.mutationLane;
     if (priority === "sync") return this.syncLane;
     if (priority === "background") return this.backgroundLane;
     return this.userLane;
   }
 
+  private pickRateLimiter(priority: RagicReadPriority): TokenBucket {
+    if (priority === "mutation") {
+      return this.mutationRateLimiter;
+    }
+    if (priority === "sync" || priority === "background") {
+      return this.backgroundRateLimiter;
+    }
+    return this.foregroundRateLimiter;
+  }
+
+  private getAggregateRateLimiterStats(): ReturnType<TokenBucket["getStats"]> {
+    const foreground = this.foregroundRateLimiter.getStats();
+    const mutation = this.mutationRateLimiter.getStats();
+    const background = this.backgroundRateLimiter.getStats();
+    return {
+      availableTokens:
+        foreground.availableTokens + mutation.availableTokens + background.availableTokens,
+      pendingWaiters:
+        foreground.pendingWaiters + mutation.pendingWaiters + background.pendingWaiters,
+      capacity: foreground.capacity + mutation.capacity + background.capacity,
+      refillPerSecond:
+        foreground.refillPerSecond + mutation.refillPerSecond + background.refillPerSecond,
+    };
+  }
+
   getStats(): RagicRequestSchedulerStats {
     const read = this.userLane.getStats();
+    const mutation = this.mutationLane.getStats();
     const sync = this.syncLane.getStats();
     const background = this.backgroundLane.getStats();
     const write = this.writeLane.getStats();
     const readMetrics = this.userLane.getMetrics();
+    const mutationMetrics = this.mutationLane.getMetrics();
     const syncMetrics = this.syncLane.getMetrics();
     const backgroundMetrics = this.backgroundLane.getMetrics();
     const writeMetrics = this.writeLane.getMetrics();
-    const rateLimiter = this.globalRateLimiter.getStats();
+    const foregroundRateLimiter = this.foregroundRateLimiter.getStats();
+    const mutationRateLimiter = this.mutationRateLimiter.getStats();
+    const backgroundRateLimiter = this.backgroundRateLimiter.getStats();
+    const aggregateRateLimiter = this.getAggregateRateLimiterStats();
 
     return {
       readActive: read.active,
       readPending: read.pending,
+      mutationActive: mutation.active,
+      mutationPending: mutation.pending,
       syncActive: sync.active,
       syncPending: sync.pending,
       backgroundActive: background.active,
@@ -329,6 +400,8 @@ class RagicRequestScheduler {
       writePending: write.pending,
       readLatencyMsP50: read.latencyMsP50,
       readLatencyMsP95: read.latencyMsP95,
+      mutationLatencyMsP50: mutation.latencyMsP50,
+      mutationLatencyMsP95: mutation.latencyMsP95,
       syncLatencyMsP50: sync.latencyMsP50,
       syncLatencyMsP95: sync.latencyMsP95,
       backgroundLatencyMsP50: background.latencyMsP50,
@@ -337,6 +410,8 @@ class RagicRequestScheduler {
       writeLatencyMsP95: write.latencyMsP95,
       readTotalRequests: readMetrics.totalRequests,
       readTotalFailures: readMetrics.totalFailures,
+      mutationTotalRequests: mutationMetrics.totalRequests,
+      mutationTotalFailures: mutationMetrics.totalFailures,
       syncTotalRequests: syncMetrics.totalRequests,
       syncTotalFailures: syncMetrics.totalFailures,
       backgroundTotalRequests: backgroundMetrics.totalRequests,
@@ -344,13 +419,26 @@ class RagicRequestScheduler {
       writeTotalRequests: writeMetrics.totalRequests,
       writeTotalFailures: writeMetrics.totalFailures,
       readCircuitState: read.circuitState,
+      mutationCircuitState: mutation.circuitState,
       syncCircuitState: sync.circuitState,
       backgroundCircuitState: background.circuitState,
       writeCircuitState: write.circuitState,
-      globalRateLimiterAvailableTokens: rateLimiter.availableTokens,
-      globalRateLimiterPendingWaiters: rateLimiter.pendingWaiters,
-      globalRateLimiterCapacity: rateLimiter.capacity,
-      globalRateLimiterRefillPerSecond: rateLimiter.refillPerSecond,
+      globalRateLimiterAvailableTokens: aggregateRateLimiter.availableTokens,
+      globalRateLimiterPendingWaiters: aggregateRateLimiter.pendingWaiters,
+      globalRateLimiterCapacity: aggregateRateLimiter.capacity,
+      globalRateLimiterRefillPerSecond: aggregateRateLimiter.refillPerSecond,
+      foregroundRateLimiterAvailableTokens: foregroundRateLimiter.availableTokens,
+      foregroundRateLimiterPendingWaiters: foregroundRateLimiter.pendingWaiters,
+      foregroundRateLimiterCapacity: foregroundRateLimiter.capacity,
+      foregroundRateLimiterRefillPerSecond: foregroundRateLimiter.refillPerSecond,
+      mutationRateLimiterAvailableTokens: mutationRateLimiter.availableTokens,
+      mutationRateLimiterPendingWaiters: mutationRateLimiter.pendingWaiters,
+      mutationRateLimiterCapacity: mutationRateLimiter.capacity,
+      mutationRateLimiterRefillPerSecond: mutationRateLimiter.refillPerSecond,
+      backgroundRateLimiterAvailableTokens: backgroundRateLimiter.availableTokens,
+      backgroundRateLimiterPendingWaiters: backgroundRateLimiter.pendingWaiters,
+      backgroundRateLimiterCapacity: backgroundRateLimiter.capacity,
+      backgroundRateLimiterRefillPerSecond: backgroundRateLimiter.refillPerSecond,
     };
   }
 }

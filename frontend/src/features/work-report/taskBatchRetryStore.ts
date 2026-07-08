@@ -1,6 +1,6 @@
 import type { BatchCreateRowRequest, ReportMutationPayload } from "../../api/workReport";
 import type { WorkReportFormId } from "./types";
-import { getOrCreateClientId } from "./debug/clientIdentity";
+import { getOrCreateClientId } from "../../utils/clientIdentity";
 
 const WORK_REPORT_RETRYABLE_BATCH_CREATE_STORE_KEY =
   "work-report:retryable-batch-create-store:v1";
@@ -23,6 +23,7 @@ export interface RetryableBatchCreateRecord {
   workOrderNo?: string | null;
   /** 每筆 row 帶 clientRowKey 做 idempotency；舊版 store 可能只有 payload，讀取時會補 key=undefined */
   rows: BatchCreateRowRequest[];
+  expectedEntryLastUpdatedAt?: string;
   editSessionId?: string;
   actorClientId: string;
   createdAt: string;

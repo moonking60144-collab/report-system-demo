@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import dayjs, { type Dayjs } from "dayjs";
 import { LeftOutlined, RightOutlined } from "@ant-design/icons";
 import type {
+  ItDutyDayNote,
   ItDutyDaySwap,
   ItDutyMember,
   ItDutyOverride,
@@ -23,7 +24,10 @@ interface Props {
   members: ItDutyMember[];
   overrides: ItDutyOverride[];
   daySwaps: ItDutyDaySwap[];
+  dayNotes: ItDutyDayNote[];
   weeksPerSlot: number;
+  anchorIsoWeek: string | null;
+  anchorMemberId: number | null;
   onChangeMonth: (next: Dayjs) => void;
   onAssign: (
     isoWeek: string,
@@ -46,6 +50,7 @@ interface DayCell {
   baseMember: ItDutyMember | null;
   actualMember: ItDutyMember | null;
   swap: ItDutyDaySwap | null;
+  dayNote: ItDutyDayNote | null;
 }
 
 interface WeekRow {
@@ -62,8 +67,11 @@ function buildWeekRows(
   members: ItDutyMember[],
   overrides: ItDutyOverride[],
   daySwaps: ItDutyDaySwap[],
+  dayNotes: ItDutyDayNote[],
   currentIsoWeek: string,
-  weeksPerSlot: number
+  weeksPerSlot: number,
+  anchorIsoWeek: string | null,
+  anchorMemberId: number | null
 ): WeekRow[] {
   const today = dayjs().startOf("day");
   const firstOfMonth = displayMonth.startOf("month");
@@ -77,6 +85,8 @@ function buildWeekRows(
   }
   const overrideMap = new Map<string, ItDutyOverride>();
   for (const o of overrides) overrideMap.set(o.isoWeek, o);
+  const dayNoteByDate = new Map<string, ItDutyDayNote>();
+  for (const n of dayNotes) dayNoteByDate.set(n.noteDate, n);
 
   const rows: WeekRow[] = [];
   let cursor = calendarStart;
@@ -84,7 +94,8 @@ function buildWeekRows(
     const weekStart = cursor.startOf("isoWeek");
     const isoWeek = formatIsoWeek(weekStart);
     const weekResult = calculateDutyForWeek(isoWeek, members, overrides, {
-      autoAnchorIsoWeek: currentIsoWeek,
+      anchorIsoWeek,
+      anchorMemberId,
       weeksPerSlot,
     });
     const days: DayCell[] = [];
@@ -96,7 +107,7 @@ function buildWeekRows(
         members,
         overrides,
         daySwaps,
-        { autoAnchorIsoWeek: currentIsoWeek, weeksPerSlot }
+        { anchorIsoWeek, anchorMemberId, weeksPerSlot }
       );
       days.push({
         date: day,
@@ -107,6 +118,7 @@ function buildWeekRows(
         baseMember: dayResult.baseMember,
         actualMember: dayResult.member,
         swap: dayResult.swap,
+        dayNote: dayNoteByDate.get(isoDate) ?? null,
       });
     }
     const override = overrideMap.get(isoWeek) ?? null;
@@ -129,7 +141,10 @@ export function ItDutyMonthCalendar({
   members,
   overrides,
   daySwaps,
+  dayNotes,
   weeksPerSlot,
+  anchorIsoWeek,
+  anchorMemberId,
   onChangeMonth,
   onAssign,
   onDayClick,
@@ -143,10 +158,23 @@ export function ItDutyMonthCalendar({
         members,
         overrides,
         daySwaps,
+        dayNotes,
         currentIsoWeek,
-        weeksPerSlot
+        weeksPerSlot,
+        anchorIsoWeek,
+        anchorMemberId
       ),
-    [displayMonth, members, overrides, daySwaps, currentIsoWeek, weeksPerSlot]
+    [
+      displayMonth,
+      members,
+      overrides,
+      daySwaps,
+      dayNotes,
+      currentIsoWeek,
+      weeksPerSlot,
+      anchorIsoWeek,
+      anchorMemberId,
+    ]
   );
 
   const monthLabel = t("calendar.title", {
@@ -229,12 +257,14 @@ export function ItDutyMonthCalendar({
                 day.isToday ? "itduty-calendar__day-cell--today" : "",
                 day.holiday ? "itduty-calendar__day-cell--holiday" : "",
                 day.swap ? "itduty-calendar__day-cell--swapped" : "",
+                day.dayNote ? "itduty-calendar__day-cell--has-note" : "",
                 idx === 5 || idx === 6
                   ? "itduty-calendar__day-cell--weekend"
                   : "",
               ]
                 .filter(Boolean)
                 .join(" ");
+              // Tooltip 優先順序：swap → holiday → dayNote → 預設值班人
               const tooltip = day.swap
                 ? t("calendar.daySwapTooltip", {
                     base: day.baseMember?.name ?? "",
@@ -243,7 +273,9 @@ export function ItDutyMonthCalendar({
                   })
                 : day.holiday
                   ? t("calendar.holidayCellTitle", { name: day.holiday.name })
-                  : day.actualMember?.name;
+                  : day.dayNote
+                    ? day.dayNote.note
+                    : day.actualMember?.name;
               return (
                 <button
                   type="button"
@@ -253,7 +285,8 @@ export function ItDutyMonthCalendar({
                   onClick={() =>
                     onDayClick(day.isoDate, day.baseMember, day.swap)
                   }
-                  disabled={!day.baseMember}
+                  // 沒 baseMember 但有既存 swap / dayNote 也要能點進去看 / 編
+                  disabled={!day.baseMember && !day.swap && !day.dayNote}
                 >
                   <span className="itduty-calendar__day-number">
                     {day.date.date()}
@@ -276,6 +309,13 @@ export function ItDutyMonthCalendar({
                     >
                       {day.actualMember?.name ?? "—"}
                     </span>
+                  ) : null}
+                  {day.dayNote ? (
+                    <span
+                      className="itduty-calendar__day-note-mark"
+                      aria-label={t("dayNote.cellAriaLabel")}
+                      title={day.dayNote.note}
+                    />
                   ) : null}
                 </button>
               );

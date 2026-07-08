@@ -1,10 +1,15 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { env } from "../config/env";
 import { HttpError } from "../utils/httpError";
 import { noticeAdminUsersRepository } from "../storage/sqlite/noticeAdminUsersRepository";
+import { noticeSessionsRepository } from "../storage/sqlite/noticeSessionsRepository";
 import { hashPassword, verifyPassword } from "./auth/passwordCrypto";
+import {
+  buildLoginRateLimitKey,
+  systemNoticeLoginRateLimiter,
+} from "./auth/loginRateLimiter";
 
 const MAX_ADMIN_USERS = 5;
 const MIN_PASSWORD_LENGTH = 6;
@@ -20,6 +25,8 @@ export interface NoticeAdminUserView {
   createdAt: string;
   updatedAt: string;
   createdBy: string | null;
+  /** true 表示是 env.NOTICE_ADMIN_USERNAME 設定的保留帳號，不可刪除（fallback 用） */
+  isProtected: boolean;
 }
 
 export type SystemNoticeLevel = "info" | "warn" | "error";
@@ -82,6 +89,7 @@ type SystemNoticeUpdateInput = Partial<
 
 const NOTICE_STORE_VERSION = "v1";
 const SYSTEM_NOTICE_LEVELS: ReadonlySet<SystemNoticeLevel> = new Set(["info", "warn", "error"]);
+const NOTICE_SESSION_TOKEN_DIGEST_PREFIX = "sha256:";
 
 interface SystemNoticeStorePayload {
   version: string;
@@ -115,6 +123,15 @@ function isSafeHttpUrl(value: string): boolean {
   } catch (_error) {
     return false;
   }
+}
+
+function digestNoticeSessionToken(tokenInput: unknown): string {
+  const token = String(tokenInput ?? "").trim();
+  return `${NOTICE_SESSION_TOKEN_DIGEST_PREFIX}${createHash("sha256").update(token).digest("hex")}`;
+}
+
+function isPersistedNoticeSessionDigest(value: string): boolean {
+  return value.startsWith(NOTICE_SESSION_TOKEN_DIGEST_PREFIX);
 }
 
 function detectMaintenanceSuggestion(input: {
@@ -200,8 +217,42 @@ class SystemNoticeService {
   private notice: SystemNoticeRecord = { ...DEFAULT_NOTICE };
   private loadPromise: Promise<void> | null = null;
   private loaded = false;
+  private updateChain: Promise<void> = Promise.resolve();
   private persistChain: Promise<void> = Promise.resolve();
   private readonly tokenSessions = new Map<string, TokenSession>();
+
+  /**
+   * bootstrap 時 call：把 SQLite 內持久化的 sessions 載回 in-memory Map，
+   * 同時清掉已過期的 token。沒這步的話 backend 重啟後所有人都會被踢去重 login。
+   */
+  async initialize(): Promise<void> {
+    try {
+      const now = Date.now();
+      await noticeSessionsRepository.deleteExpired(now);
+      const sessions = await noticeSessionsRepository.list();
+      let loaded = 0;
+      let invalidatedLegacy = 0;
+      for (const s of sessions) {
+        if (!isPersistedNoticeSessionDigest(s.token)) {
+          await noticeSessionsRepository.delete(s.token);
+          invalidatedLegacy += 1;
+          continue;
+        }
+        if (s.expiresAtMs > now) {
+          this.tokenSessions.set(s.token, {
+            username: s.username,
+            expiresAtMs: s.expiresAtMs,
+          });
+          loaded += 1;
+        }
+      }
+      console.log("[system-notice][sessions-loaded]", { count: loaded, invalidatedLegacy });
+    } catch (error) {
+      console.warn("[system-notice][sessions-load-failed]", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   async getNotice(): Promise<SystemNoticeRecord> {
     await this.ensureLoaded();
@@ -219,22 +270,31 @@ class SystemNoticeService {
 
   async login(
     usernameInput: unknown,
-    passwordInput: unknown
+    passwordInput: unknown,
+    options: { rateLimitKey?: unknown } = {}
   ): Promise<SystemNoticeLoginResult> {
     await this.assertAuthConfigured();
     this.cleanupExpiredSessions();
 
     const username = String(usernameInput ?? "").trim();
     const password = typeof passwordInput === "string" ? passwordInput : "";
+    const rateLimitKey = buildLoginRateLimitKey({
+      clientKey: options.rateLimitKey,
+      username,
+    });
+    this.assertLoginRateLimit(rateLimitKey);
     const credentials = await this.resolveCredentialsByUsername(username);
 
     if (!credentials) {
+      this.recordLoginFailure(rateLimitKey);
       throw new HttpError(401, "帳號或密碼錯誤", "NOTICE_LOGIN_INVALID");
     }
     const verified = await verifyPassword(password, credentials.passwordHash);
     if (!verified.ok) {
+      this.recordLoginFailure(rateLimitKey);
       throw new HttpError(401, "帳號或密碼錯誤", "NOTICE_LOGIN_INVALID");
     }
+    systemNoticeLoginRateLimiter.recordSuccess(rateLimitKey);
 
     // Lazy migration: SQLite 裡的舊 SHA-256 hash 在登入成功時自動升級為 scrypt
     if (verified.legacy && !credentials.isEnvFallback) {
@@ -254,16 +314,49 @@ class SystemNoticeService {
 
     const expiresAtMs = Date.now() + env.NOTICE_TOKEN_TTL_MINUTES * 60 * 1000;
     const token = randomBytes(32).toString("hex");
-    this.tokenSessions.set(token, {
+    const tokenDigest = digestNoticeSessionToken(token);
+    this.tokenSessions.set(tokenDigest, {
       username: credentials.username,
       expiresAtMs,
     });
+    try {
+      await noticeSessionsRepository.insert({
+        token: tokenDigest,
+        username: credentials.username,
+        expiresAtMs,
+      });
+    } catch (error) {
+      console.warn("[system-notice][session-persist-failed]", {
+        username: credentials.username,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     return {
       token,
       username: credentials.username,
       expiresAt: new Date(expiresAtMs).toISOString(),
     };
+  }
+
+  private assertLoginRateLimit(rateLimitKey: string): void {
+    const state = systemNoticeLoginRateLimiter.check(rateLimitKey);
+    if (!state.limited) return;
+    throw new HttpError(
+      429,
+      `登入失敗次數過多，請 ${Math.ceil(state.retryAfterMs / 1000)} 秒後再試`,
+      "NOTICE_LOGIN_RATE_LIMITED"
+    );
+  }
+
+  private recordLoginFailure(rateLimitKey: string): void {
+    const state = systemNoticeLoginRateLimiter.recordFailure(rateLimitKey);
+    if (!state.limited) return;
+    throw new HttpError(
+      429,
+      `登入失敗次數過多，請 ${Math.ceil(state.retryAfterMs / 1000)} 秒後再試`,
+      "NOTICE_LOGIN_RATE_LIMITED"
+    );
   }
 
   /**
@@ -335,6 +428,10 @@ class SystemNoticeService {
         this.tokenSessions.delete(token);
       }
     }
+    await this.purgePersistedSessionsForUsernames([
+      credentials.username,
+      nextUsername,
+    ]);
     return { username: nextUsername, updatedAt: new Date().toISOString() };
   }
 
@@ -349,12 +446,14 @@ class SystemNoticeService {
 
   async listUsers(): Promise<NoticeAdminUserView[]> {
     const users = await noticeAdminUsersRepository.list();
+    const protectedUsername = env.NOTICE_ADMIN_USERNAME.trim();
     return users.map((u) => ({
       id: u.id,
       username: u.username,
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
       createdBy: u.createdBy,
+      isProtected: Boolean(protectedUsername) && u.username === protectedUsername,
     }));
   }
 
@@ -405,12 +504,15 @@ class SystemNoticeService {
       passwordHash,
       createdBy: input.actor,
     });
+    const protectedUsername = env.NOTICE_ADMIN_USERNAME.trim();
     return {
       id: created.id,
       username: created.username,
       createdAt: created.createdAt,
       updatedAt: created.updatedAt,
       createdBy: created.createdBy,
+      isProtected:
+        Boolean(protectedUsername) && created.username === protectedUsername,
     };
   }
 
@@ -421,6 +523,14 @@ class SystemNoticeService {
     }
     if (username === input.actor) {
       throw new HttpError(400, "不能刪除自己", "NOTICE_CANNOT_DELETE_SELF");
+    }
+    const protectedUsername = env.NOTICE_ADMIN_USERNAME.trim();
+    if (protectedUsername && username === protectedUsername) {
+      throw new HttpError(
+        400,
+        `保留 ${protectedUsername} 帳號作為 fallback，不可刪除`,
+        "NOTICE_PROTECTED_USER"
+      );
     }
     const count = await noticeAdminUsersRepository.count();
     if (count <= 1) {
@@ -440,6 +550,7 @@ class SystemNoticeService {
         this.tokenSessions.delete(token);
       }
     }
+    await this.purgePersistedSessionsForUsernames([username]);
   }
 
   /**
@@ -514,7 +625,7 @@ class SystemNoticeService {
       throw new HttpError(401, "缺少通知管理授權 token", "NOTICE_TOKEN_MISSING");
     }
 
-    const session = this.tokenSessions.get(token);
+    const session = this.tokenSessions.get(digestNoticeSessionToken(token));
     if (!session) {
       throw new HttpError(401, "通知管理授權已失效，請重新登入", "NOTICE_TOKEN_INVALID");
     }
@@ -532,9 +643,19 @@ class SystemNoticeService {
   ): Promise<SystemNoticeRecord> {
     await this.ensureLoaded();
     const payload = this.normalizePayload(payloadInput);
-    const nextNotice = this.buildNextNotice(payload, updatedBy, options);
-    this.notice = nextNotice;
-    this.schedulePersist();
+    const updateTask = this.updateChain
+      .catch(() => undefined)
+      .then(async () => {
+        const builtNotice = this.buildNextNotice(payload, updatedBy, options);
+        await this.persistNoticeSnapshot(builtNotice);
+        this.notice = builtNotice;
+        return builtNotice;
+      });
+    this.updateChain = updateTask.then(
+      () => undefined,
+      () => undefined
+    );
+    const nextNotice = await updateTask;
     return { ...nextNotice };
   }
 
@@ -799,21 +920,6 @@ class SystemNoticeService {
     // 多 user 表有資料 → OK；否則 fallback env vars
     const userCount = await noticeAdminUsersRepository.count();
     if (userCount > 0) return;
-
-    // env.ts 在 DEMO_MODE=true 時會自動把 NOTICE_ADMIN_USERNAME/HASH 填成 demo / sha256("demo")，
-    // 走到這裡兩個 env 已經有值，不會 throw。這層額外 fallback 是兜底：
-    // 萬一 env.ts 注入順序未來變動或 dotenv 載入失敗，仍能保證 DEMO_MODE 可登入。
-    if (env.DEMO_MODE) {
-      if (!env.NOTICE_ADMIN_USERNAME.trim() || !env.NOTICE_ADMIN_PASSWORD_HASH.trim()) {
-        // 直接覆蓋 process.env 已晚了（env 物件是 frozen 結構），這裡記 warn 提醒
-        console.warn(
-          "[system-notice][demo-mode] NOTICE_ADMIN_USERNAME/HASH 在 DEMO_MODE 下竟為空，" +
-            "請檢查 config/env.ts 注入順序"
-        );
-      }
-      return;
-    }
-
     if (!env.NOTICE_ADMIN_USERNAME.trim() || !env.NOTICE_ADMIN_PASSWORD_HASH.trim()) {
       throw new HttpError(
         503,
@@ -828,6 +934,28 @@ class SystemNoticeService {
     for (const [token, session] of this.tokenSessions.entries()) {
       if (session.expiresAtMs <= now) {
         this.tokenSessions.delete(token);
+      }
+    }
+    // SQLite cleanup fire-and-forget；失敗也沒關係，下次 bootstrap initialize() 會兜底
+    void noticeSessionsRepository.deleteExpired(now).catch((error) => {
+      console.warn("[system-notice][session-cleanup-failed]", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  private async purgePersistedSessionsForUsernames(
+    usernames: string[]
+  ): Promise<void> {
+    const unique = Array.from(new Set(usernames.filter((u) => u && u.trim())));
+    for (const username of unique) {
+      try {
+        await noticeSessionsRepository.deleteByUsername(username);
+      } catch (error) {
+        console.warn("[system-notice][session-purge-failed]", {
+          username,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -870,29 +998,28 @@ class SystemNoticeService {
     );
   }
 
-  private schedulePersist(): void {
-    this.persistChain = this.persistChain
-      .catch(() => {
-        // NOTE: keep chain alive
-      })
+  private async persistNoticeSnapshot(notice: SystemNoticeRecord): Promise<void> {
+    const persistTask = this.persistChain
+      .catch(() => undefined)
       .then(async () => {
-        await this.persistToDisk();
-      })
-      .catch((error) => {
+        await this.persistToDisk(notice);
+      });
+    this.persistChain = persistTask.catch((error) => {
         console.warn("[system-notice][save-failed]", {
           filePath: this.resolveStoreFilePath(),
           error: error instanceof Error ? error.message : String(error),
         });
       });
+    await persistTask;
   }
 
-  private async persistToDisk(): Promise<void> {
+  private async persistToDisk(notice: SystemNoticeRecord = this.notice): Promise<void> {
     const filePath = this.resolveStoreFilePath();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const payload: SystemNoticeStorePayload = {
       version: NOTICE_STORE_VERSION,
       savedAt: new Date().toISOString(),
-      notice: this.notice,
+      notice,
     };
     await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
   }

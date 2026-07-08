@@ -9,12 +9,83 @@ import {
   FORM16_REQUIRED_FALLBACK_BY_REPORT_TYPE,
 } from "./form16ReportTypeRules";
 
+interface ResolvedForm16RequiredFields {
+  depUnit: string;
+  prodType: string;
+  source: string;
+}
+
+const REQUIRED_FIELDS_CACHE_TTL_MS = 10 * 60 * 1000;
+const REQUIRED_FIELDS_CACHE_MAX_ENTRIES = 500;
+
+const requiredFieldsCache = new Map<
+  string,
+  { expiresAt: number; value: ResolvedForm16RequiredFields }
+>();
+const requiredFieldsInFlight = new Map<string, Promise<ResolvedForm16RequiredFields>>();
+
 export async function resolveForm16RequiredFields(
   form16Path: string,
   workOrderNo: string,
   processCode: string,
   reportType: string
-): Promise<{ depUnit: string; prodType: string; source: string }> {
+): Promise<ResolvedForm16RequiredFields> {
+  const cacheKey = buildRequiredFieldsCacheKey(
+    form16Path,
+    workOrderNo,
+    processCode,
+    reportType
+  );
+  const cached = getCachedRequiredFields(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = requiredFieldsInFlight.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+
+  const request = resolveForm16RequiredFieldsUncached(
+    form16Path,
+    workOrderNo,
+    processCode,
+    reportType
+  )
+    .then((result) => {
+      setCachedRequiredFields(cacheKey, result);
+      return result;
+    })
+    .finally(() => {
+      if (requiredFieldsInFlight.get(cacheKey) === request) {
+        requiredFieldsInFlight.delete(cacheKey);
+      }
+    });
+
+  requiredFieldsInFlight.set(cacheKey, request);
+  return request;
+}
+
+export function clearForm16RequiredFieldsCache(): void {
+  requiredFieldsCache.clear();
+  requiredFieldsInFlight.clear();
+}
+
+async function resolveForm16RequiredFieldsUncached(
+  form16Path: string,
+  workOrderNo: string,
+  processCode: string,
+  reportType: string
+): Promise<ResolvedForm16RequiredFields> {
+  const fallback = FORM16_REQUIRED_FALLBACK_BY_REPORT_TYPE[reportType];
+  if (fallback) {
+    return {
+      depUnit: fallback.depUnit,
+      prodType: fallback.prodType,
+      source: "reportType-fallback-map",
+    };
+  }
+
   const depFieldId = env.RAGIC_FORM_16_DEP_FIELD_ID;
   const prodTypeFieldId = env.RAGIC_FORM_16_PROD_TYPE_FIELD_ID;
   const processFieldId = env.RAGIC_FORM_16_PROCESS_FIELD_ID;
@@ -82,18 +153,51 @@ export async function resolveForm16RequiredFields(
     }
   }
 
-  const fallback = FORM16_REQUIRED_FALLBACK_BY_REPORT_TYPE[reportType];
-  if (fallback) {
-    return {
-      depUnit: fallback.depUnit,
-      prodType: fallback.prodType,
-      source: "reportType-fallback-map",
-    };
-  }
-
   throw new HttpError(
     400,
     `無法補齊 [16] 必填欄位 Dep/Prod.Type，請先檢查對應規則：工令=${workOrderNo || "-"}，製程=${processCode || "-"}，報工類別=${reportType || "-"}`,
     "INVALID_PAYLOAD"
   );
+}
+
+function buildRequiredFieldsCacheKey(
+  form16Path: string,
+  workOrderNo: string,
+  processCode: string,
+  reportType: string
+): string {
+  return [
+    normalizeComparableValue(form16Path),
+    normalizeComparableValue(workOrderNo),
+    normalizeComparableValue(processCode),
+    normalizeComparableValue(reportType),
+  ].join("\0");
+}
+
+function getCachedRequiredFields(cacheKey: string): ResolvedForm16RequiredFields | null {
+  const cached = requiredFieldsCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+  if (cached.expiresAt <= Date.now()) {
+    requiredFieldsCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value;
+}
+
+function setCachedRequiredFields(
+  cacheKey: string,
+  value: ResolvedForm16RequiredFields
+): void {
+  if (!requiredFieldsCache.has(cacheKey) && requiredFieldsCache.size >= REQUIRED_FIELDS_CACHE_MAX_ENTRIES) {
+    const oldestKey = requiredFieldsCache.keys().next().value;
+    if (oldestKey) {
+      requiredFieldsCache.delete(oldestKey);
+    }
+  }
+  requiredFieldsCache.set(cacheKey, {
+    expiresAt: Date.now() + REQUIRED_FIELDS_CACHE_TTL_MS,
+    value,
+  });
 }

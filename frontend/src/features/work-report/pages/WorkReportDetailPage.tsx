@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import "../styles/work-report-detail.css";
 import type {
   WorkReportFrontendEventAction,
   WorkReportFrontendEventCategory,
@@ -27,7 +28,10 @@ import {
 import {
   EMPTY_FORM,
 } from "../../../components/report-form/constants";
-import { buildInitialFormState } from "../../../components/report-form/formMemory";
+import {
+  applyCreateDefaultsToFormState,
+  buildInitialFormState,
+} from "../../../components/report-form/formMemory";
 import { buildReportMutationPayload } from "../../../components/report-form/formLogic";
 import {
   CREATE_TASK_POLL_INTERVAL_MS,
@@ -53,6 +57,7 @@ import { useWorkReportDetailRefreshController } from "../hooks/detail/useWorkRep
 import { useWorkReportMainMachineController } from "../hooks/detail/useWorkReportMainMachineController";
 import { useWorkReportDetailStatusController } from "../hooks/detail/useWorkReportDetailStatusController";
 import { useWorkReportDetailTaskController } from "../hooks/detail/useWorkReportDetailTaskController";
+import { INLINE_EDITABLE_DETAIL_KEYS_BY_FORM } from "../hooks/detail/inlineControllerUtils";
 import { useWorkReportClientPresence } from "../hooks/useWorkReportClientPresence";
 import { useWorkReportSessionExpiryGuard } from "../hooks/useWorkReportSessionExpiryGuard";
 import {
@@ -79,6 +84,20 @@ import {
   pushFrontendEvent,
   summarizeChangedPayloadFields,
 } from "../logging/frontendEventLog";
+import {
+  BATCH_CREATE_FILLABLE_KEYS,
+  buildBatchCreateFieldErrors,
+  buildCreatePlaceholderRow,
+  INLINE_CREATE_PLACEHOLDER_COUNT,
+  INLINE_CREATE_PLACEHOLDER_ROW_PREFIX,
+  INLINE_CREATE_TRAILING_PLACEHOLDER_COUNT,
+  isCreatePlaceholderRow,
+  isMeaningfulBatchCreateDraft,
+  parseInlineCreatePlaceholderIndex,
+  resolveBatchCreateFillKeys,
+  type BatchCreateFieldErrorMap,
+  type BatchCreateFillDragState,
+} from "./detailBatchCreateUtils";
 
 interface OrderedDetailColumn {
   key: string;
@@ -99,8 +118,39 @@ interface DetailInlineEditorDefinition {
   renderEditor: (rowId: string, draft: FormState) => ReactNode;
 }
 
+const BATCH_CREATE_FILL_SCROLL_FALLBACK_PX = 62;
+const BATCH_CREATE_FILL_SCROLL_MIN_PX = 44;
+const BATCH_CREATE_FILL_SCROLL_MAX_PX = 96;
+
+function getBatchCreateFillVerticalScrollAmount(scrollRoot: HTMLElement): number {
+  const placeholderRows = Array.from(
+    scrollRoot.querySelectorAll<HTMLElement>("tr[data-row-kind='create-placeholder']")
+  );
+  const measuredRow =
+    placeholderRows.find((row) => !row.classList.contains("is-inline-editing")) ??
+    placeholderRows[0] ??
+    null;
+  const measuredHeight = measuredRow
+    ? Math.ceil(measuredRow.getBoundingClientRect().height)
+    : 0;
+  if (!measuredHeight) {
+    return BATCH_CREATE_FILL_SCROLL_FALLBACK_PX;
+  }
+  return Math.min(
+    BATCH_CREATE_FILL_SCROLL_MAX_PX,
+    Math.max(BATCH_CREATE_FILL_SCROLL_MIN_PX, measuredHeight)
+  );
+}
+
 function isPlannedIdleYesValue(value: unknown): boolean {
   return String(value ?? "").trim() === "Yes";
+}
+
+function resolveExpectedEntryLastUpdatedAt(
+  record: WorkReportRecord | null
+): string | undefined {
+  const value = String(record?.lastUpdatedAt ?? "").trim();
+  return value || undefined;
 }
 
 interface PendingMutationReplay {
@@ -215,121 +265,6 @@ const REASON_COLUMNS_ORDER_104: ReadonlyArray<OrderedDetailColumn> = [
 const EMPTY_OPTIONS: FormOptionMap = {};
 const SUPPORTED_FORM_IDS = new Set<WorkReportFormId>(["104", "105"]);
 const DETAIL_HIDDEN_COLUMNS_STORAGE_KEY = "work-report:detail-hidden-columns:v4";
-const INLINE_CREATE_PLACEHOLDER_COUNT = 3;
-const INLINE_CREATE_TRAILING_PLACEHOLDER_COUNT = 3;
-const INLINE_CREATE_PLACEHOLDER_ROW_PREFIX = "__inline-create__";
-const BATCH_CREATE_FILLABLE_KEYS = new Set<InlineEditableDetailKey>([
-  "date",
-  "plannedIdle",
-  "processCode",
-  "machineId",
-  "operatorId",
-  "inputOptions",
-  "shiftType",
-  "startTime",
-  "endTime",
-  "breakTime",
-  "productionQty",
-  "remark",
-  "setupAdjustType",
-  "setupAdjustMinutes",
-]);
-const BATCH_CREATE_FILL_ORDER: ReadonlyArray<InlineEditableDetailKey> = [
-  "date",
-  "plannedIdle",
-  "processCode",
-  "machineId",
-  "operatorId",
-  "inputOptions",
-  "shiftType",
-  "startTime",
-  "endTime",
-  "breakTime",
-  "productionQty",
-  "remark",
-  "setupAdjustType",
-  "setupAdjustMinutes",
-];
-
-type BatchCreateFieldErrorMap = Partial<Record<InlineEditableDetailKey, string>>;
-type BatchCreateFillDragState = {
-  sourceRowId: string;
-  sourceKey: InlineEditableDetailKey;
-  endKey: InlineEditableDetailKey;
-  startIndex: number;
-  endIndex: number;
-};
-
-function resolveBatchCreateFillKeys(
-  sourceKey: InlineEditableDetailKey,
-  endKey: InlineEditableDetailKey
-): InlineEditableDetailKey[] {
-  const sourceIndex = BATCH_CREATE_FILL_ORDER.indexOf(sourceKey);
-  const endIndex = BATCH_CREATE_FILL_ORDER.indexOf(endKey);
-  if (sourceIndex === -1 || endIndex === -1) {
-    return [sourceKey];
-  }
-  const start = Math.min(sourceIndex, endIndex);
-  const end = Math.max(sourceIndex, endIndex);
-  return BATCH_CREATE_FILL_ORDER.slice(start, end + 1);
-}
-
-function parseInlineCreatePlaceholderIndex(rowId: string): number | null {
-  const matched = rowId.match(/^__inline-create__:(\d+)$/);
-  if (!matched) {
-    return null;
-  }
-  const parsed = Number(matched[1]);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function isMeaningfulBatchCreateDraft(state: FormState): boolean {
-  return Object.values(state).some((value) => String(value ?? "").trim().length > 0);
-}
-
-function buildBatchCreateFieldErrors(
-  state: FormState,
-  t: (key: string, options?: Record<string, unknown>) => string
-): BatchCreateFieldErrorMap {
-  const errors: BatchCreateFieldErrorMap = {};
-  const isPlannedIdleYes = state.plannedIdle.trim() === "Yes";
-  const requiredFields: InlineEditableDetailKey[] = [
-    "date",
-    "machineId",
-    "operatorId",
-    "startTime",
-    "endTime",
-  ];
-  if (!isPlannedIdleYes) {
-    requiredFields.push("productionQty");
-  }
-
-  for (const field of requiredFields) {
-    if (!String(state[field] ?? "").trim()) {
-      errors[field] = t("workReport:reportForm.validation.requiredField", { field });
-    }
-  }
-
-  if (state.startTime.trim() && !/^\d{2}:\d{2}$/.test(state.startTime.trim())) {
-    errors.startTime = t("workReport:reportForm.validation.invalidTime", { field: "startTime" });
-  }
-  if (state.endTime.trim() && !/^\d{2}:\d{2}$/.test(state.endTime.trim())) {
-    errors.endTime = t("workReport:reportForm.validation.invalidTime", { field: "endTime" });
-  }
-  if (state.productionQty.trim()) {
-    const productionQty = Number(state.productionQty);
-    if (!Number.isFinite(productionQty) || productionQty < 0) {
-      errors.productionQty = t("workReport:reportForm.validation.invalidProductionQty");
-    }
-  }
-  if (state.breakTime.trim()) {
-    const breakTime = Number(state.breakTime);
-    if (!Number.isFinite(breakTime) || breakTime < 0) {
-      errors.breakTime = t("workReport:reportForm.validation.invalidBreakTime");
-    }
-  }
-  return errors;
-}
 const ALWAYS_AVAILABLE_DETAIL_DYNAMIC_KEYS: ReadonlyArray<string> = [
   "開單者帳號",
   "NO.單號",
@@ -370,135 +305,19 @@ const DEFAULT_HIDDEN_DETAIL_COLUMNS = new Set<string>([
   "ERP Part No.完工ERP料號",
   "機台主要操作者工號",
 ]);
-const INLINE_EDITABLE_DETAIL_KEYS_BY_FORM: Record<WorkReportFormId, readonly InlineEditableDetailKey[]> = {
-  "104": [
-    "date",
-    "plannedIdle",
-    "machineId",
-    "operatorId",
-    "processCode",
-    "inputOptions",
-    "shiftType",
-    "startTime",
-    "endTime",
-    "breakTime",
-    "productionQty",
-    "remark",
-    "setupAdjustType",
-    "setupAdjustMinutes",
-    "countSetupTimeFlag",
-    "setupTimeStandardHours",
-    "setupLossQtyPerPcs",
-    "processLossQtyPerPcs",
-    "totalContainerQty",
-    "containerUnit",
-    "plannedIdleMinutes",
-    "unplannedIdleMinutes",
-    "absentOrTrainingMinutes",
-    "noMaterialMinutes",
-    "waitingQcApprovalMinutes",
-    "meetingMinutes",
-    "cleaningMinutes",
-    "rdSamplingMinutes",
-    "supportOtherMachinesMinutes",
-    "machineBreakdownMinutes",
-    "machineAdjustmentMinutes",
-    "othersMinutes",
-    "waitingForDiesMinutes",
-    "testingDiesMinutes",
-  ],
-  "105": [
-    "date",
-    "plannedIdle",
-    "machineId",
-    "operatorId",
-    "processCode",
-    "inputOptions",
-    "shiftType",
-    "startTime",
-    "endTime",
-    "breakTime",
-    "productionQty",
-    "remark",
-    "setupAdjustType",
-    "setupAdjustMinutes",
-    "countSetupTimeFlag",
-    "setupTimeStandardHours",
-    "setupLossQtyPerPcs",
-    "processLossQtyPerPcs",
-    "totalContainerQty",
-    "containerUnit",
-    "plannedIdleMinutes",
-    "unplannedIdleMinutes",
-    "absentOrTrainingMinutes",
-    "noMaterialMinutes",
-    "waitingQcApprovalMinutes",
-    "meetingMinutes",
-    "cleaningMinutes",
-    "rdSamplingMinutes",
-    "supportOtherMachinesMinutes",
-    "machineBreakdownMinutes",
-    "machineAdjustmentMinutes",
-    "othersMinutes",
-    "waitingForDiesMinutes",
-    "testingDiesMinutes",
-  ],
+
+const BATCH_CREATE_VALIDATION_FIELD_LABEL_KEYS: Partial<Record<InlineEditableDetailKey, string>> = {
+  date: "workReport:table.headers.date",
+  processCode: "workReport:table.headers.process",
+  machineId: "workReport:table.headers.machine",
+  operatorId: "workReport:table.headers.operatorId",
+  startTime: "workReport:table.headers.startTime",
+  endTime: "workReport:table.headers.endTime",
+  productionQty: "workReport:table.headers.qty",
 };
 
 function isSupportedFormId(value: string | undefined): value is WorkReportFormId {
   return value !== undefined && SUPPORTED_FORM_IDS.has(value as WorkReportFormId);
-}
-
-function isCreatePlaceholderRow(row: DetailTableRow): boolean {
-  return row.__placeholder === true;
-}
-
-function buildCreatePlaceholderRow(index: number): DetailTableRow {
-  return {
-    __placeholder: true,
-    rowId: `${INLINE_CREATE_PLACEHOLDER_ROW_PREFIX}:${index}`,
-    date: null,
-    reportType: null,
-    plannedIdle: null,
-    processCode: null,
-    processCodeDisplay: null,
-    machineId: null,
-    machineIdDisplay: null,
-    operatorId: null,
-    operatorIdDisplay: null,
-    operatorName: null,
-    inputOptions: null,
-    shiftType: null,
-    startTime: null,
-    endTime: null,
-    breakTime: null,
-    totalWorkTime: null,
-    productionQty: null,
-    cumulativeQty: null,
-    remark: null,
-    setupAdjustType: null,
-    setupAdjustMinutes: null,
-    countSetupTimeFlag: null,
-    setupTimeStandardHours: null,
-    setupLossQtyPerPcs: null,
-    processLossQtyPerPcs: null,
-    totalContainerQty: null,
-    containerUnit: null,
-    plannedIdleMinutes: null,
-    unplannedIdleMinutes: null,
-    absentOrTrainingMinutes: null,
-    noMaterialMinutes: null,
-    waitingQcApprovalMinutes: null,
-    meetingMinutes: null,
-    cleaningMinutes: null,
-    rdSamplingMinutes: null,
-    supportOtherMachinesMinutes: null,
-    machineBreakdownMinutes: null,
-    machineAdjustmentMinutes: null,
-    othersMinutes: null,
-    waitingForDiesMinutes: null,
-    testingDiesMinutes: null,
-  };
 }
 
 function normalizeSearch(search: string | undefined | null): string {
@@ -661,11 +480,15 @@ export function WorkReportDetailPage() {
   }, [listReturnState?.listSearch]);
 
   const [record, setRecord] = useState<WorkReportRecord | null>(null);
+  const expectedEntryLastUpdatedAt = resolveExpectedEntryLastUpdatedAt(record);
+  const [contextCollapsed, setContextCollapsed] = useState(false); // 工令資訊卡收合 → 表格區吃滿剩餘高
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [taskQueueDrawerOpen, setTaskQueueDrawerOpen] = useState(false);
+  const [taskQueueRefreshToken, setTaskQueueRefreshToken] = useState(0);
+  const batchCreateSubmitInFlightRef = useRef(false);
   const [batchCreateMode, setBatchCreateMode] = useState(false);
   const [batchCreateDraftsByRowId, setBatchCreateDraftsByRowId] = useState<Record<string, FormState>>(
     {}
@@ -679,6 +502,12 @@ export function WorkReportDetailPage() {
     Record<string, BatchCreateFieldErrorMap>
   >({});
   const [batchCreateFillDrag, setBatchCreateFillDrag] = useState<BatchCreateFillDragState | null>(null);
+  const batchCreateFillDragRef = useRef<BatchCreateFillDragState | null>(null);
+  const batchCreateFillPointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const batchCreateFillVerticalStepAtRef = useRef(0);
+  const batchCreateFillHorizontalStepAtRef = useRef(0);
+  const batchCreateFillPendingVerticalScrollRef = useRef(0);
+  const batchCreateFillScrollFrameRef = useRef(0);
   const [batchDeleteMode, setBatchDeleteMode] = useState(false);
   const [selectedBatchDeleteRowIds, setSelectedBatchDeleteRowIds] = useState<Set<string>>(
     () => new Set()
@@ -711,7 +540,7 @@ export function WorkReportDetailPage() {
     if (!formId || !safeEntryId || !record?.workOrderNo) {
       return null;
     }
-    const ragicBaseUrl = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://demo.local")
+    const ragicBaseUrl = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://fdtw.app")
       .trim()
       .replace(/\/+$/, "");
     if (!ragicBaseUrl) {
@@ -744,32 +573,74 @@ export function WorkReportDetailPage() {
     return new Set<InlineEditableDetailKey>(supportedKeys.filter((key) => !hiddenColumnKeys.has(key)));
   }, [formId, hiddenColumnKeys]);
   const editingPresenceSessionIdRef = useRef(readOrCreateEditingPresenceSessionId());
+  const foregroundLoadEntryRequestIdRef = useRef(0);
+  const backgroundLoadEntryRequestIdRef = useRef(0);
+  const foregroundLoadEntryInFlightRef = useRef(false);
 
   const loadEntry = useCallback(async (options: LoadEntryOptions = {}) => {
-    const { silent = false, forceRefresh = false } = options;
+    const {
+      mode = "foreground",
+      forceRefresh = false,
+      notifyOnError,
+      throwOnError = false,
+    } = options;
     if (!formId || !safeEntryId) {
       return;
     }
-    if (silent) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
+    // 防 race：快速切換 entry 或背景 silent reload 交錯時，慢的舊回應不得覆寫
+    // 新請求的資料。只有「仍是最新請求」的回應能寫 state；過期回應（含錯誤）
+    // 一律丟棄，避免切走後舊 entry 的資料/錯誤通知閃回來。
+    const isBackground = mode === "background";
+    const requestId = isBackground
+      ? ++backgroundLoadEntryRequestIdRef.current
+      : ++foregroundLoadEntryRequestIdRef.current;
+    const foregroundRequestIdAtStart = foregroundLoadEntryRequestIdRef.current;
+    if (!isBackground) {
+      foregroundLoadEntryInFlightRef.current = true;
     }
-    setLoadError(null);
+    const isStale = () =>
+      isBackground
+        ? backgroundLoadEntryRequestIdRef.current !== requestId ||
+          foregroundLoadEntryRequestIdRef.current !== foregroundRequestIdAtStart ||
+          foregroundLoadEntryInFlightRef.current
+        : foregroundLoadEntryRequestIdRef.current !== requestId;
+    if (mode === "foreground") {
+      setLoading(true);
+    } else if (mode === "refreshing") {
+      setRefreshing(true);
+    }
+    if (!isBackground) {
+      setLoadError(null);
+    }
     try {
       const nextRecord = normalizeRecord(
         await fetchWorkReportEntry(formId, safeEntryId, forceRefresh),
         true
       );
+      if (isStale()) {
+        return;
+      }
+      setLoadError(null);
       setRecord(nextRecord);
     } catch (error) {
+      if (isStale()) {
+        return;
+      }
       const message = getErrorMessage(error);
-      setLoadError(message);
-      setNotice({ type: "error", message });
+      if (!isBackground) {
+        setLoadError(message);
+      }
+      if (notifyOnError ?? !isBackground) {
+        setNotice({ type: "error", message });
+      }
+      if (throwOnError) {
+        throw error;
+      }
     } finally {
-      if (silent) {
+      // 只有最新 foreground/refreshing 請求負責收尾，避免背景刷新干擾使用者主動載入。
+      if (!isBackground && foregroundLoadEntryRequestIdRef.current === requestId) {
+        foregroundLoadEntryInFlightRef.current = false;
         setRefreshing(false);
-      } else {
         setLoading(false);
       }
     }
@@ -1101,6 +972,7 @@ export function WorkReportDetailPage() {
     formId,
     safeEntryId,
     workOrderNo: record?.workOrderNo ?? null,
+    expectedEntryLastUpdatedAt,
     hasActiveMutationTask,
     hasBlockingMutationTask,
     ensureOptionsLoaded,
@@ -1134,18 +1006,25 @@ export function WorkReportDetailPage() {
     inlineProcessOptions,
     inputOptionPickerOptions,
     shiftTypePickerOptions,
+    plannedIdlePickerOptions,
+    setupAdjustTypePickerOptions,
+    countSetupTimeFlagPickerOptions,
+    containerUnitPickerOptions,
     selectedInlineMachineOption,
     selectedInlineOperatorOption,
     selectedInlineProcessOption,
     selectedInlineInputOption,
     selectedInlineShiftTypeOption,
+    selectedInlinePlannedIdleOption,
+    selectedInlineSetupAdjustTypeOption,
+    selectedInlineCountSetupTimeFlagOption,
+    selectedInlineContainerUnitOption,
     setEditingRowDraft,
     activateInlineCreateRow,
     startInlineRowEdit,
     handleDetailTableKeyDown,
     updateEditingRowField,
     updateEditingTimeField,
-    handleInlinePlannedIdleChange,
     cancelInlineRowEdit,
     openLinkedPicker,
     closeLinkedPicker,
@@ -1254,7 +1133,7 @@ export function WorkReportDetailPage() {
     enabled: isValidRoute,
     currentPath: location.pathname + location.search,
   });
-  const { maintenanceMessage } = useWorkReportClientPresence({
+  const { maintenanceMessage, blocked, blockedReason } = useWorkReportClientPresence({
     currentPath: location.pathname + location.search,
     currentFormId: formId,
     currentEntryId: safeEntryId,
@@ -1281,7 +1160,7 @@ export function WorkReportDetailPage() {
   ]);
   const applyBatchCreateHighlight = useCallback(
     async (payload: { rowId: string | null; message: string }) => {
-      await loadEntry({ silent: true, forceRefresh: false });
+      await loadEntry({ mode: "background", forceRefresh: true });
       if (payload.rowId) {
         setHighlightedDetailRowId(payload.rowId);
       }
@@ -1328,6 +1207,7 @@ export function WorkReportDetailPage() {
               // 成功即從 retry store 移除整條 retry 鏈（原始 + 所有 retry 版本）
               // 避免 badge 還顯示舊的失敗 record
               deleteRetryableBatchCreateRecordChain(taskId);
+              setTaskQueueRefreshToken((value) => value + 1);
               const payload = {
                 rowId: task.rowId ?? null,
                 message: task.message ?? t("workReport:messages.realtimeRefreshApplied"),
@@ -1347,6 +1227,7 @@ export function WorkReportDetailPage() {
                 task.message ??
                 t("workReport:messages.backgroundProcessingFailedDefault"),
             });
+            setTaskQueueRefreshToken((value) => value + 1);
             return;
           }
         } catch (error) {
@@ -1608,49 +1489,99 @@ export function WorkReportDetailPage() {
     await activateBatchCreateRow(`${INLINE_CREATE_PLACEHOLDER_ROW_PREFIX}:0`);
   }, [activateBatchCreateRow]);
   const saveBatchCreate = useCallback(async () => {
-    if (!formId || !safeEntryId || submitting) {
+    if (!formId || !safeEntryId || submitting || batchCreateSubmitInFlightRef.current) {
       return;
     }
-    const draftEntries = Object.entries({
-      ...batchCreateDraftsByRowId,
-      ...(batchCreateMode && editingRowId && editingRowDraft ? { [editingRowId]: editingRowDraft } : {}),
-    })
-      .filter(([, draft]) => isMeaningfulBatchCreateDraft(draft))
-      .sort(
-        ([leftRowId], [rightRowId]) =>
-          (parseInlineCreatePlaceholderIndex(leftRowId) ?? 0) -
-          (parseInlineCreatePlaceholderIndex(rightRowId) ?? 0)
-      );
-
-    if (draftEntries.length === 0) {
-      setNotice({ type: "info", message: t("workReport:detailPage.batchCreateNothingToSubmit") });
-      return;
-    }
-
-    const nextErrors: Record<string, BatchCreateFieldErrorMap> = {};
-    for (const [rowId, draft] of draftEntries) {
-      const rowErrors = buildBatchCreateFieldErrors(draft, t);
-      if (Object.keys(rowErrors).length > 0) {
-        nextErrors[rowId] = rowErrors;
-      }
-    }
-    setBatchCreateFieldErrorsByRowId(nextErrors);
-    if (Object.keys(nextErrors).length > 0) {
-      setNotice({ type: "error", message: t("workReport:detailPage.batchCreateValidationHint") });
-      const firstInvalidRowId = Object.keys(nextErrors).sort(
-        (leftRowId, rightRowId) =>
-          (parseInlineCreatePlaceholderIndex(leftRowId) ?? 0) -
-          (parseInlineCreatePlaceholderIndex(rightRowId) ?? 0)
-      )[0];
-      await activateBatchCreateRow(firstInvalidRowId);
-      return;
-    }
-
+    batchCreateSubmitInFlightRef.current = true;
     setSubmitting(true);
     try {
+      const draftEntries = Object.entries({
+        ...batchCreateDraftsByRowId,
+        ...(batchCreateMode && editingRowId && editingRowDraft ? { [editingRowId]: editingRowDraft } : {}),
+      })
+        .filter(([, draft]) => isMeaningfulBatchCreateDraft(draft))
+        .sort(
+          ([leftRowId], [rightRowId]) =>
+            (parseInlineCreatePlaceholderIndex(leftRowId) ?? 0) -
+            (parseInlineCreatePlaceholderIndex(rightRowId) ?? 0)
+        );
+
+      if (draftEntries.length === 0) {
+        setNotice({ type: "info", message: t("workReport:detailPage.batchCreateNothingToSubmit") });
+        return;
+      }
+
+      const defaultedDraftEntries = draftEntries.map(
+        ([rowId, draft]) =>
+          [
+            rowId,
+            applyCreateDefaultsToFormState(
+              formId,
+              draft,
+              record,
+              formOptions.machineId ?? [],
+              formOptions.operatorId ?? []
+            ),
+          ] as const
+      );
+
+      const nextErrors: Record<string, BatchCreateFieldErrorMap> = {};
+      for (const [rowId, draft] of defaultedDraftEntries) {
+        const rowErrors = buildBatchCreateFieldErrors(draft, t);
+        if (Object.keys(rowErrors).length > 0) {
+          nextErrors[rowId] = rowErrors;
+        }
+      }
+      setBatchCreateFieldErrorsByRowId(nextErrors);
+      if (Object.keys(nextErrors).length > 0) {
+        setNotice({ type: "error", message: t("workReport:detailPage.batchCreateValidationHint") });
+        const sortedInvalidRowIds = Object.keys(nextErrors).sort(
+          (leftRowId, rightRowId) =>
+            (parseInlineCreatePlaceholderIndex(leftRowId) ?? 0) -
+            (parseInlineCreatePlaceholderIndex(rightRowId) ?? 0)
+        );
+        const validationRows = sortedInvalidRowIds.map((rowId) => {
+          const rowIndex = parseInlineCreatePlaceholderIndex(rowId);
+          const fieldLabels = (Object.keys(nextErrors[rowId] ?? {}) as InlineEditableDetailKey[])
+            .map((field) => {
+              const labelKey = BATCH_CREATE_VALIDATION_FIELD_LABEL_KEYS[field];
+              return labelKey ? t(labelKey) : field;
+            })
+            .join("、");
+          return {
+            rowId,
+            rowNumber: rowIndex === null ? rowId : String(rowIndex + 1),
+            fieldLabels,
+          };
+        });
+        Modal.warning({
+          title: t("workReport:detailPage.batchCreateValidationModalTitle"),
+          content: (
+            <div>
+              <p>{t("workReport:detailPage.batchCreateValidationModalContent")}</p>
+              <ul>
+                {validationRows.map((row) => (
+                  <li key={row.rowId}>
+                    {t("workReport:detailPage.batchCreateValidationModalRow", {
+                      row: row.rowNumber,
+                      fields: row.fieldLabels,
+                    })}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ),
+          okText: t("common:actions.ok"),
+          centered: true,
+        });
+        const firstInvalidRowId = sortedInvalidRowIds[0];
+        await activateBatchCreateRow(firstInvalidRowId);
+        return;
+      }
+
       // 組 rows：每筆帶上 placeholder rowId 對應的 clientRowKey（UUID）
       // 已經在 activateBatchCreateRow 產過 key；萬一缺（理論上不會）當場補一個
-      const rows = draftEntries.map(([placeholderRowId, draft]) => {
+      const rows = defaultedDraftEntries.map(([placeholderRowId, draft]) => {
         const clientRowKey =
           batchCreateClientKeysByRowId[placeholderRowId] ?? crypto.randomUUID();
         return {
@@ -1659,6 +1590,7 @@ export function WorkReportDetailPage() {
         };
       });
       const accepted = await createReportsBatchAccepted(formId, safeEntryId, rows, {
+        expectedEntryLastUpdatedAt,
         editSessionId: currentEditSessionId,
         workOrderNo: record?.workOrderNo ?? null,
       });
@@ -1669,6 +1601,7 @@ export function WorkReportDetailPage() {
         entryId: safeEntryId,
         workOrderNo: record?.workOrderNo ?? null,
         rows,
+        expectedEntryLastUpdatedAt,
         editSessionId: currentEditSessionId ?? undefined,
         createdAt: new Date().toISOString(),
       });
@@ -1684,6 +1617,7 @@ export function WorkReportDetailPage() {
       setTaskQueueDrawerOpen(true);
       trackBatchCreateTask(accepted.taskId);
     } finally {
+      batchCreateSubmitInFlightRef.current = false;
       setSubmitting(false);
     }
   }, [
@@ -1695,14 +1629,17 @@ export function WorkReportDetailPage() {
     currentEditSessionId,
     editingRowDraft,
     editingRowId,
+    expectedEntryLastUpdatedAt,
     formId,
-    record?.workOrderNo,
+    formOptions.machineId,
+    formOptions.operatorId,
+    record,
     safeEntryId,
     submitting,
     trackBatchCreateTask,
     t,
   ]);
-  const handleFillPreviewHover = useCallback(
+  const updateBatchCreateFillTarget = useCallback(
     (rowId: string, key: InlineEditableDetailKey) => {
       setBatchCreateFillDrag((previous) => {
         if (!previous) {
@@ -1718,17 +1655,29 @@ export function WorkReportDetailPage() {
         if (hoverIndex === previous.endIndex && previous.endKey === key) {
           return previous;
         }
-        return {
+        const nextFillState = {
           ...previous,
           endKey: key,
           endIndex: hoverIndex,
         };
+        batchCreateFillDragRef.current = nextFillState;
+        return nextFillState;
       });
     },
     []
   );
-  const finalizeBatchCreateFill = useCallback(async () => {
-    const fillState = batchCreateFillDrag;
+  const handleFillPreviewHover = useCallback(
+    (rowId: string, key: InlineEditableDetailKey) => {
+      updateBatchCreateFillTarget(rowId, key);
+    },
+    [updateBatchCreateFillTarget]
+  );
+  useEffect(() => {
+    batchCreateFillDragRef.current = batchCreateFillDrag;
+  }, [batchCreateFillDrag]);
+  const finalizeBatchCreateFill = useCallback(async (currentFillState?: BatchCreateFillDragState | null) => {
+    const fillState = currentFillState ?? batchCreateFillDragRef.current;
+    batchCreateFillDragRef.current = null;
     setBatchCreateFillDrag(null);
     if (!fillState || !formId) {
       return;
@@ -1781,7 +1730,6 @@ export function WorkReportDetailPage() {
   }, [
     batchCreateDraftsByRowId,
     batchCreateFieldErrorsByRowId,
-    batchCreateFillDrag,
     editingRowDraft,
     editingRowId,
     formId,
@@ -1790,18 +1738,165 @@ export function WorkReportDetailPage() {
     record,
     t,
   ]);
+  const scheduleBatchCreateFillVerticalScroll = useCallback(
+    (amount: number) => {
+      batchCreateFillPendingVerticalScrollRef.current += amount;
+      if (batchCreateFillScrollFrameRef.current) {
+        return;
+      }
+      batchCreateFillScrollFrameRef.current = window.requestAnimationFrame(() => {
+        batchCreateFillScrollFrameRef.current = 0;
+        const pendingAmount = batchCreateFillPendingVerticalScrollRef.current;
+        batchCreateFillPendingVerticalScrollRef.current = 0;
+        if (pendingAmount === 0) {
+          return;
+        }
+        const scrollRoot = detailTableScrollRef.current;
+        if (!scrollRoot) {
+          return;
+        }
+        const maxScrollTop = Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight);
+        scrollRoot.scrollTop = Math.max(
+          0,
+          Math.min(maxScrollTop, scrollRoot.scrollTop + pendingAmount)
+        );
+      });
+    },
+    [detailTableScrollRef]
+  );
+  useEffect(
+    () => () => {
+      if (batchCreateFillScrollFrameRef.current) {
+        window.cancelAnimationFrame(batchCreateFillScrollFrameRef.current);
+        batchCreateFillScrollFrameRef.current = 0;
+      }
+      batchCreateFillPendingVerticalScrollRef.current = 0;
+    },
+    []
+  );
+  const batchCreateFillDragging = batchCreateFillDrag !== null;
   useEffect(() => {
-    if (!batchCreateFillDrag) {
+    if (!batchCreateFillDragging) {
       return;
     }
-    const handleMouseUp = () => {
-      void finalizeBatchCreateFill();
+    let frameId = 0;
+    let pointerX = 0;
+    let pointerY = 0;
+    let hasPointer = false;
+    const edgeThreshold = 56;
+    const horizontalScrollStep = 18;
+    const verticalStepIntervalMs = 140;
+    const horizontalStepIntervalMs = 140;
+    const verticalIntentThreshold = 36;
+
+    const updateTargetFromPointer = () => {
+      if (!hasPointer) {
+        return false;
+      }
+      const scrollRoot = detailTableScrollRef.current;
+      if (!scrollRoot) {
+        return false;
+      }
+
+      const rootRect = scrollRoot.getBoundingClientRect();
+      const nearBottom = pointerY >= rootRect.bottom - edgeThreshold;
+      const nearTop = pointerY <= rootRect.top + edgeThreshold;
+      const nearRight = pointerX >= rootRect.right - edgeThreshold;
+      const nearLeft = pointerX <= rootRect.left + edgeThreshold;
+      const pointerStart = batchCreateFillPointerStartRef.current;
+      const deltaY = pointerStart ? pointerY - pointerStart.y : 0;
+      const shouldMoveDown = deltaY >= verticalIntentThreshold;
+      const shouldMoveUp = deltaY <= -verticalIntentThreshold;
+
+      const now = Date.now();
+      const shouldVerticalStep =
+        ((nearBottom && shouldMoveDown) || (nearTop && shouldMoveUp)) &&
+        now - batchCreateFillVerticalStepAtRef.current >= verticalStepIntervalMs;
+      const shouldHorizontalStep =
+        (nearRight || nearLeft) &&
+        now - batchCreateFillHorizontalStepAtRef.current >= horizontalStepIntervalMs;
+
+      if (nearBottom && shouldMoveDown && shouldVerticalStep) {
+        batchCreateFillVerticalStepAtRef.current = now;
+        const verticalScrollAmount = getBatchCreateFillVerticalScrollAmount(scrollRoot);
+        setBatchCreateFillDrag((previous) => {
+          if (!previous) {
+            return previous;
+          }
+          const nextFillState = {
+            ...previous,
+            endIndex: previous.endIndex + 1,
+          };
+          batchCreateFillDragRef.current = nextFillState;
+          return nextFillState;
+        });
+        scheduleBatchCreateFillVerticalScroll(verticalScrollAmount);
+      } else if (nearTop && shouldMoveUp && shouldVerticalStep) {
+        batchCreateFillVerticalStepAtRef.current = now;
+        scheduleBatchCreateFillVerticalScroll(-getBatchCreateFillVerticalScrollAmount(scrollRoot));
+      }
+      if (nearRight && shouldHorizontalStep) {
+        batchCreateFillHorizontalStepAtRef.current = now;
+        scrollRoot.scrollLeft += horizontalScrollStep;
+      } else if (nearLeft && shouldHorizontalStep) {
+        batchCreateFillHorizontalStepAtRef.current = now;
+        scrollRoot.scrollLeft -= horizontalScrollStep;
+      }
+
+      const pointedElement = document.elementFromPoint(pointerX, pointerY);
+      const pointedCell = pointedElement?.closest?.<HTMLElement>("[data-inline-cell-key]");
+      const pointedRow = pointedElement?.closest?.<HTMLElement>(
+        "tr[data-row-kind='create-placeholder']"
+      );
+      const pointedKey = pointedCell?.getAttribute("data-inline-cell-key") as InlineEditableDetailKey | null;
+      const pointedRowId = pointedRow?.getAttribute("data-row-id") ?? null;
+      if (pointedRowId && pointedKey) {
+        updateBatchCreateFillTarget(pointedRowId, pointedKey);
+      }
+
+      return (nearBottom && shouldMoveDown) || (nearTop && shouldMoveUp) || nearRight || nearLeft;
     };
+
+    const scheduleFrame = () => {
+      if (frameId) {
+        return;
+      }
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0;
+        const keepRunning = updateTargetFromPointer();
+        if (keepRunning) {
+          scheduleFrame();
+        }
+      });
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      pointerX = event.clientX;
+      pointerY = event.clientY;
+      hasPointer = true;
+      scheduleFrame();
+    };
+    const handleMouseUp = () => {
+      batchCreateFillPointerStartRef.current = null;
+      void finalizeBatchCreateFill(batchCreateFillDragRef.current);
+    };
+    window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
     return () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      batchCreateFillPointerStartRef.current = null;
+      window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [batchCreateFillDrag, finalizeBatchCreateFill]);
+  }, [
+    batchCreateFillDragging,
+    detailTableScrollRef,
+    finalizeBatchCreateFill,
+    scheduleBatchCreateFillVerticalScroll,
+    updateBatchCreateFillTarget,
+  ]);
   useEffect(() => {
     if (!highlightedDetailRowId) {
       return;
@@ -1847,13 +1942,19 @@ export function WorkReportDetailPage() {
 
       const trailingTargetIndex = Math.min(
         createPlaceholderCount - 1,
-        activeBatchCreatePlaceholderIndex + INLINE_CREATE_TRAILING_PLACEHOLDER_COUNT
+        Math.max(
+          activeBatchCreatePlaceholderIndex + INLINE_CREATE_TRAILING_PLACEHOLDER_COUNT,
+          highestBatchCreateDraftIndex
+        )
       );
       const trailingTargetRow = scrollRoot.querySelector<HTMLElement>(
         `tr[data-row-id="${INLINE_CREATE_PLACEHOLDER_ROW_PREFIX}:${trailingTargetIndex}"]`
       );
       if (trailingTargetRow) {
-        trailingTargetRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        trailingTargetRow.scrollIntoView({
+          behavior: batchCreateFillDragRef.current ? "auto" : "smooth",
+          block: "nearest",
+        });
         return;
       }
 
@@ -1872,6 +1973,7 @@ export function WorkReportDetailPage() {
     createPlaceholderCount,
     detailTableScrollRef,
     editingRowId,
+    highestBatchCreateDraftIndex,
   ]);
   const fixedExtraColumns = useMemo<ReadonlyArray<OrderedDetailColumn>>(() => {
     if (formId !== "104" && formId !== "105") {
@@ -2099,6 +2201,10 @@ export function WorkReportDetailPage() {
     inlineProcessOptions,
     inputOptionPickerOptions,
     shiftTypePickerOptions,
+    plannedIdlePickerOptions,
+    setupAdjustTypePickerOptions,
+    countSetupTimeFlagPickerOptions,
+    containerUnitPickerOptions,
   });
 
   const inlineEditorDefinitions = useMemo<Record<InlineEditableDetailKey, DetailInlineEditorDefinition>>(
@@ -2281,17 +2387,13 @@ export function WorkReportDetailPage() {
       setupAdjustType: {
         key: "setupAdjustType",
         renderEditor: (rowId, draft) => (
-          <select
-            value={draft.setupAdjustType}
-            onChange={(event) => updateEditingRowField("setupAdjustType", event.target.value)}
+          <DetailInlinePickerTrigger
+            value={selectedInlineSetupAdjustTypeOption?.display || draft.setupAdjustType}
+            blankLabel={blankTokenLabel}
+            editorKey="setupAdjustType"
             disabled={savingRowId === rowId}
-            data-inline-editor-key="setupAdjustType"
-            data-prevent-row-click="true"
-          >
-            <option value="">-</option>
-            <option value="(BA)架車">(BA)架車</option>
-            <option value="(SA)調機">(SA)調機</option>
-          </select>
+            onOpen={() => openLinkedPicker("setupAdjustType", rowId)}
+          />
         ),
       },
       setupAdjustMinutes: {
@@ -2312,16 +2414,16 @@ export function WorkReportDetailPage() {
       countSetupTimeFlag: {
         key: "countSetupTimeFlag",
         renderEditor: (rowId, draft) => (
-          <select
-            value={draft.countSetupTimeFlag.trim() === "v" ? "v" : ""}
-            onChange={(event) => updateEditingRowField("countSetupTimeFlag", event.target.value)}
+          <DetailInlinePickerTrigger
+            value={
+              selectedInlineCountSetupTimeFlagOption?.display ||
+              (draft.countSetupTimeFlag.trim() === "v" ? "是" : "否")
+            }
+            blankLabel="否"
+            editorKey="countSetupTimeFlag"
             disabled={savingRowId === rowId}
-            data-inline-editor-key="countSetupTimeFlag"
-            data-prevent-row-click="true"
-          >
-            <option value="">-</option>
-            <option value="v">✓</option>
-          </select>
+            onOpen={() => openLinkedPicker("countSetupTimeFlag", rowId)}
+          />
         ),
       },
       plannedIdleMinutes: {
@@ -2553,17 +2655,13 @@ export function WorkReportDetailPage() {
       plannedIdle: {
         key: "plannedIdle",
         renderEditor: (rowId, draft) => (
-          <select
-            value={draft.plannedIdle}
-            onChange={(event) => handleInlinePlannedIdleChange(event.target.value)}
+          <DetailInlinePickerTrigger
+            value={selectedInlinePlannedIdleOption?.display || draft.plannedIdle}
+            blankLabel={blankTokenLabel}
+            editorKey="plannedIdle"
             disabled={savingRowId === rowId}
-            data-inline-editor-key="plannedIdle"
-            data-prevent-row-click="true"
-          >
-            <option value="">-</option>
-            <option value="No">—</option>
-            <option value="Yes">✓</option>
-          </select>
+            onOpen={() => openLinkedPicker("plannedIdle", rowId)}
+          />
         ),
       },
       setupTimeStandardHours: {
@@ -2574,6 +2672,8 @@ export function WorkReportDetailPage() {
             value={draft.setupTimeStandardHours}
             readOnly
             disabled
+            data-inline-editor-key="setupTimeStandardHours"
+            data-prevent-row-click="true"
           />
         ),
       },
@@ -2625,22 +2725,13 @@ export function WorkReportDetailPage() {
       containerUnit: {
         key: "containerUnit",
         renderEditor: (rowId, draft) => (
-          <>
-            <input
-              type="text"
-              list="detail-inline-container-unit-options"
-              value={draft.containerUnit}
-              onChange={(event) => updateEditingRowField("containerUnit", event.target.value)}
-              disabled={savingRowId === rowId}
-              data-inline-editor-key="containerUnit"
-              data-prevent-row-click="true"
-            />
-            <datalist id="detail-inline-container-unit-options">
-              <option value="桶Barrel">桶Barrel</option>
-              <option value="箱Box">箱Box</option>
-              <option value="袋Bag">袋Bag</option>
-            </datalist>
-          </>
+          <DetailInlinePickerTrigger
+            value={selectedInlineContainerUnitOption?.display || draft.containerUnit}
+            blankLabel={blankTokenLabel}
+            editorKey="containerUnit"
+            disabled={savingRowId === rowId}
+            onOpen={() => openLinkedPicker("containerUnit", rowId)}
+          />
         ),
       },
     }),
@@ -2654,8 +2745,11 @@ export function WorkReportDetailPage() {
       selectedInlineOperatorOption,
       selectedInlineProcessOption,
       selectedInlineShiftTypeOption,
+      selectedInlinePlannedIdleOption,
+      selectedInlineSetupAdjustTypeOption,
+      selectedInlineCountSetupTimeFlagOption,
+      selectedInlineContainerUnitOption,
       t,
-      handleInlinePlannedIdleChange,
       updateEditingTimeField,
       updateEditingRowField,
     ]
@@ -2695,13 +2789,21 @@ export function WorkReportDetailPage() {
               if (startIndex === null) {
                 return;
               }
-              setBatchCreateFillDrag({
+              batchCreateFillPointerStartRef.current = {
+                x: event.clientX,
+                y: event.clientY,
+              };
+              batchCreateFillVerticalStepAtRef.current = 0;
+              batchCreateFillHorizontalStepAtRef.current = 0;
+              const nextFillState = {
                 sourceRowId: item.rowId,
                 sourceKey: key,
                 endKey: key,
                 startIndex,
                 endIndex: startIndex,
-              });
+              };
+              batchCreateFillDragRef.current = nextFillState;
+              setBatchCreateFillDrag(nextFillState);
             }}
           />
         </div>
@@ -3003,9 +3105,13 @@ export function WorkReportDetailPage() {
     setWorkOrderClosing(true);
     try {
       if (workOrderConfirmAction === "close") {
-        await closeWorkOrder(formId, safeEntryId);
+        await closeWorkOrder(formId, safeEntryId, {
+          expectedEntryLastUpdatedAt,
+        });
       } else {
-        await reopenWorkOrder(formId, safeEntryId);
+        await reopenWorkOrder(formId, safeEntryId, {
+          expectedEntryLastUpdatedAt,
+        });
       }
       const successKey =
         workOrderConfirmAction === "close"
@@ -3013,7 +3119,7 @@ export function WorkReportDetailPage() {
           : "workReport:detailPage.manualReopenSuccess";
       setWorkOrderConfirmAction(null);
       setNotice({ type: "success", message: t(successKey) });
-      await loadEntry({ silent: true, forceRefresh: true });
+      await loadEntry({ mode: "background", forceRefresh: true });
     } catch (error) {
       setNotice({ type: "error", message: getErrorMessage(error) });
     } finally {
@@ -3021,6 +3127,7 @@ export function WorkReportDetailPage() {
     }
   }, [
     formId,
+    expectedEntryLastUpdatedAt,
     loadEntry,
     safeEntryId,
     t,
@@ -3030,6 +3137,9 @@ export function WorkReportDetailPage() {
   const handleDelete = useCallback(
     async (rowId: string): Promise<void> => {
       if (!formId || !safeEntryId) {
+        return;
+      }
+      if (loading || refreshing || submitting || hasActiveMutationTask) {
         return;
       }
       const modal = Modal.confirm({
@@ -3098,46 +3208,26 @@ export function WorkReportDetailPage() {
               phase: "request",
               startedAt,
             });
-            await deleteReport(formId, safeEntryId, rowId, {
+            const accepted = await deleteReport(formId, safeEntryId, rowId, {
+              expectedEntryLastUpdatedAt,
               editSessionId: currentEditSessionId,
               editLockVersion: lockVersion,
+              workOrderNo: record?.workOrderNo ?? null,
             });
             const requestEndedAt = new Date().toISOString();
-            logDetailEvent("api", "detail-delete-succeeded", "刪除報工明細成功", {
+            logDetailEvent("api", "detail-delete-accepted", "刪除報工明細已排入佇列", {
               rowId,
+              taskId: accepted.taskId,
               operationId,
               operationType: "detail-delete",
-              phase: "request-succeeded",
+              phase: "accepted",
               startedAt,
               endedAt: requestEndedAt,
               durationMs: calculateDurationMs(startedAt, requestEndedAt),
             });
-            setNotice({ type: "success", message: t("workReport:messages.detailDeletedPermanent") });
-            void message.success(t("workReport:messages.detailDeletedPermanent"));
-            logDetailEvent("realtime", "detail-delete-refresh-started", "刪除後開始刷新明細", {
-              rowId,
-              operationId,
-              operationType: "detail-delete",
-              phase: "refresh",
-              startedAt,
-            });
-            void loadEntry({ silent: true, forceRefresh: false }).finally(() => {
-              const refreshEndedAt = new Date().toISOString();
-              logDetailEvent(
-                "realtime",
-                "detail-delete-refresh-completed",
-                "刪除後刷新明細完成",
-                {
-                  rowId,
-                  operationId,
-                  operationType: "detail-delete",
-                  phase: "refresh-completed",
-                  startedAt,
-                  endedAt: refreshEndedAt,
-                  durationMs: calculateDurationMs(startedAt, refreshEndedAt),
-                }
-              );
-            });
+            await registerAcceptedMutationTask("delete", accepted, rowId);
+            setNotice({ type: "success", message: t("workReport:messages.detailDeleteQueued") });
+            setTaskQueueDrawerOpen(true);
           } catch (error) {
             logDetailEvent("api", "detail-delete-failed", getErrorMessage(error), {
               level: "error",
@@ -3170,12 +3260,18 @@ export function WorkReportDetailPage() {
     [
       acquireRowEditLock,
       currentEditSessionId,
+      expectedEntryLastUpdatedAt,
       formId,
+      hasActiveMutationTask,
       logDetailEvent,
+      loading,
+      record?.workOrderNo,
+      registerAcceptedMutationTask,
       releaseRowEditLock,
+      refreshing,
       safeEntryId,
+      submitting,
       t,
-      loadEntry,
     ]
   );
 
@@ -3253,6 +3349,9 @@ export function WorkReportDetailPage() {
     if (!formId || !safeEntryId) {
       return;
     }
+    if (loading || refreshing || submitting || hasActiveMutationTask) {
+      return;
+    }
     const rowIds = Array.from(selectedBatchDeleteRowIds).filter((rowId) =>
       batchDeleteSelectableRowIds.includes(rowId)
     );
@@ -3272,10 +3371,12 @@ export function WorkReportDetailPage() {
       keyboard: false,
       closable: false,
       onOk: async () => {
-        await deleteReportsBatchAccepted(formId, safeEntryId, rowIds, {
+        const accepted = await deleteReportsBatchAccepted(formId, safeEntryId, rowIds, {
+          expectedEntryLastUpdatedAt,
           editSessionId: currentEditSessionId,
           workOrderNo: record?.workOrderNo ?? null,
         });
+        await registerAcceptedMutationTask("delete-batch", accepted);
         setNotice({
           type: "success",
           message: t("workReport:messages.batchDeleteAccepted", {
@@ -3290,10 +3391,16 @@ export function WorkReportDetailPage() {
   }, [
     batchDeleteSelectableRowIds,
     currentEditSessionId,
+    expectedEntryLastUpdatedAt,
     formId,
+    hasActiveMutationTask,
+    loading,
+    registerAcceptedMutationTask,
     record?.workOrderNo,
+    refreshing,
     safeEntryId,
     selectedBatchDeleteRowIds,
+    submitting,
     t,
   ]);
   const openTaskQueueDrawer = useCallback(() => {
@@ -3322,7 +3429,12 @@ export function WorkReportDetailPage() {
   }, []);
   const refreshDetailEntry = useCallback(async () => {
     try {
-      await loadEntry({ forceRefresh: true, silent: Boolean(record) });
+      await loadEntry({
+        forceRefresh: true,
+        mode: record ? "background" : "foreground",
+        notifyOnError: !record,
+        throwOnError: true,
+      });
       void message.success(t("workReport:messages.toastDetailRefreshed"));
     } catch (error) {
       void message.error(
@@ -3400,6 +3512,8 @@ export function WorkReportDetailPage() {
               disabled={
                 batchDeleteMode ||
                 batchCreateMode ||
+                loading ||
+                refreshing ||
                 submitting ||
                 editingRowId !== null ||
                 hasActiveMutationTask
@@ -3420,6 +3534,8 @@ export function WorkReportDetailPage() {
               disabled={
                 batchDeleteMode ||
                 batchCreateMode ||
+                loading ||
+                refreshing ||
                 submitting ||
                 editingRowId !== null ||
                 hasActiveMutationTask
@@ -3439,8 +3555,10 @@ export function WorkReportDetailPage() {
       editingRowId,
       getBatchCreateDraftForRow,
       handleDelete,
+      loading,
       openEditModal,
       record?.status,
+      refreshing,
       saveInlineRowEdit,
       setEditingRowDraft,
       savingRowId,
@@ -3510,6 +3628,41 @@ export function WorkReportDetailPage() {
               </div>
             </section>
           ) : null}
+          {blocked ? (
+            <div
+              role="alert"
+              aria-live="assertive"
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 3000,
+                background: "rgba(15, 23, 42, 0.72)",
+                backdropFilter: "blur(2px)",
+                display: "grid",
+                placeItems: "center",
+                padding: "1.5rem",
+              }}
+            >
+              <div
+                style={{
+                  width: "min(560px, 100%)",
+                  padding: "1.4rem 1.5rem",
+                  borderRadius: "16px",
+                  border: "1px solid rgba(248, 113, 113, 0.5)",
+                  background: "#1f1111",
+                  boxShadow: "0 18px 40px rgba(0,0,0,0.35)",
+                  color: "#fecaca",
+                }}
+              >
+                <div style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "0.55rem" }}>
+                  此裝置已被管理端停用
+                </div>
+                <div style={{ lineHeight: 1.65, fontSize: "0.96rem" }}>
+                  {blockedReason || "此裝置已被管理端暫時停用"}
+                </div>
+              </div>
+            </div>
+          ) : null}
           <header className="detail-page-header">
             <div className="detail-page-title-wrap">
               <button
@@ -3578,6 +3731,9 @@ export function WorkReportDetailPage() {
                   key={`${record?.id ?? "empty"}:detail`}
                   record={record}
                   uiLanguage={uiLanguage}
+                  collapsible
+                  collapsed={contextCollapsed}
+                  onToggleCollapse={() => setContextCollapsed((v) => !v)}
                   detailCollapsible
                   detailDefaultCollapsed
                 />
@@ -3658,6 +3814,9 @@ export function WorkReportDetailPage() {
           searchValue={linkedPickerState.search}
           options={filteredLinkedPickerOptions}
           selectedValue={linkedPickerSelectedValue}
+          initialFocusValue={
+            linkedPickerState.key === "plannedIdle" ? linkedPickerSelectedValue : null
+          }
           onSearchChange={updateLinkedPickerSearch}
           onSelect={handleLinkedOptionSelect}
           onClose={closeLinkedPicker}
@@ -3695,6 +3854,7 @@ export function WorkReportDetailPage() {
         formId={formId}
         entryId={safeEntryId || null}
         workOrderNo={record?.workOrderNo ?? null}
+        refreshToken={taskQueueRefreshToken}
         onRetryAccepted={async (kind, accepted, rowId) => {
           await registerAcceptedMutationTask(kind, accepted, rowId);
           setNotice({

@@ -1,4 +1,5 @@
 import { createApiClient } from "./apiClient";
+import { readSystemNoticeAdminToken } from "../utils/systemNoticeAdminSession";
 
 const api = createApiClient();
 
@@ -46,6 +47,7 @@ export async function fetchRecordAuditLog(params: {
   rowId?: string;
   limit?: number;
 }): Promise<FetchRecordAuditLogResult> {
+  const token = readSystemNoticeAdminToken();
   const response = await api.get<FetchRecordAuditLogResult>("/audit/records", {
     params: {
       scope: params.scope,
@@ -54,6 +56,7 @@ export async function fetchRecordAuditLog(params: {
       ...(params.rowId ? { rowId: params.rowId } : {}),
       ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
     },
+    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
   });
   return response.data;
 }

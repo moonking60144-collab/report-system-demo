@@ -25,6 +25,12 @@ test("buildRefreshEntryOptions(user) 帶 user timeout", () => {
   assert.equal(opts.ragicReadTimeoutMs, env.RAGIC_READ_TIMEOUT_MS);
 });
 
+test("buildRefreshEntryOptions(mutation) 帶 mutation timeout", () => {
+  const opts = buildRefreshEntryOptions("mutation");
+  assert.equal(opts.priority, "mutation");
+  assert.equal(opts.ragicReadTimeoutMs, env.RAGIC_MUTATION_READ_TIMEOUT_MS);
+});
+
 test("buildBackgroundReadOptions(background) 帶 priority + background timeout", () => {
   const opts = buildBackgroundReadOptions("background");
   assert.equal(opts.priority, "background");
@@ -35,6 +41,12 @@ test("buildBackgroundReadOptions(sync) 帶 sync timeout", () => {
   const opts = buildBackgroundReadOptions("sync");
   assert.equal(opts.priority, "sync");
   assert.equal(opts.timeoutMs, env.RAGIC_SYNC_READ_TIMEOUT_MS);
+});
+
+test("buildBackgroundReadOptions(mutation) 帶 mutation timeout", () => {
+  const opts = buildBackgroundReadOptions("mutation");
+  assert.equal(opts.priority, "mutation");
+  assert.equal(opts.timeoutMs, env.RAGIC_MUTATION_READ_TIMEOUT_MS);
 });
 
 // 以下是 H4（端對端 priority flow 驗證）的簡化版：

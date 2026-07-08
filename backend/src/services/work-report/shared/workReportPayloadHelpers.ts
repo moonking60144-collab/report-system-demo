@@ -84,8 +84,8 @@ export function buildForm16FallbackWritePayload(
     [config.writeConfig.subtableWriteFields.productionQty, normalizedPayload.productionQty],
     [env.RAGIC_FORM_16_REMARK_FIELD_ID, normalizedPayload.remark],
     [env.RAGIC_FORM_16_WORK_ORDER_FIELD_ID, workOrderNo],
-    [env.RAGIC_FORM_16_PROCESS_FIELD_ID, normalizedPayload.processCode],
     [env.RAGIC_FORM_16_TYPE_FIELD_ID, reportType],
+    [env.RAGIC_FORM_16_PROCESS_FIELD_ID, normalizedPayload.processCode],
     [env.RAGIC_FORM_16_DEP_FIELD_ID, depUnit],
     [env.RAGIC_FORM_16_PROD_TYPE_FIELD_ID, prodType],
   ];

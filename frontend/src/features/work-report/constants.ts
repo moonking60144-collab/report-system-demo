@@ -19,6 +19,7 @@ export const CREATE_TASK_POLL_INTERVAL_MS = 3000;
 export const CREATE_TASK_POLL_TIMEOUT_MS = 180000;
 export const MAX_CREATE_TASK_MONITORS = 12;
 export const CREATE_TASK_AUTO_CLEAR_MS = 4000;
+export const CREATE_TASK_STALE_AUTO_CLEAR_MS = 30000;
 export const COLUMN_TEXT_FILTER_MAX_LENGTH = 60;
 export const BACKEND_FACET_COLUMN_KEYS = [
   "status",
@@ -93,7 +94,7 @@ export const COLUMN_HEADER_LOCALE_MAP: Partial<Record<string, ColumnHeaderLocale
   processLossPc: { zh: "製程損耗(pc)", en: "Process Loss" },
   finishedWireSize: { zh: "成品線徑", en: "Wire Size" },
   status: { zh: "工令狀態", en: "WO Status" },
-  misCloseStatus: { zh: "結案狀態", en: "Close Status" },
+  misCloseStatus: { zh: "[MIS]結案狀態", en: "[MIS] Close" },
   workOrderRemark: { zh: "工令單備註", en: "WO Remark" },
   productUsageType: { zh: "產品料號用途種類", en: "Usage Type" },
   moldCondition: { zh: "模具況狀", en: "Mold Cond." },
@@ -367,4 +368,3 @@ export const GLOBAL_SEARCH_COLUMN_KEYS: readonly ColumnKey[] = [
   "prevCompleteKg",
   "prevCompleteContainer",
 ];
-

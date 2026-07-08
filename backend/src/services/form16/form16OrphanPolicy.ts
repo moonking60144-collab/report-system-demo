@@ -10,12 +10,12 @@ import { FORM16_FIELD_KEYS, pickRagicField } from "./form16FieldKeys";
 
 /** 應該要有 workOrderNo 的報工類別；空 workOrderNo + 這些類別 = orphan 種子 */
 export const FORM16_WORK_ORDER_REQUIRED_TYPES: readonly string[] = [
-  "TI-ProcessA",
-  "HF-Forge",
-  "PROC-LM",
-  "PROC-EP",
-  "CH-ManualInspect",
-  "CH-MachineInspect",
+  "TI搓牙",
+  "HF鍛造",
+  "3F加工-LM",
+  "3F加工-EP",
+  "CH人工全檢A",
+  "CH機台全檢H",
 ];
 
 const WORK_ORDER_REQUIRED_TYPES_SET = new Set(FORM16_WORK_ORDER_REQUIRED_TYPES);

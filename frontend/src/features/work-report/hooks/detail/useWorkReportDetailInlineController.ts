@@ -28,8 +28,20 @@ import {
   mapToFormState,
   validate,
 } from "../../../../components/report-form/formLogic";
-import { INPUT_OPTION_DEFAULT_RULES, PLANNED_IDLE_YES_DEFAULT_RULE } from "../../../../components/report-form/constants";
-import { writeRememberedCreateDefaults, buildInitialFormState } from "../../../../components/report-form/formMemory";
+import {
+  CONTAINER_UNIT_VALUES,
+  COUNT_SETUP_TIME_FLAG_VALUES,
+  INPUT_OPTION_DEFAULT_RULES,
+  INPUT_OPTION_VALUES,
+  PLANNED_IDLE_YES_DEFAULT_RULE,
+  SETUP_ADJUST_TYPE_VALUES,
+  SHIFT_TYPE_VALUES,
+} from "../../../../components/report-form/constants";
+import {
+  applyCreateDefaultsToFormState,
+  buildInitialFormState,
+  writeRememberedCreateDefaults,
+} from "../../../../components/report-form/formMemory";
 import { maskTimeInputResult } from "../../../../components/report-form/timeUtils";
 import { normalizeShiftTypeValue } from "../../../../components/report-form/form-logic/inference";
 import type { FormState } from "../../../../components/report-form/types";
@@ -37,7 +49,6 @@ import {
   filterActiveMachineOptionsWithCurrentValue,
   withCurrentValue,
 } from "../../../../components/report-form/optionUtils";
-import { INPUT_OPTION_VALUES, SHIFT_TYPE_VALUES } from "../../../../components/report-form/constants";
 import { translateInputOptionValue, translateShiftTypeValue } from "../../../../i18n/valueMappers";
 import type {
   WorkReportFrontendEventAction,
@@ -48,6 +59,15 @@ import { saveRetryableMutationRecord } from "../../taskRetryStore";
 import { getErrorMessage } from "../../utils";
 import type { WorkReportFormId } from "../../types";
 import type { DetailTableRow, InlineEditableDetailKey, LinkedPickerFieldKey, LinkedPickerState } from "./types";
+import {
+  findOptionByValue,
+  INLINE_EDITABLE_DETAIL_KEYS_BY_FORM,
+  isInlineElementFocusable,
+  isInlineFieldEmpty,
+  resolveExpectedEntryLastUpdatedAt,
+  resolveInlineEditorTarget,
+  shouldHandleHorizontalArrow,
+} from "./inlineControllerUtils";
 
 interface DetailNoticeState {
   type: "success" | "error" | "info";
@@ -105,6 +125,7 @@ interface UseWorkReportDetailInlineControllerArgs {
     createdAt: string;
     editSessionId?: string;
     editLockVersion?: number;
+    expectedEntryLastUpdatedAt?: string;
   }) => void;
   clearPendingMutationReplay: () => void;
   isRetryableMutationError: (error: unknown) => boolean;
@@ -113,155 +134,20 @@ interface UseWorkReportDetailInlineControllerArgs {
   t: (key: string, options?: Record<string, unknown>) => string;
 }
 
-function isInlineFieldEmpty(key: InlineEditableDetailKey, state: FormState): boolean {
-  const value = state[key];
-  return String(value ?? "").trim() === "";
-}
-
-function isInlineElementFocusable(el: HTMLElement): boolean {
-  if (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLSelectElement ||
-    el instanceof HTMLTextAreaElement ||
-    el instanceof HTMLButtonElement
-  ) {
-    if (el.disabled) {
-      return false;
-    }
-    if (
-      (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) &&
-      el.readOnly
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function resolveInlineEditorTarget(
-  target: EventTarget | null
-): {
-  element: HTMLElement;
-  key: InlineEditableDetailKey;
-} | null {
-  if (!(target instanceof HTMLElement)) {
-    return null;
-  }
-  const inlineRoot = target.closest<HTMLElement>("[data-inline-editor-key]");
-  if (!inlineRoot) {
-    return null;
-  }
-  const key = inlineRoot.getAttribute(
-    "data-inline-editor-key"
-  ) as InlineEditableDetailKey | null;
-  if (!key) {
-    return null;
-  }
+function buildStaticPickerOption(value: string, display = value): FormOptionItem {
   return {
-    element: inlineRoot,
-    key,
+    value,
+    label: display && display !== value ? `${value} - ${display}` : display || value,
+    display,
   };
 }
 
-function shouldHandleHorizontalArrow(
-  event: ReactKeyboardEvent,
-  target: HTMLElement
-): boolean {
-  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
-    return false;
-  }
-  if (target instanceof HTMLTextAreaElement) {
-    return false;
-  }
-  if (target instanceof HTMLButtonElement || target instanceof HTMLSelectElement) {
-    return true;
-  }
-  if (!(target instanceof HTMLInputElement)) {
-    return false;
-  }
-  const inputType = String(target.type ?? "").toLowerCase();
-  if (inputType === "checkbox" || inputType === "radio") {
-    return true;
-  }
-  const rawValue = String(target.value ?? "");
-  const selectionStart =
-    typeof target.selectionStart === "number" ? target.selectionStart : null;
-  const selectionEnd =
-    typeof target.selectionEnd === "number" ? target.selectionEnd : null;
-  if (selectionStart === null || selectionEnd === null) {
-    return true;
-  }
-  if (event.key === "ArrowLeft") {
-    return selectionStart === 0 && selectionEnd === 0;
-  }
-  if (event.key === "ArrowRight") {
-    return (
-      selectionStart === rawValue.length && selectionEnd === rawValue.length
-    );
-  }
-  return false;
+function findPickerOptionIncludingBlank(
+  options: FormOptionItem[],
+  value: string
+): FormOptionItem | null {
+  return options.find((option) => option.value === value) ?? null;
 }
-
-function findOptionByValue(options: FormOptionItem[], value: string): FormOptionItem | undefined {
-  const normalized = value.trim();
-  if (!normalized) {
-    return undefined;
-  }
-  return options.find((item) => item.value.trim() === normalized);
-}
-
-const INLINE_EDITABLE_DETAIL_KEYS_BY_FORM: Record<"104" | "105", readonly InlineEditableDetailKey[]> = {
-  "104": [
-    "date",
-    "plannedIdle",
-    "machineId",
-    "operatorId",
-    "processCode",
-    "inputOptions",
-    "shiftType",
-    "startTime",
-    "endTime",
-    "breakTime",
-    "productionQty",
-    "remark",
-    "setupAdjustType",
-    "setupAdjustMinutes",
-    "countSetupTimeFlag",
-    "setupTimeStandardHours",
-    "setupLossQtyPerPcs",
-    "processLossQtyPerPcs",
-    "totalContainerQty",
-    "containerUnit",
-    "plannedIdleMinutes",
-    "unplannedIdleMinutes",
-    "absentOrTrainingMinutes",
-    "noMaterialMinutes",
-    "waitingQcApprovalMinutes",
-    "meetingMinutes",
-    "cleaningMinutes",
-    "rdSamplingMinutes",
-    "supportOtherMachinesMinutes",
-    "machineBreakdownMinutes",
-    "machineAdjustmentMinutes",
-    "othersMinutes",
-    "waitingForDiesMinutes",
-    "testingDiesMinutes",
-  ],
-  "105": [
-    "date",
-    "plannedIdle",
-    "machineId",
-    "operatorId",
-    "processCode",
-    "inputOptions",
-    "shiftType",
-    "startTime",
-    "endTime",
-    "breakTime",
-    "productionQty",
-    "remark",
-  ],
-};
 
 export function useWorkReportDetailInlineController({
   formId,
@@ -338,6 +224,35 @@ export function useWorkReportDetailInlineController({
       }),
     [t]
   );
+  const plannedIdlePickerOptions = useMemo<FormOptionItem[]>(
+    () => [
+      buildStaticPickerOption("", "-"),
+      buildStaticPickerOption("No", "否"),
+      buildStaticPickerOption("Yes", "是"),
+    ],
+    []
+  );
+  const setupAdjustTypePickerOptions = useMemo<FormOptionItem[]>(
+    () => [
+      buildStaticPickerOption("", "-"),
+      ...SETUP_ADJUST_TYPE_VALUES.map((value) => buildStaticPickerOption(value)),
+    ],
+    []
+  );
+  const countSetupTimeFlagPickerOptions = useMemo<FormOptionItem[]>(
+    () => [
+      buildStaticPickerOption("", "否"),
+      buildStaticPickerOption(COUNT_SETUP_TIME_FLAG_VALUES[0], "是"),
+    ],
+    []
+  );
+  const containerUnitPickerOptions = useMemo<FormOptionItem[]>(
+    () => [
+      buildStaticPickerOption("", "-"),
+      ...CONTAINER_UNIT_VALUES.map((value) => buildStaticPickerOption(value)),
+    ],
+    []
+  );
   const selectedInlineMachineOption = useMemo(() => {
     const value = editingRowDraft?.machineId?.trim() ?? "";
     if (!value) {
@@ -373,6 +288,40 @@ export function useWorkReportDetailInlineController({
     }
     return findOptionByValue(shiftTypePickerOptions, value) ?? null;
   }, [editingRowDraft?.shiftType, shiftTypePickerOptions]);
+  const selectedInlinePlannedIdleOption = useMemo(
+    () =>
+      findPickerOptionIncludingBlank(
+        plannedIdlePickerOptions,
+        editingRowDraft?.plannedIdle ?? ""
+      ),
+    [editingRowDraft?.plannedIdle, plannedIdlePickerOptions]
+  );
+  const selectedInlineSetupAdjustTypeOption = useMemo(
+    () =>
+      findPickerOptionIncludingBlank(
+        setupAdjustTypePickerOptions,
+        editingRowDraft?.setupAdjustType ?? ""
+      ),
+    [editingRowDraft?.setupAdjustType, setupAdjustTypePickerOptions]
+  );
+  const selectedInlineCountSetupTimeFlagOption = useMemo(
+    () =>
+      findPickerOptionIncludingBlank(
+        countSetupTimeFlagPickerOptions,
+        editingRowDraft?.countSetupTimeFlag?.trim() === COUNT_SETUP_TIME_FLAG_VALUES[0]
+          ? COUNT_SETUP_TIME_FLAG_VALUES[0]
+          : ""
+      ),
+    [countSetupTimeFlagPickerOptions, editingRowDraft?.countSetupTimeFlag]
+  );
+  const selectedInlineContainerUnitOption = useMemo(
+    () =>
+      findPickerOptionIncludingBlank(
+        containerUnitPickerOptions,
+        editingRowDraft?.containerUnit ?? ""
+      ),
+    [containerUnitPickerOptions, editingRowDraft?.containerUnit]
+  );
 
   useEffect(() => {
     if (!inlineTimeWarningField) {
@@ -416,7 +365,7 @@ export function useWorkReportDetailInlineController({
     if (!saveButton || saveButton.disabled) {
       return false;
     }
-    saveButton.focus();
+    saveButton.focus({ preventScroll: true });
     return true;
   }, []);
 
@@ -427,7 +376,7 @@ export function useWorkReportDetailInlineController({
     if (!batchSaveButton) {
       return false;
     }
-    batchSaveButton.focus();
+    batchSaveButton.focus({ preventScroll: true });
     return true;
   }, []);
 
@@ -443,6 +392,37 @@ export function useWorkReportDetailInlineController({
       );
     },
     []
+  );
+
+  const scrollInlineElementIntoTableView = useCallback((element: HTMLElement): void => {
+    const scrollRoot = detailTableScrollRef.current;
+    if (!scrollRoot) {
+      element.scrollIntoView({ block: "nearest", inline: "nearest" });
+      return;
+    }
+
+    const rootRect = scrollRoot.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const padding = 12;
+    if (elementRect.top < rootRect.top + padding) {
+      scrollRoot.scrollTop += elementRect.top - rootRect.top - padding;
+    } else if (elementRect.bottom > rootRect.bottom - padding) {
+      scrollRoot.scrollTop += elementRect.bottom - rootRect.bottom + padding;
+    }
+
+    if (elementRect.left < rootRect.left + padding) {
+      scrollRoot.scrollLeft += elementRect.left - rootRect.left - padding;
+    } else if (elementRect.right > rootRect.right - padding) {
+      scrollRoot.scrollLeft += elementRect.right - rootRect.right + padding;
+    }
+  }, []);
+
+  const focusInlineElementWithoutBrowserScroll = useCallback(
+    (element: HTMLElement): void => {
+      scrollInlineElementIntoTableView(element);
+      element.focus({ preventScroll: true });
+    },
+    [scrollInlineElementIntoTableView]
   );
 
   const getOrderedInlineKeysForRow = useCallback(
@@ -494,11 +474,7 @@ export function useWorkReportDetailInlineController({
           if (!nextEl || !isInlineElementFocusable(nextEl)) {
             return false;
           }
-          nextEl.scrollIntoView({
-            block: "nearest",
-            inline: "center",
-          });
-          nextEl.focus();
+          focusInlineElementWithoutBrowserScroll(nextEl);
           if (autoOpenPicker && nextEl instanceof HTMLButtonElement) {
             nextEl.click();
           }
@@ -529,10 +505,9 @@ export function useWorkReportDetailInlineController({
                 `tr[data-row-id="${editingRowId}"] .action-cell button[data-inline-action="save"]`
               ) ??
               document.querySelector<HTMLElement>(".detail-batch-create-save-btn");
-            saveButton?.scrollIntoView({
-              block: "nearest",
-              inline: "center",
-            });
+            if (saveButton) {
+              scrollInlineElementIntoTableView(saveButton);
+            }
           }
         }
       }, 0);
@@ -540,9 +515,11 @@ export function useWorkReportDetailInlineController({
     [
       editingRowId,
       findInlineEditorElement,
+      focusInlineElementWithoutBrowserScroll,
       focusBatchCreateSaveButton,
       focusInlineSaveButton,
       getOrderedInlineKeysForRow,
+      scrollInlineElementIntoTableView,
     ]
   );
 
@@ -568,14 +545,10 @@ export function useWorkReportDetailInlineController({
         if (!nextEl || !isInlineElementFocusable(nextEl)) {
           return;
         }
-        nextEl.scrollIntoView({
-          block: "nearest",
-          inline: "center",
-        });
-        nextEl.focus();
+        focusInlineElementWithoutBrowserScroll(nextEl);
       }, 0);
     },
-    [editingRowId, findInlineEditorElement, getOrderedInlineKeysForRow]
+    [editingRowId, findInlineEditorElement, focusInlineElementWithoutBrowserScroll, getOrderedInlineKeysForRow]
   );
 
   const handleDetailTableKeyDown = useCallback(
@@ -602,7 +575,7 @@ export function useWorkReportDetailInlineController({
         }
         event.preventDefault();
         focusNextEmptyInlineField(inlineTarget.key, editingRowDraft, {
-          autoOpenPicker: false,
+          autoOpenPicker: true,
           focusSaveWhenDone: true,
         });
         return;
@@ -682,18 +655,25 @@ export function useWorkReportDetailInlineController({
         return;
       }
       const options = await ensureOptionsLoaded();
+      const createDraft =
+        draftOverride
+          ? applyCreateDefaultsToFormState(
+              formId,
+              draftOverride,
+              record,
+              options.machineId ?? [],
+              options.operatorId ?? []
+            )
+          : buildInitialFormState(
+              formId,
+              "create",
+              null,
+              record,
+              options.machineId ?? [],
+              options.operatorId ?? []
+            );
       setEditingRowId(rowId);
-      setEditingRowDraft(
-        draftOverride ??
-          buildInitialFormState(
-            formId,
-            "create",
-            null,
-            record,
-            options.machineId ?? [],
-            options.operatorId ?? []
-          )
-      );
+      setEditingRowDraft(createDraft);
       logDetailEvent("ui", "inline-create-opened", `開啟 inline 新增：row ${rowId}`, {
         rowId,
       });
@@ -746,7 +726,7 @@ export function useWorkReportDetailInlineController({
       );
       triggerAutoHighlight(changedKeys);
       setEditingRowDraft(applied);
-      focusNextEmptyInlineField("inputOptions", applied);
+      focusNextEmptyInlineField("inputOptions", applied, { autoOpenPicker: true });
     },
     [editingRowDraft, focusNextEmptyInlineField, triggerAutoHighlight]
   );
@@ -774,7 +754,7 @@ export function useWorkReportDetailInlineController({
       ] as const).filter((key) => editingRowDraft[key] !== applied[key]);
       triggerAutoHighlight(changedKeys);
       setEditingRowDraft(applied);
-      focusNextEmptyInlineField("plannedIdle", applied, { autoOpenPicker: false });
+      focusNextEmptyInlineField("plannedIdle", applied, { autoOpenPicker: true });
     },
     [editingRowDraft, focusNextEmptyInlineField, triggerAutoHighlight]
   );
@@ -817,7 +797,7 @@ export function useWorkReportDetailInlineController({
                   : nextState.reportType,
             };
       setEditingRowDraft(resolvedState);
-      focusNextEmptyInlineField("machineId", resolvedState);
+      focusNextEmptyInlineField("machineId", resolvedState, { autoOpenPicker: true });
     },
     [editingRowDraft, focusNextEmptyInlineField, inlineMachineOptions]
   );
@@ -847,7 +827,7 @@ export function useWorkReportDetailInlineController({
             : editingRowDraft.reportType,
       };
       setEditingRowDraft(nextState);
-      focusNextEmptyInlineField("operatorId", nextState);
+      focusNextEmptyInlineField("operatorId", nextState, { autoOpenPicker: true });
     },
     [
       editingRowDraft,
@@ -871,7 +851,7 @@ export function useWorkReportDetailInlineController({
           : inferReportTypeFromProcessCode(value),
       };
       setEditingRowDraft(nextState);
-      focusNextEmptyInlineField("processCode", nextState);
+      focusNextEmptyInlineField("processCode", nextState, { autoOpenPicker: true });
     },
     [editingRowDraft, focusNextEmptyInlineField]
   );
@@ -886,7 +866,22 @@ export function useWorkReportDetailInlineController({
         shiftType: normalizeShiftTypeValue(value),
       };
       setEditingRowDraft(nextState);
-      focusNextEmptyInlineField("shiftType", nextState);
+      focusNextEmptyInlineField("shiftType", nextState, { autoOpenPicker: true });
+    },
+    [editingRowDraft, focusNextEmptyInlineField]
+  );
+
+  const handleInlineStaticPickerChange = useCallback(
+    (key: InlineEditableDetailKey, value: string) => {
+      if (!editingRowDraft) {
+        return;
+      }
+      const nextState = {
+        ...editingRowDraft,
+        [key]: value,
+      };
+      setEditingRowDraft(nextState);
+      focusNextEmptyInlineField(key, nextState, { autoOpenPicker: true });
     },
     [editingRowDraft, focusNextEmptyInlineField]
   );
@@ -1031,8 +1026,19 @@ export function useWorkReportDetailInlineController({
   }, []);
 
   const closeLinkedPicker = useCallback(() => {
+    const closingState = linkedPickerState;
     setLinkedPickerState(null);
-  }, []);
+    if (!closingState) {
+      return;
+    }
+    window.setTimeout(() => {
+      const editor = findInlineEditorElement(closingState.rowId, closingState.key);
+      if (!editor || !isInlineElementFocusable(editor)) {
+        return;
+      }
+      editor.focus();
+    }, 0);
+  }, [findInlineEditorElement, linkedPickerState]);
 
   const updateLinkedPickerSearch = useCallback((value: string) => {
     startTransition(() => {
@@ -1050,6 +1056,14 @@ export function useWorkReportDetailInlineController({
         handleInlineInputOptionsChange(value);
       } else if (linkedPickerState?.key === "shiftType") {
         handleInlineShiftTypeChange(value);
+      } else if (linkedPickerState?.key === "plannedIdle") {
+        handleInlinePlannedIdleChange(value);
+      } else if (
+        linkedPickerState?.key === "setupAdjustType" ||
+        linkedPickerState?.key === "countSetupTimeFlag" ||
+        linkedPickerState?.key === "containerUnit"
+      ) {
+        handleInlineStaticPickerChange(linkedPickerState.key, value);
       } else {
         handleInlineMachineChange(value);
       }
@@ -1059,8 +1073,10 @@ export function useWorkReportDetailInlineController({
       handleInlineInputOptionsChange,
       handleInlineMachineChange,
       handleInlineOperatorChange,
+      handleInlinePlannedIdleChange,
       handleInlineProcessChange,
       handleInlineShiftTypeChange,
+      handleInlineStaticPickerChange,
       linkedPickerState?.key,
     ]
   );
@@ -1088,6 +1104,7 @@ export function useWorkReportDetailInlineController({
         const operationId = createFrontendOperationId("inline-create");
         const startedAt = new Date().toISOString();
         const clientMutationId = createClientMutationId();
+        const expectedEntryLastUpdatedAt = resolveExpectedEntryLastUpdatedAt(record);
         logDetailEvent("api", "inline-create-started", "開始 inline 新增", {
           rowId,
           clientMutationId,
@@ -1121,12 +1138,14 @@ export function useWorkReportDetailInlineController({
           entryId: safeEntryId,
           payload,
           clientMutationId,
+          expectedEntryLastUpdatedAt,
           attempts: 0,
           createdAt: new Date().toISOString(),
         });
         const accepted = await createReportAccepted(formId, safeEntryId, payload, {
           clientMutationId,
           workOrderNo,
+          expectedEntryLastUpdatedAt,
         });
         saveRetryableMutationRecord({
           taskId: accepted.taskId,
@@ -1137,6 +1156,7 @@ export function useWorkReportDetailInlineController({
           workOrderNo,
           payload,
           clientMutationId,
+          expectedEntryLastUpdatedAt,
           createdAt: new Date().toISOString(),
         });
         clearPendingMutationReplay();
@@ -1182,6 +1202,7 @@ export function useWorkReportDetailInlineController({
       formId,
       isRetryableMutationError,
       logDetailEvent,
+      record,
       registerAcceptedMutationTask,
       safeEntryId,
       setNotice,
@@ -1223,6 +1244,7 @@ export function useWorkReportDetailInlineController({
           const operationId = createFrontendOperationId("inline-update");
           const startedAt = new Date().toISOString();
           const clientMutationId = createClientMutationId();
+          const expectedEntryLastUpdatedAt = resolveExpectedEntryLastUpdatedAt(record);
           logDetailEvent("api", "inline-update-started", "開始 inline 更新", {
             rowId: row.rowId,
             clientMutationId,
@@ -1259,6 +1281,7 @@ export function useWorkReportDetailInlineController({
             rowId: row.rowId,
             payload,
             clientMutationId,
+            expectedEntryLastUpdatedAt,
             editSessionId: currentEditSessionId,
             editLockVersion: editLockVersion ?? undefined,
             attempts: 0,
@@ -1267,6 +1290,7 @@ export function useWorkReportDetailInlineController({
           const accepted = await updateReportAccepted(formId, safeEntryId, row.rowId, payload, {
             clientMutationId,
             workOrderNo,
+            expectedEntryLastUpdatedAt,
             editSessionId: currentEditSessionId,
             editLockVersion: editLockVersion ?? undefined,
           });
@@ -1280,6 +1304,7 @@ export function useWorkReportDetailInlineController({
             workOrderNo,
             payload,
             clientMutationId,
+            expectedEntryLastUpdatedAt,
             editSessionId: currentEditSessionId,
             editLockVersion: editLockVersion ?? undefined,
             createdAt: new Date().toISOString(),
@@ -1341,6 +1366,7 @@ export function useWorkReportDetailInlineController({
       logDetailEvent,
       registerAcceptedMutationTask,
       releaseRowEditLock,
+      record,
       safeEntryId,
       setNotice,
       summarizeChangedPayloadFields,
@@ -1372,11 +1398,19 @@ export function useWorkReportDetailInlineController({
     inlineProcessOptions,
     inputOptionPickerOptions,
     shiftTypePickerOptions,
+    plannedIdlePickerOptions,
+    setupAdjustTypePickerOptions,
+    countSetupTimeFlagPickerOptions,
+    containerUnitPickerOptions,
     selectedInlineMachineOption,
     selectedInlineOperatorOption,
     selectedInlineProcessOption,
     selectedInlineInputOption,
     selectedInlineShiftTypeOption,
+    selectedInlinePlannedIdleOption,
+    selectedInlineSetupAdjustTypeOption,
+    selectedInlineCountSetupTimeFlagOption,
+    selectedInlineContainerUnitOption,
     setEditingRowDraft,
     activateInlineCreateRow,
     startInlineRowEdit,

@@ -12,16 +12,11 @@ export function resolveRequestClientIdentity(req: {
 }): RequestClientIdentity {
   const forwardedForRaw = String(req.header("x-forwarded-for") ?? "").trim();
   const forwardedFor = forwardedForRaw || null;
-  const forwardedClientIp =
-    forwardedForRaw
-      .split(",")
-      .map((item) => item.trim())
-      .find(Boolean) ?? null;
   const realIp = String(req.header("x-real-ip") ?? "").trim() || null;
   const userAgent = String(req.header("user-agent") ?? "").trim() || null;
-  const ip = String(req.ip ?? "").trim() || realIp || forwardedClientIp || null;
+  const ip = String(req.ip ?? "").trim() || realIp || null;
   return {
-    effectiveIp: forwardedClientIp || realIp || ip || null,
+    effectiveIp: ip || realIp || null,
     ip,
     forwardedFor,
     realIp,

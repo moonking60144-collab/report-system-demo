@@ -9,6 +9,9 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "paths": {
+      "@shared-types/*": ["../shared/types/*"]
+    },
     "noEmit": true,
     "types": ["node"]
   },

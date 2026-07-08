@@ -20,6 +20,7 @@ const SETUP_NUMERIC_FIELD_LABELS: ReadonlyArray<{
 
 const REQUIRED_FIELD_LABEL_KEYS: Readonly<Partial<Record<keyof FormState, string>>> = {
   date: "workReport:reportForm.fields.dateRequired",
+  processCode: "workReport:reportForm.fields.processCodeRequired",
   machineId: "workReport:reportForm.fields.machineRequired",
   operatorId: "workReport:reportForm.fields.operatorIdRequired",
   startTime: "workReport:reportForm.fields.startTimeRequired",
@@ -49,6 +50,7 @@ export function validate(state: FormState, tr: TranslateFunction): string | null
   const isPlannedIdleYes = state.plannedIdle.trim() === "Yes";
   const requiredFields: Array<keyof FormState> = [
     "date",
+    "processCode",
     "machineId",
     "operatorId",
     "startTime",

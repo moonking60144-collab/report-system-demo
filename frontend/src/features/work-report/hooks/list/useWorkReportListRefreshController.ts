@@ -7,6 +7,7 @@ import type {
 import { calculateDurationMs, createFrontendOperationId } from "../../logging/frontendEventLog";
 import { useWorkReportRealtime } from "../useWorkReportRealtime";
 import type { NoticeState, WorkReportFormId } from "../../types";
+import { getErrorMessage } from "../../utils";
 
 function isSyncTaskStatus(value: unknown): value is WorkReportSyncTask {
   if (!value || typeof value !== "object") {
@@ -28,8 +29,14 @@ interface UseWorkReportListRefreshControllerArgs {
   isHydratingAllRecords: boolean;
   page: number;
   setPage: Dispatch<SetStateAction<number>>;
-  loadReports: (forceRefresh?: boolean, options?: { throwOnError?: boolean }) => Promise<void>;
-  hydrateAllRecords: (forceRefresh?: boolean) => Promise<unknown[]>;
+  loadReports: (
+    forceRefresh?: boolean,
+    options?: { throwOnError?: boolean; mode?: "foreground" | "background" }
+  ) => Promise<void>;
+  hydrateAllRecords: (
+    forceRefresh?: boolean,
+    options?: { mode?: "foreground" | "background" }
+  ) => Promise<unknown[]>;
   setNotice: Dispatch<SetStateAction<NoticeState | null>>;
   t: (key: string, options?: Record<string, unknown>) => string;
   logListEvent: (
@@ -359,16 +366,24 @@ export function useWorkReportListRefreshController({
         });
         const run = async () => {
           try {
-            if (options.resetPageToFirst && page !== 1) {
-              setPage(1);
-            }
-            if (shouldUseFullHydrationForList) {
-              await hydrateAllRecords(false);
-            } else {
-              await loadReports(false);
-            }
             const noticeMessage = pendingAutoRefreshNoticeMessageRef.current || options.noticeMessage;
             pendingAutoRefreshNoticeMessageRef.current = null;
+            if (options.resetPageToFirst && page !== 1) {
+              setPage(1);
+              if (noticeMessage) {
+                setNotice({
+                  type: "success",
+                  message: noticeMessage,
+                  displayAsHumanStatus: true,
+                });
+              }
+              return;
+            }
+            if (shouldUseFullHydrationForList) {
+              await hydrateAllRecords(false, { mode: "background" });
+            } else {
+              await loadReports(false, { mode: "background", throwOnError: true });
+            }
             if (noticeMessage) {
               setNotice({
                 type: "success",
@@ -381,6 +396,17 @@ export function useWorkReportListRefreshController({
               operationId,
               operationType: "list-auto-refresh",
               phase: "completed",
+              startedAt,
+              endedAt,
+              durationMs: calculateDurationMs(startedAt, endedAt),
+            });
+          } catch (error) {
+            const endedAt = new Date().toISOString();
+            logListEvent("realtime", "auto-refresh-failed", getErrorMessage(error), {
+              level: "warn",
+              operationId,
+              operationType: "list-auto-refresh",
+              phase: "failed",
               startedAt,
               endedAt,
               durationMs: calculateDurationMs(startedAt, endedAt),

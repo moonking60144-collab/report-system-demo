@@ -1,5 +1,6 @@
 export interface Form16DowntimeRecord {
   id: string;
+  snapshotHash: string | null;
   date: string | null;
   machineId: string | null;
   processCode: string | null;
@@ -13,4 +14,3 @@ export interface Form16DowntimeRecord {
   remark: string | null;
   workOrderNo: string | null;
 }
-

@@ -13,6 +13,13 @@ interface DetailNoticeState {
   message: string;
 }
 
+function resolveExpectedEntryLastUpdatedAt(
+  record: WorkReportRecord | null
+): string | undefined {
+  const value = String(record?.lastUpdatedAt ?? "").trim();
+  return value || undefined;
+}
+
 interface UseWorkReportMainMachineControllerArgs {
   formId: string | null;
   safeEntryId: string | null;
@@ -200,7 +207,9 @@ export function useWorkReportMainMachineController({
           nextMachineCode,
         },
       });
-      await updateWorkOrderMainMachine(formId, safeEntryId, nextMachineCode);
+      await updateWorkOrderMainMachine(formId, safeEntryId, nextMachineCode, {
+        expectedEntryLastUpdatedAt: resolveExpectedEntryLastUpdatedAt(record),
+      });
       logDetailEvent("api", "main-machine-update-succeeded", "更改工令機台成功", {
         operationId,
         operationType: "main-machine-update",
@@ -214,7 +223,7 @@ export function useWorkReportMainMachineController({
       setMainMachineModalOpen(false);
       setMainMachineDraft("");
       setNotice({ type: "success", message: t("workReport:messages.mainMachineUpdated") });
-      await loadEntry({ silent: true, forceRefresh: true });
+      await loadEntry({ mode: "background", forceRefresh: true });
       const endedAt = new Date().toISOString();
       logDetailEvent(
         "realtime",

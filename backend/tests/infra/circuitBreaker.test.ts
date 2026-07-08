@@ -56,6 +56,35 @@ test("cooldown 過後進入 HALF_OPEN，成功會回 CLOSED", () => {
   assert.equal(breaker.getState(), "closed");
 });
 
+test("HALF_OPEN 同時間只允許一個 probe", () => {
+  let now = 0;
+  const breaker = buildBreaker({ failureThreshold: 1, cooldownMs: 1000, now: () => now });
+  breaker.recordFailure();
+  now = 1001;
+
+  breaker.checkBeforeRun();
+  assert.equal(breaker.getState(), "half-open");
+  assert.throws(() => breaker.checkBeforeRun(), CircuitBreakerOpenError);
+
+  breaker.recordSuccess();
+  assert.equal(breaker.getState(), "closed");
+});
+
+test("HALF_OPEN probe 若不是上游失敗可釋放後重試", () => {
+  let now = 0;
+  const breaker = buildBreaker({ failureThreshold: 1, cooldownMs: 1000, now: () => now });
+  breaker.recordFailure();
+  now = 1001;
+
+  breaker.checkBeforeRun();
+  assert.throws(() => breaker.checkBeforeRun(), CircuitBreakerOpenError);
+  breaker.releaseHalfOpenProbe();
+  assert.doesNotThrow(() => breaker.checkBeforeRun());
+
+  breaker.recordFailure();
+  assert.equal(breaker.getState(), "open");
+});
+
 test("HALF_OPEN 失敗會立刻回 OPEN", () => {
   let now = 0;
   const breaker = buildBreaker({ failureThreshold: 1, cooldownMs: 1000, now: () => now });

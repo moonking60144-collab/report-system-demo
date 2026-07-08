@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { env } from "../../config/env";
+import { createKeyedSerialQueue } from "../../utils/keyedSerialQueue";
 import type { RagicCallbackEventType } from "../ragicCallbackRefreshServiceFactory";
 import { workReportTaskRegistryService } from "../work-report/workReportTaskRegistryService";
 import { form16DowntimeService } from "./form16DowntimeService";
@@ -20,7 +21,7 @@ interface Form16CallbackTask {
 
 class Form16DowntimeCallbackRefreshService {
   private readonly tasks = new Map<string, Form16CallbackTask>();
-  private readonly queueChainByEntryKey = new Map<string, Promise<void>>();
+  private readonly queueChainByEntryKey = createKeyedSerialQueue();
 
   enqueue(input: {
     entryId: string;
@@ -46,21 +47,9 @@ class Form16DowntimeCallbackRefreshService {
 
     // 同 entry 的 callback 走 queue chain 序列化，避免短時間多筆 callback 互相覆寫
     const queueKey = `form16:${normalizedEntryId}`;
-    const currentChain = this.queueChainByEntryKey.get(queueKey) ?? Promise.resolve();
-    const nextChain = currentChain
-      .catch(() => {
-        // queue 內單筆失敗不阻塞後續
-      })
-      .then(async () => {
-        await this.runTask(task.taskId, input);
-      });
-
-    this.queueChainByEntryKey.set(queueKey, nextChain);
-    void nextChain.finally(() => {
-      if (this.queueChainByEntryKey.get(queueKey) === nextChain) {
-        this.queueChainByEntryKey.delete(queueKey);
-      }
-    });
+    void this.queueChainByEntryKey.enqueue(queueKey, () =>
+      this.runTask(task.taskId, input)
+    );
 
     return { ...task };
   }
@@ -118,6 +107,10 @@ class Form16DowntimeCallbackRefreshService {
       };
       this.tasks.set(taskId, failedTask);
       this.syncTaskToRegistry(failedTask, input);
+    } finally {
+      // task lifecycle 已結束並同步到 registry（持久層）；這個 in-memory Map 無人
+      // 後續讀取（route 只用 enqueue 的同步回傳），完成即刪，避免無界累積到 OOM。
+      this.tasks.delete(taskId);
     }
   }
 

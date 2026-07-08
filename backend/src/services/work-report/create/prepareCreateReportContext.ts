@@ -121,7 +121,6 @@ export async function prepareCreateReportContext(
   if (subtableRemarkFieldId) {
     delete subtableWithoutRemark[subtableRemarkFieldId];
   }
-
   const form16CreateBody: RagicRecord = {
     ...subtableWithoutRemark,
     [env.RAGIC_FORM_16_WORK_ORDER_FIELD_ID]: workOrderNo,

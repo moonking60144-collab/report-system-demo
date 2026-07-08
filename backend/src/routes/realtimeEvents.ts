@@ -1,6 +1,10 @@
 import { Response, Router } from "express";
 import { asyncHandler } from "./asyncHandler";
-import { realtimeEventBus, type RealtimeEventPayload } from "../events/realtimeEventBus";
+import {
+  getLastRagicDefinitionsSyncStatus,
+  realtimeEventBus,
+  type RealtimeEventPayload,
+} from "../events/realtimeEventBus";
 import { SERVER_BOOT_ID } from "../observability/serverBootState";
 import { SERVER_DEPLOY_VERSION } from "../observability/deployVersionState";
 import { workReportClientPresenceStore } from "../observability/workReportClientPresenceStore";
@@ -42,6 +46,10 @@ realtimeEventsRouter.get(
       bootId: SERVER_BOOT_ID,
       deployVersion: SERVER_DEPLOY_VERSION,
     });
+    const lastRagicDefinitionsSyncStatus = getLastRagicDefinitionsSyncStatus();
+    if (lastRagicDefinitionsSyncStatus) {
+      writeSseEvent(res, "work-report-event", lastRagicDefinitionsSyncStatus);
+    }
     workReportDebugLog("sse", "client-connected", {
       sseConnectionId,
       // 保留 clientId 欄位當舊 log grep 相容（指向 debugClientId；沒綁就 fallback 回連線 ID）

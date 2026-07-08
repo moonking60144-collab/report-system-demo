@@ -1,9 +1,13 @@
 import type { Request } from "express";
+import { env } from "../config/env";
 import {
   publishWorkReportFormUpdated,
   publishWorkReportUpdated,
 } from "../events/realtimeEventBus";
+import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
+import { assertClientNotBlocked } from "./clientBlockGuard";
 import { WorkReportRouterDeps } from "./workReportRouterTypes";
+import { HttpError } from "../utils/httpError";
 import {
   assertRequiredPathValue,
   assertWritableFormId,
@@ -58,6 +62,8 @@ export function parseMutationRequestContext(
   req: Request,
   options: ParseMutationContextOptions = {}
 ): MutationRequestContext {
+  assertClientNotBlocked(req);
+
   const formId = req.params.formId;
   const entryId = req.params.entryId;
   const rowId = options.includeRowId ? req.params.rowId : undefined;
@@ -84,6 +90,20 @@ export function parseMutationRequestContext(
 
 export async function assertFullMutationPreconditions(
   deps: WorkReportRouterDeps,
+  ctx: MutationRequestContext,
+  options: {
+    staleCheck?: {
+      timeoutMs?: number;
+      maxRetries?: number;
+    };
+  } = {}
+): Promise<void> {
+  await assertLocalMutationPreconditions(deps, ctx);
+  await assertMutationEntryNotModified(deps, ctx, options.staleCheck);
+}
+
+export async function assertLocalMutationPreconditions(
+  deps: WorkReportRouterDeps,
   ctx: MutationRequestContext
 ): Promise<void> {
   await deps.assertEntryEditableBySession({
@@ -99,11 +119,62 @@ export async function assertFullMutationPreconditions(
     editSessionId: ctx.editSessionId,
     editLockVersion: ctx.editLockVersion,
   });
+}
+
+export async function assertMutationEntryNotModified(
+  deps: WorkReportRouterDeps,
+  ctx: MutationRequestContext,
+  options: {
+    timeoutMs?: number;
+    maxRetries?: number;
+  } = {}
+): Promise<void> {
   await deps.assertEntryNotModified(
     ctx.formId,
     ctx.entryId,
-    ctx.expectedEntryLastUpdatedAt
+    ctx.expectedEntryLastUpdatedAt,
+    {
+      priority: "mutation",
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries,
+    }
   );
+}
+
+export async function tryRouteMutationEntryPrecheck(
+  deps: WorkReportRouterDeps,
+  ctx: MutationRequestContext
+): Promise<"verified" | "deferred" | "skipped"> {
+  if (!ctx.expectedEntryLastUpdatedAt) {
+    return "skipped";
+  }
+  try {
+    await assertMutationEntryNotModified(deps, ctx, {
+      timeoutMs: env.WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS,
+      maxRetries: 0,
+    });
+    return "verified";
+  } catch (error) {
+    if (error instanceof HttpError && error.code === "ENTRY_CONFLICT") {
+      console.warn("[work-report-mutation][route-precheck-conflict-deferred]", {
+        formId: ctx.formId,
+        entryId: ctx.entryId,
+        rowId: ctx.rowId ?? null,
+        timeoutMs: env.WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS,
+        scheduler: ragicRequestScheduler.getStats(),
+      });
+      return "deferred";
+    }
+    console.warn("[work-report-mutation][route-precheck-deferred]", {
+      formId: ctx.formId,
+      entryId: ctx.entryId,
+      rowId: ctx.rowId ?? null,
+      timeoutMs: env.WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS,
+      error: error instanceof Error ? error.message : String(error),
+      scheduler: ragicRequestScheduler.getStats(),
+    });
+    return "deferred";
+  }
 }
 
 export async function runPostMutationHooks(

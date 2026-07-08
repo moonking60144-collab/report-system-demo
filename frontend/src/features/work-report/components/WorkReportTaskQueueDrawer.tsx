@@ -11,15 +11,18 @@ import {
   type WorkReportQueueTaskStatus,
   type WorkReportQueueTaskType,
 } from "../../../api/workReport";
-import { getOrCreateClientId } from "../debug/clientIdentity";
-import { formatStatusDateTime } from "../utils";
+import { getOrCreateClientId } from "../../../utils/clientIdentity";
+import { formatStatusDateTime, getWorkReportTaskErrorMessage } from "../utils";
 import {
   createRetryClientMutationId,
   getRetryableMutationRecord,
   replaceRetryableMutationRecord,
 } from "../taskRetryStore";
-import { getRetryableBatchCreateRecord } from "../taskBatchRetryStore";
-import { retryBatchCreateFromRecord } from "../retryBatchCreate";
+import {
+  deleteRetryableBatchCreateRecordChain,
+  getRetryableBatchCreateRecord,
+} from "../taskBatchRetryStore";
+import { getBatchCreateRetryBlockReason, retryBatchCreateFromRecord } from "../retryBatchCreate";
 
 type TaskQueueScope = "entry" | "mine" | "all" | "failed" | "created-all";
 
@@ -47,6 +50,7 @@ interface WorkReportTaskQueueDrawerProps {
   formId: string | null;
   entryId: string | null;
   workOrderNo?: string | null;
+  refreshToken?: number;
   onRetryAccepted?: (
     kind: "create" | "update",
     accepted: CreateReportTaskAcceptedResult,
@@ -115,6 +119,9 @@ function getTaskTypeLabel(
   if (taskType === "create-report-batch") {
     return t("workReport:taskQueue.taskTypes.createBatch");
   }
+  if (taskType === "delete-report") {
+    return t("workReport:taskQueue.taskTypes.delete");
+  }
   if (taskType === "delete-report-batch") {
     return t("workReport:taskQueue.taskTypes.deleteBatch");
   }
@@ -167,6 +174,7 @@ export function WorkReportTaskQueueDrawer({
   formId,
   entryId,
   workOrderNo,
+  refreshToken,
   onRetryAccepted,
   onClose,
 }: WorkReportTaskQueueDrawerProps) {
@@ -235,6 +243,22 @@ export function WorkReportTaskQueueDrawer({
     [tasks, onlyFailed]
   );
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    for (const task of tasks) {
+      if (
+        task.taskType === "create-report-batch" &&
+        task.status === "failed" &&
+        getBatchCreateRetryBlockReason(task) &&
+        getRetryableBatchCreateRecord(task.taskId)
+      ) {
+        deleteRetryableBatchCreateRecordChain(task.taskId);
+      }
+    }
+  }, [open, tasks]);
+
   const loadTasks = useCallback(async () => {
     if (!open || !formId) {
       return;
@@ -274,6 +298,9 @@ export function WorkReportTaskQueueDrawer({
         return Boolean(retryRecord && !retryRecord.latestRetryTaskId);
       }
       if (isRetryableBatchCreateTaskType(task.taskType)) {
+        if (getBatchCreateRetryBlockReason(task)) {
+          return false;
+        }
         const retryRecord = getRetryableBatchCreateRecord(task.taskId);
         return Boolean(retryRecord && !retryRecord.latestRetryTaskId);
       }
@@ -293,6 +320,9 @@ export function WorkReportTaskQueueDrawer({
       }
       if (task.taskType === "callback-refresh") {
         return t("workReport:taskQueue.retryHints.callbackUnavailable");
+      }
+      if (task.taskType === "delete-report") {
+        return t("workReport:taskQueue.retryHints.deleteUnavailable");
       }
       if (task.taskType === "delete-report-batch") {
         return t("workReport:taskQueue.retryHints.deleteBatchUnavailable");
@@ -317,6 +347,16 @@ export function WorkReportTaskQueueDrawer({
       }
 
       if (isRetryableBatchCreateTaskType(task.taskType)) {
+        const batchCreateRetryBlockReason = getBatchCreateRetryBlockReason(task);
+        if (batchCreateRetryBlockReason === "indeterminate") {
+          return t("workReport:taskQueue.retryHints.batchIndeterminateUnavailable");
+        }
+        if (batchCreateRetryBlockReason === "statusUnknown") {
+          return t("workReport:taskQueue.retryHints.batchStatusUnknownUnavailable");
+        }
+        if (batchCreateRetryBlockReason === "precondition") {
+          return t("workReport:taskQueue.retryHints.batchPreconditionUnavailable");
+        }
         const retryRecord = getRetryableBatchCreateRecord(task.taskId);
         if (!retryRecord) {
           return t("workReport:taskQueue.retryHints.batchMissingLocalPayload");
@@ -461,11 +501,18 @@ export function WorkReportTaskQueueDrawer({
     };
   }, [formId, loadTasks, open]);
 
+  useEffect(() => {
+    if (!open || !formId || !refreshToken) {
+      return;
+    }
+    void loadTasks();
+  }, [formId, loadTasks, open, refreshToken]);
+
   return (
     <Drawer
       title={t("workReport:taskQueue.title")}
       placement="right"
-      width={460}
+      size={460}
       open={open}
       onClose={onClose}
       className="work-report-task-queue-drawer"
@@ -585,7 +632,7 @@ export function WorkReportTaskQueueDrawer({
                   </div>
 
                   <div className="detail-task-queue-item-message">
-                    {task.errorMessage || task.message || "--"}
+                    {getWorkReportTaskErrorMessage(task) || task.message || "--"}
                   </div>
                   {isCreatedTaskType(task.taskType) ? (() => {
                     const createdRowIds = collectCreatedRowIds(task);

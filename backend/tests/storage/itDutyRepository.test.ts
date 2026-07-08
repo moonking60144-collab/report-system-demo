@@ -229,18 +229,75 @@ test("getMember 不存在回 null、存在回完整資料", async () => {
   assert.equal(got?.id, m.id);
 });
 
-test("getSetting schema seed 後預設 weeksPerSlot=1", async () => {
+test("getSetting schema seed 後預設 weeksPerSlot=1、anchor 兩欄 null（沒 member）", async () => {
   const { repo } = await buildRepo();
   const setting = await repo.getSetting();
   assert.equal(setting.weeksPerSlot, 1);
+  assert.equal(setting.anchorIsoWeek, null);
+  assert.equal(setting.anchorMemberId, null);
 });
 
-test("updateSetting 寫入 + 取回一致", async () => {
+test("getSetting 第一次有 member 時自動 seed anchor", async () => {
   const { repo } = await buildRepo();
+  const a = await repo.insertMember({ name: "A" });
+  await repo.insertMember({ name: "B" });
+  const setting = await repo.getSetting();
+  assert.match(setting.anchorIsoWeek ?? "", /^\d{4}-W\d{2}$/);
+  assert.equal(setting.anchorMemberId, a.id);
+});
+
+test("getSetting seed 是 idempotent — 第二次呼叫 anchor 不變", async () => {
+  const { repo } = await buildRepo();
+  const a = await repo.insertMember({ name: "A" });
+  const first = await repo.getSetting();
+  // 再加新 member，不該影響已 seed 的 anchor
+  await repo.insertMember({ name: "B" });
+  const second = await repo.getSetting();
+  assert.equal(second.anchorIsoWeek, first.anchorIsoWeek);
+  assert.equal(second.anchorMemberId, a.id);
+});
+
+test("anchor member 被刪除 → 下次 getSetting refill 成最早 active member、保留 anchor_iso_week", async () => {
+  const { repo } = await buildRepo();
+  const a = await repo.insertMember({ name: "A" });
+  const b = await repo.insertMember({ name: "B" });
+  const first = await repo.getSetting();
+  assert.equal(first.anchorMemberId, a.id);
+  // 刪 A → b 成為最早 active
+  await repo.deleteMember(a.id);
+  const second = await repo.getSetting();
+  assert.equal(second.anchorMemberId, b.id);
+  assert.equal(second.anchorIsoWeek, first.anchorIsoWeek); // 保留
+});
+
+test("anchor member 被停用 (active=false) → refill 成下一個 active", async () => {
+  const { repo } = await buildRepo();
+  const a = await repo.insertMember({ name: "A" });
+  const b = await repo.insertMember({ name: "B" });
+  await repo.getSetting(); // seed
+  await repo.updateMember(a.id, { active: false });
+  const after = await repo.getSetting();
+  assert.equal(after.anchorMemberId, b.id);
+});
+
+test("所有 member 都停用後 anchor_member_id 變 null、anchor_iso_week 保留", async () => {
+  const { repo } = await buildRepo();
+  const a = await repo.insertMember({ name: "A" });
+  const first = await repo.getSetting();
+  await repo.updateMember(a.id, { active: false });
+  const after = await repo.getSetting();
+  assert.equal(after.anchorMemberId, null);
+  assert.equal(after.anchorIsoWeek, first.anchorIsoWeek);
+});
+
+test("updateSetting 只動 weeksPerSlot、不影響 anchor", async () => {
+  const { repo } = await buildRepo();
+  await repo.insertMember({ name: "A" });
+  const before = await repo.getSetting();
   const updated = await repo.updateSetting({ weeksPerSlot: 3 });
   assert.equal(updated.weeksPerSlot, 3);
-  const re = await repo.getSetting();
-  assert.equal(re.weeksPerSlot, 3);
+  assert.equal(updated.anchorIsoWeek, before.anchorIsoWeek);
+  assert.equal(updated.anchorMemberId, before.anchorMemberId);
 });
 
 test("updateSetting 自動 clamp 到 1..52", async () => {
@@ -432,4 +489,77 @@ test("listDebts 多筆累計", async () => {
   );
   assert.equal(aToB?.unsettledDays, 2);
   assert.equal(cToB?.unsettledDays, 1);
+});
+
+// === Day Note ===
+
+test("upsertDayNote 第一次 insert", async () => {
+  const { repo } = await buildRepo();
+  const created = await repo.upsertDayNote({
+    noteDate: "2026-06-01",
+    note: "客戶來訪",
+  });
+  assert.equal(created.noteDate, "2026-06-01");
+  assert.equal(created.note, "客戶來訪");
+});
+
+test("upsertDayNote 同日第二次覆蓋", async () => {
+  const { repo } = await buildRepo();
+  const first = await repo.upsertDayNote({
+    noteDate: "2026-06-01",
+    note: "客戶來訪",
+  });
+  const second = await repo.upsertDayNote({
+    noteDate: "2026-06-01",
+    note: "教育訓練",
+  });
+  assert.equal(second.id, first.id);
+  assert.equal(second.note, "教育訓練");
+});
+
+test("upsertDayNote 空字串會被 schema CHECK 擋下", async () => {
+  const { repo } = await buildRepo();
+  // 不再由 repo 驗（route 已驗）；schema CHECK 保底
+  await assert.rejects(
+    repo.upsertDayNote({ noteDate: "2026-06-01", note: " " }),
+    /CHECK constraint failed/
+  );
+});
+
+test("upsertDayNote 記下 updatedByLabel", async () => {
+  const { repo } = await buildRepo();
+  const created = await repo.upsertDayNote({
+    noteDate: "2026-06-01",
+    note: "客戶來訪",
+    updatedByLabel: "FD0287",
+  });
+  assert.equal(created.updatedByLabel, "FD0287");
+});
+
+test("getDayNote / listDayNotesInRange 取得既有資料", async () => {
+  const { repo } = await buildRepo();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "A" });
+  await repo.upsertDayNote({ noteDate: "2026-06-15", note: "B" });
+  await repo.upsertDayNote({ noteDate: "2026-07-01", note: "C" });
+  const got = await repo.getDayNote("2026-06-15");
+  assert.equal(got?.note, "B");
+  const inRange = await repo.listDayNotesInRange("2026-06-01", "2026-06-30");
+  assert.deepEqual(inRange.map((n) => n.note), ["A", "B"]);
+});
+
+test("listAllDayNotes 回所有資料 (依日期升冪)", async () => {
+  const { repo } = await buildRepo();
+  await repo.upsertDayNote({ noteDate: "2026-07-01", note: "C" });
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "A" });
+  await repo.upsertDayNote({ noteDate: "2026-06-15", note: "B" });
+  const all = await repo.listAllDayNotes();
+  assert.deepEqual(all.map((n) => n.note), ["A", "B", "C"]);
+});
+
+test("deleteDayNote 成功回 true、不存在回 false", async () => {
+  const { repo } = await buildRepo();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "X" });
+  assert.equal(await repo.deleteDayNote("2026-06-01"), true);
+  assert.equal(await repo.deleteDayNote("2026-06-01"), false);
+  assert.equal(await repo.getDayNote("2026-06-01"), null);
 });

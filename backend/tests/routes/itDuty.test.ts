@@ -12,6 +12,8 @@ import {
 } from "../../src/storage/sqlite/itDutyRepository";
 import { ensureItDutySchema } from "../../src/storage/sqlite/itDutySchema";
 import { errorHandler } from "../../src/middleware/errorHandler";
+import { workReportClientPresenceStore } from "../../src/observability/workReportClientPresenceStore";
+import { HttpError } from "../../src/utils/httpError";
 
 async function buildRepoWithDb(): Promise<{ db: Database; repo: ItDutyRepository }> {
   const db: Database = await open({ filename: ":memory:", driver: sqlite3.Database });
@@ -23,11 +25,19 @@ async function buildRepoWithDb(): Promise<{ db: Database; repo: ItDutyRepository
 
 async function withTestServer(
   repo: ItDutyRepository,
-  run: (baseUrl: string) => Promise<void>
+  run: (baseUrl: string) => Promise<void>,
+  options: {
+    verifyAdminToken?: (authorizationHeader: string | undefined) => unknown;
+  } = {}
 ): Promise<void> {
   const app = express();
   app.use(express.json());
-  app.use("/api", createItDutyRouter(repo));
+  app.use(
+    "/api",
+    createItDutyRouter(repo, {
+      verifyAdminToken: options.verifyAdminToken ?? (() => ({ username: "test-admin" })),
+    })
+  );
   app.use(errorHandler);
 
   const server = await new Promise<Server>((resolve) => {
@@ -45,6 +55,67 @@ async function withTestServer(
     });
   }
 }
+
+test("POST /api/it/duty/members 缺 admin token 回 401", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(
+    repo,
+    async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/it/duty/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      });
+      assert.equal(res.status, 401);
+    },
+    {
+      verifyAdminToken: (authorizationHeader) => {
+        if (authorizationHeader !== "Bearer test-token") {
+          throw new HttpError(401, "缺少授權資訊", "NOTICE_TOKEN_MISSING");
+        }
+        return { username: "test-admin" };
+      },
+    }
+  );
+});
+
+test("POST /api/it/duty/members blocked client 回 423", async () => {
+  const { repo } = await buildRepoWithDb();
+  workReportClientPresenceStore.upsertPresence({
+    clientId: "blocked-it-duty-client",
+    tabId: "tab-1",
+    effectiveIp: null,
+    ip: null,
+    forwardedFor: null,
+    realIp: null,
+    userAgent: null,
+    lastSeenAt: new Date().toISOString(),
+    currentPath: "/it/duty",
+    currentFormId: null,
+    currentEntryId: null,
+    currentTopView: null,
+    currentLandingPageKey: null,
+    realtimeConnected: false,
+    clientBootId: null,
+    serverBootIdAtConnect: null,
+    deployVersionAtConnect: null,
+    blocked: true,
+    blockedReason: "maintenance",
+  });
+
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/members`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-debug-client-id": "blocked-it-duty-client",
+        "x-debug-tab-id": "tab-1",
+      },
+      body: JSON.stringify({ name: "Alice" }),
+    });
+    assert.equal(res.status, 423);
+  });
+});
 
 test("GET /api/it/duty/members 空表回空陣列", async () => {
   const { repo } = await buildRepoWithDb();
@@ -627,5 +698,128 @@ test("GET /api/it/duty/swaps 壞日期格式回 400", async () => {
       `${baseUrl}/api/it/duty/swaps?from=2026-13-99&to=2026-05-31`
     );
     assert.equal(res.status, 400);
+  });
+});
+
+// === Day Note ===
+
+test("PUT /api/it/duty/day-notes/:date 新建備註", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "x-debug-device-label": "FD0287" },
+      body: JSON.stringify({ note: "客戶來訪" }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.data.note, "客戶來訪");
+    assert.equal(body.data.updatedByLabel, "FD0287");
+  });
+});
+
+test("PUT /api/it/duty/day-notes/:date 覆蓋既有", async () => {
+  const { repo } = await buildRepoWithDb();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "舊備註" });
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "新備註" }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.data.note, "新備註");
+  });
+});
+
+test("PUT /api/it/duty/day-notes/:date 缺 note 回 400", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("PUT /api/it/duty/day-notes/:date 空字串 trim 後為空回 400", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "   " }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("PUT /api/it/duty/day-notes/:date 超過 200 字回 400", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "a".repeat(201) }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("PUT /api/it/duty/day-notes/:date 壞日期格式回 400", async () => {
+  const { repo } = await buildRepoWithDb();
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-13-99`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "x" }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("GET /api/it/duty/day-notes 不帶 from/to 走全量", async () => {
+  const { repo } = await buildRepoWithDb();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "A" });
+  await repo.upsertDayNote({ noteDate: "2027-01-15", note: "B" });
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/it/duty/day-notes`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.data.length, 2);
+  });
+});
+
+test("GET /api/it/duty/day-notes 帶 from/to 過濾範圍", async () => {
+  const { repo } = await buildRepoWithDb();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "A" });
+  await repo.upsertDayNote({ noteDate: "2026-06-15", note: "B" });
+  await repo.upsertDayNote({ noteDate: "2026-07-01", note: "C" });
+  await withTestServer(repo, async (baseUrl) => {
+    const res = await fetch(
+      `${baseUrl}/api/it/duty/day-notes?from=2026-06-01&to=2026-06-30`
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.data.length, 2);
+    assert.deepEqual(body.data.map((n: { note: string }) => n.note), ["A", "B"]);
+  });
+});
+
+test("DELETE /api/it/duty/day-notes/:date 成功 + 再刪回 404", async () => {
+  const { repo } = await buildRepoWithDb();
+  await repo.upsertDayNote({ noteDate: "2026-06-01", note: "X" });
+  await withTestServer(repo, async (baseUrl) => {
+    const res1 = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "DELETE",
+    });
+    assert.equal(res1.status, 200);
+    const res2 = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
+      method: "DELETE",
+    });
+    assert.equal(res2.status, 404);
   });
 });

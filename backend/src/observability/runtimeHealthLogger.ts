@@ -2,6 +2,10 @@ import { monitorEventLoopDelay } from "perf_hooks";
 import { env } from "../config/env";
 import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
 import { createReportTaskService } from "../services/createReportTaskService";
+import { form16WriteReverifyService } from "../services/form16/form16WriteReverifyService";
+import { createLogger } from "./logger";
+
+const log = createLogger("runtime-health");
 
 let runtimeHealthTimer: NodeJS.Timeout | null = null;
 let eventLoopHistogram: ReturnType<typeof monitorEventLoopDelay> | null = null;
@@ -28,12 +32,15 @@ export function startRuntimeHealthLogger(): void {
   const emitRuntimeHealth = (): void => {
     const ragic = ragicRequestScheduler.getStats();
     const tasks = createReportTaskService.getStats();
+    const form16WriteReverify = form16WriteReverifyService.getStats();
     const lag = eventLoopHistogram;
 
-    console.info("[runtime-health]", {
+    log.info({
+      event: "sample",
       at: new Date().toISOString(),
       ragic,
       createTasks: tasks,
+      form16WriteReverify,
       eventLoopLagMs: {
         mean: lag ? toMs(lag.mean) : 0,
         p95: lag ? toMs(lag.percentile(95)) : 0,

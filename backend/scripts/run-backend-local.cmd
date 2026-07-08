@@ -6,7 +6,7 @@ REM Ragic Report Backend Local Test Launcher (Windows)
 REM - Uses portable Node 20 first, fallback to installed/system Node
 REM - Overrides PORT / CORS_ORIGIN only for this process
 REM - Default: dev mode on http://localhost:3300
-REM - CORS allows both http://localhost:5174 and http://127.0.0.1:5174
+REM - CORS allows both http://localhost:5174 and http://192.168.1.98:5174
 REM =============================================================================
 
 set "PORTABLE_NODE20_HOME=C:\tools\node-v20.20.0-win-x64"
@@ -67,7 +67,7 @@ if not exist "node_modules" (
 )
 
 set "PORT=3300"
-set "CORS_ORIGIN=http://localhost:5174,http://127.0.0.1:5174"
+set "CORS_ORIGIN=http://localhost:5174,http://192.168.1.98:5174"
 set "PORT_PID="
 
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"') do (

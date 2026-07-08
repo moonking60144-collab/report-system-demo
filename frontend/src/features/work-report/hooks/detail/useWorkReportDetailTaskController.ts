@@ -1,8 +1,24 @@
 import { useCallback, useMemo } from "react";
-import { fetchCreateReportTask, type CreateReportTaskAcceptedResult, type CreateReportTaskStatus } from "../../../../api/workReport";
+import {
+  fetchCreateReportTask,
+  fetchWorkReportQueueTask,
+  type CreateReportTaskResult,
+  type CreateReportTaskStatus,
+  type WorkReportQueueTask,
+} from "../../../../api/workReport";
 import type { WorkReportFrontendEventAction } from "../../debug/workReportDeveloperContract";
 import type { CreateTaskMonitor, WorkReportFormId, WorkReportMutationTaskKind } from "../../types";
 import { deleteRetryableMutationRecord } from "../../taskRetryStore";
+import { getWorkReportTaskErrorMessage } from "../../utils";
+
+interface AcceptedMutationTask {
+  taskId: string;
+  status: CreateReportTaskStatus;
+  createdAt: string;
+  rowId?: string;
+}
+
+type AcceptedMutationTaskResult = CreateReportTaskResult | WorkReportQueueTask;
 
 interface UseWorkReportDetailTaskControllerArgs {
   formId: WorkReportFormId | null;
@@ -24,8 +40,61 @@ interface UseWorkReportDetailTaskControllerArgs {
   t: (key: string, options?: Record<string, unknown>) => string;
 }
 
-function isMutationTaskActive(status: CreateReportTaskStatus): boolean {
-  return status === "pending" || status === "running";
+function isMutationTaskActive(task: Pick<CreateTaskMonitor, "status" | "stale">): boolean {
+  return task.stale !== true && (task.status === "pending" || task.status === "running");
+}
+
+function isQueueTask(kind: WorkReportMutationTaskKind): boolean {
+  return kind === "delete" || kind === "delete-batch";
+}
+
+function isWorkReportQueueTaskResult(task: AcceptedMutationTaskResult): task is WorkReportQueueTask {
+  return "errorMessage" in task;
+}
+
+export async function fetchAcceptedMutationTaskResult(
+  kind: WorkReportMutationTaskKind,
+  formId: string,
+  taskId: string
+): Promise<AcceptedMutationTaskResult> {
+  if (isQueueTask(kind)) {
+    return fetchWorkReportQueueTask(formId, taskId);
+  }
+  return fetchCreateReportTask(formId, taskId);
+}
+
+function getTerminalTaskRowId(
+  task: AcceptedMutationTaskResult,
+  accepted: AcceptedMutationTask,
+  rowId?: string
+): string | undefined {
+  if (isWorkReportQueueTaskResult(task)) {
+    return task.rowId ?? accepted.rowId ?? rowId;
+  }
+  return task.result?.rowId ?? accepted.rowId ?? rowId;
+}
+
+function getTerminalTaskErrorMessage(task: AcceptedMutationTaskResult): string {
+  return getWorkReportTaskErrorMessage(task);
+}
+
+function getTerminalTaskSuccessMessage(
+  kind: WorkReportMutationTaskKind,
+  task: AcceptedMutationTaskResult,
+  rowId: string | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if ((kind === "delete" || kind === "delete-batch") && isWorkReportQueueTaskResult(task) && task.message) {
+    return task.message;
+  }
+  if (kind === "update") {
+    return t("workReport:messages.taskBackgroundUpdatedWithRow", {
+      rowId: rowId ?? "-",
+    });
+  }
+  return t("workReport:messages.taskBackgroundCompletedWithRow", {
+    rowId: rowId ?? "-",
+  });
 }
 
 function compareMonitorUpdatedAtDesc(left: CreateTaskMonitor, right: CreateTaskMonitor): number {
@@ -60,7 +129,7 @@ export function useWorkReportDetailTaskController({
     [createTaskMonitors, formId, safeEntryId]
   );
   const activeMutationTasks = useMemo(
-    () => currentEntryTaskMonitors.filter((item) => isMutationTaskActive(item.status)),
+    () => currentEntryTaskMonitors.filter((item) => isMutationTaskActive(item)),
     [currentEntryTaskMonitors]
   );
   const activeMutationTask = activeMutationTasks[0] ?? null;
@@ -92,7 +161,7 @@ export function useWorkReportDetailTaskController({
   const registerAcceptedMutationTask = useCallback(
     async (
       kind: WorkReportMutationTaskKind,
-      accepted: CreateReportTaskAcceptedResult,
+      accepted: AcceptedMutationTask,
       rowId?: string
     ): Promise<void> => {
       if (!formId) {
@@ -100,8 +169,8 @@ export function useWorkReportDetailTaskController({
       }
 
       if (accepted.status === "success" || accepted.status === "failed") {
-        const task = await fetchCreateReportTask(formId, accepted.taskId);
-        const terminalRowId = task.result?.rowId ?? accepted.rowId ?? rowId;
+        const task = await fetchAcceptedMutationTaskResult(kind, formId, accepted.taskId);
+        const terminalRowId = getTerminalTaskRowId(task, accepted, rowId);
         logDetailEvent(
           "task",
           "accepted-mutation-task-registered",
@@ -122,16 +191,10 @@ export function useWorkReportDetailTaskController({
             task.taskId,
             task.status,
             task.status === "success"
-              ? kind === "update"
-                ? t("workReport:messages.taskBackgroundUpdatedWithRow", {
-                    rowId: terminalRowId ?? "-",
-                  })
-                : t("workReport:messages.taskBackgroundCompletedWithRow", {
-                    rowId: terminalRowId ?? "-",
-                  })
+              ? getTerminalTaskSuccessMessage(kind, task, terminalRowId, t)
               : t("workReport:messages.backgroundProcessingFailedWithError", {
                   error:
-                    String(task.error?.message ?? "").trim() ||
+                    getTerminalTaskErrorMessage(task) ||
                     t("workReport:messages.backgroundProcessingFailedDefault"),
                 }),
             terminalRowId
@@ -160,6 +223,10 @@ export function useWorkReportDetailTaskController({
             ? accepted.status === "pending"
               ? t("workReport:messages.createTaskQueuedContinue")
               : t("workReport:messages.createTaskBackgroundRunning")
+            : kind === "delete" || kind === "delete-batch"
+              ? accepted.status === "pending"
+                ? t("workReport:messages.taskQueuedWaitingPrevious")
+                : t("workReport:messages.deleteTaskBackgroundRunning")
             : accepted.status === "pending"
               ? t("workReport:messages.taskQueuedWaitingPrevious")
               : t("workReport:messages.taskBackgroundRecalcRunning"),

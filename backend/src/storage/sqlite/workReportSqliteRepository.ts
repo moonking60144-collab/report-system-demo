@@ -8,6 +8,10 @@ import type {
 } from "../../types/workReport";
 import { READ_MODEL_SCHEMA_VERSION } from "./readModelSchema";
 import {
+  buildSqliteMultiRowPlaceholders,
+  resolveSqliteInsertChunkSize,
+} from "./sqliteBulkInsert";
+import {
   runSerializedWrite,
   sqliteClient,
   withWriteTransaction,
@@ -119,6 +123,47 @@ interface RowSnapshotPayload {
   syncedAt: string;
 }
 
+const ENTRY_SNAPSHOT_COLUMN_COUNT = 18;
+const ROW_SNAPSHOT_COLUMN_COUNT = 10;
+
+function toEntryInsertParams(entry: EntrySnapshotPayload): unknown[] {
+  return [
+    entry.formId,
+    entry.generationId,
+    entry.entryId,
+    entry.workOrderNo,
+    entry.customerPartNo,
+    entry.machineCode,
+    entry.filterMachineCode,
+    entry.status,
+    entry.ragicUnfinishedStatus,
+    entry.siteRunning,
+    entry.startSchedule,
+    entry.sortOrder,
+    entry.plannedStartDate,
+    entry.lastUpdatedAt,
+    entry.searchText,
+    entry.summaryJson,
+    entry.detailJson,
+    entry.syncedAt,
+  ];
+}
+
+function toRowInsertParams(row: RowSnapshotPayload): unknown[] {
+  return [
+    row.formId,
+    row.generationId,
+    row.entryId,
+    row.rowId,
+    row.dateValue,
+    row.operatorId,
+    row.processCode,
+    row.machineId,
+    row.payloadJson,
+    row.syncedAt,
+  ];
+}
+
 class WorkReportSqliteRepository {
   async replaceFormSnapshot(
     formId: string,
@@ -190,108 +235,79 @@ class WorkReportSqliteRepository {
     }
 
     return withWriteTransaction(async (db) => {
-      const insertEntryStmt = await db.prepare(
-        `
-        INSERT INTO work_report_entries (
-          form_id,
-          generation_id,
-          entry_id,
-          work_order_no,
-          customer_part_no,
-          machine_code,
-          filter_machine_code,
-          status,
-          ragic_unfinished_status,
-          site_running,
-          start_schedule,
-          sort_order,
-          planned_start_date,
-          last_updated_at,
-          search_text,
-          summary_json,
-          detail_json,
-          synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
+      await db.run(
+        "DELETE FROM work_report_rows WHERE form_id = ? AND generation_id = ?",
+        formId,
+        generationId
       );
-      const insertRowStmt = await db.prepare(
-        `
-        INSERT INTO work_report_rows (
-          form_id,
-          generation_id,
-          entry_id,
-          row_id,
-          date_value,
-          operator_id,
-          process_code,
-          machine_id,
-          payload_json,
-          synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
+      await db.run(
+        "DELETE FROM work_report_entries WHERE form_id = ? AND generation_id = ?",
+        formId,
+        generationId
       );
-      try {
+
+      const entryInsertChunkSize = resolveSqliteInsertChunkSize(
+        batchSize,
+        ENTRY_SNAPSHOT_COLUMN_COUNT
+      );
+      for (const entryChunk of chunkArray(entryPayloads, entryInsertChunkSize)) {
+        const params = entryChunk.flatMap(toEntryInsertParams);
         await db.run(
-          "DELETE FROM work_report_rows WHERE form_id = ? AND generation_id = ?",
-          formId,
-          generationId
+          `
+          INSERT INTO work_report_entries (
+            form_id,
+            generation_id,
+            entry_id,
+            work_order_no,
+            customer_part_no,
+            machine_code,
+            filter_machine_code,
+            status,
+            ragic_unfinished_status,
+            site_running,
+            start_schedule,
+            sort_order,
+            planned_start_date,
+            last_updated_at,
+            search_text,
+            summary_json,
+            detail_json,
+            synced_at
+          ) VALUES ${buildSqliteMultiRowPlaceholders(entryChunk.length, ENTRY_SNAPSHOT_COLUMN_COUNT)}
+          `,
+          ...params
         );
-        await db.run(
-          "DELETE FROM work_report_entries WHERE form_id = ? AND generation_id = ?",
-          formId,
-          generationId
-        );
-
-        for (const entryChunk of chunkArray(entryPayloads, batchSize)) {
-          for (const entry of entryChunk) {
-            await insertEntryStmt.run(
-              entry.formId,
-              entry.generationId,
-              entry.entryId,
-              entry.workOrderNo,
-              entry.customerPartNo,
-              entry.machineCode,
-              entry.filterMachineCode,
-              entry.status,
-              entry.ragicUnfinishedStatus,
-              entry.siteRunning,
-              entry.startSchedule,
-              entry.sortOrder,
-              entry.plannedStartDate,
-              entry.lastUpdatedAt,
-              entry.searchText,
-              entry.summaryJson,
-              entry.detailJson,
-              entry.syncedAt
-            );
-          }
-        }
-
-        for (const rowChunk of chunkArray(rowPayloads, batchSize * 2)) {
-          for (const row of rowChunk) {
-            await insertRowStmt.run(
-              row.formId,
-              row.generationId,
-              row.entryId,
-              row.rowId,
-              row.dateValue,
-              row.operatorId,
-              row.processCode,
-              row.machineId,
-              row.payloadJson,
-              row.syncedAt
-            );
-          }
-        }
-
-        return {
-          entryCount: entryPayloads.length,
-          rowCount: rowPayloads.length,
-        };
-      } finally {
-        await insertEntryStmt.finalize();
-        await insertRowStmt.finalize();
       }
+
+      const rowInsertChunkSize = resolveSqliteInsertChunkSize(
+        batchSize * 2,
+        ROW_SNAPSHOT_COLUMN_COUNT
+      );
+      for (const rowChunk of chunkArray(rowPayloads, rowInsertChunkSize)) {
+        const params = rowChunk.flatMap(toRowInsertParams);
+        await db.run(
+          `
+          INSERT INTO work_report_rows (
+            form_id,
+            generation_id,
+            entry_id,
+            row_id,
+            date_value,
+            operator_id,
+            process_code,
+            machine_id,
+            payload_json,
+            synced_at
+          ) VALUES ${buildSqliteMultiRowPlaceholders(rowChunk.length, ROW_SNAPSHOT_COLUMN_COUNT)}
+          `,
+          ...params
+        );
+      }
+
+      return {
+        entryCount: entryPayloads.length,
+        rowCount: rowPayloads.length,
+      };
     });
   }
 
@@ -1081,11 +1097,13 @@ export async function cleanupOldFormGenerationsBatchWithDb(
     SELECT generation_id
     FROM work_report_entries
     WHERE form_id = ?
+      AND generation_id <= ?
     GROUP BY generation_id
     ORDER BY generation_id DESC
     LIMIT ?
     `,
     formId,
+    normalizedKeepGenerationId,
     keepRecentGenerations
   );
   const retainedGenerationIds = Array.from(
@@ -1101,29 +1119,63 @@ export async function cleanupOldFormGenerationsBatchWithDb(
     FROM work_report_entries
     WHERE form_id = ?
       AND generation_id NOT IN (${placeholders})
+      AND generation_id < ?
     ORDER BY generation_id ASC
     LIMIT ?
     `,
     formId,
     ...retainedGenerationIds,
+    normalizedKeepGenerationId,
     batchSize
   );
   if (rows.length === 0) {
     return 0;
   }
 
-  for (const row of rows) {
-    await db.run(
-      `
-      DELETE FROM work_report_entries
-      WHERE form_id = ?
-        AND generation_id = ?
-        AND entry_id = ?
-      `,
-      formId,
-      row.generation_id,
-      row.entry_id
-    );
-  }
-  return rows.length;
+  const staleEntrySelector = `
+    SELECT generation_id, entry_id
+    FROM work_report_entries
+    WHERE form_id = ?
+      AND generation_id NOT IN (${placeholders})
+      AND generation_id < ?
+    ORDER BY generation_id ASC
+    LIMIT ?
+  `;
+  await db.run(
+    `
+    DELETE FROM work_report_rows
+    WHERE form_id = ?
+      AND EXISTS (
+        SELECT 1
+        FROM (${staleEntrySelector}) AS stale
+        WHERE stale.generation_id = work_report_rows.generation_id
+          AND stale.entry_id = work_report_rows.entry_id
+      )
+    `,
+    formId,
+    formId,
+    ...retainedGenerationIds,
+    normalizedKeepGenerationId,
+    batchSize
+  );
+  const result = await db.run(
+    `
+    DELETE FROM work_report_entries
+    WHERE form_id = ?
+      AND EXISTS (
+        SELECT 1
+        FROM (${staleEntrySelector}) AS stale
+        WHERE stale.generation_id = work_report_entries.generation_id
+          AND stale.entry_id = work_report_entries.entry_id
+      )
+    `,
+    formId,
+    formId,
+    ...retainedGenerationIds,
+    normalizedKeepGenerationId,
+    batchSize
+  );
+  const deletedEntries =
+    typeof result.changes === "number" ? result.changes : rows.length;
+  return deletedEntries;
 }

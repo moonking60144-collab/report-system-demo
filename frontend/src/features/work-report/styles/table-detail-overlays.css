@@ -64,6 +64,64 @@ button:disabled {
   opacity: 0.65;
 }
 
+.work-order-cell-button {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: #1d4ed8;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: rgba(29, 78, 216, 0.28);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.work-order-cell-button.is-fit {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
+  text-align: left;
+  word-break: break-word;
+}
+
+.work-order-cell-button:hover {
+  color: #1e40af;
+  text-decoration-color: rgba(30, 64, 175, 0.45);
+  background: transparent;
+}
+
+.detail-page-history-btn,
+.downtime-page-history-btn {
+  padding: 0.3rem 0.75rem;
+  margin-left: 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: normal;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.detail-page-history-btn:hover:not(:disabled),
+.downtime-page-history-btn:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.detail-page-history-btn:disabled,
+.downtime-page-history-btn:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .subtable-cell {
   background: #f8fafc;
 }
@@ -259,32 +317,32 @@ button.is-locked:focus {
 
 .context-kpi-grid {
   display: grid;
-  gap: 0.6rem;
+  gap: 0.5rem;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 1.1rem;
+  margin-bottom: 0.55rem;
 }
 
 .context-kpi-card {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
   background: #ffffff;
-  padding: 0.5rem 0.6rem;
-  min-height: 66px;
+  padding: 0.3rem 0.55rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.05rem;
 }
 
 .context-kpi-label {
   color: #64748b;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
+  line-height: 1.25;
 }
 
 .context-kpi-value {
   color: #0f172a;
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 700;
-  line-height: 1.3;
+  line-height: 1.2;
   word-break: break-word;
 }
 
@@ -298,7 +356,7 @@ button.is-locked:focus {
 }
 
 .context-detail {
-  padding-top: 0.85rem;
+  padding-top: 0.5rem;
   border-top: 1px dashed #dbe3eb;
 }
 
@@ -333,6 +391,10 @@ button.is-locked:focus {
 
 .context-detail.is-collapsed {
   padding-bottom: 0;
+}
+
+.context-detail.is-collapsed .context-detail-header {
+  margin-bottom: 0;
 }
 
 .context-grid {

@@ -17,7 +17,7 @@ function baseValidOrphan(): Record<string, string> {
   return {
     "工令單單號": "",
     "計畫停機?": "No",
-    "Type報工類別": "TI-ProcessA",
+    "Type報工類別": "TI搓牙",
     "開單者帳號": "羅智加",
     "ERP Part No.完工ERP料號": "5701-RC001-023",
     "Created建立日期時間": "2026/04/14 20:42:00",
@@ -42,7 +42,7 @@ test("isForm16Orphan — 計畫停機=Yes 就不算（合法停機紀錄 workOrd
 });
 
 test("isForm16Orphan — 報工類別不在白名單就不算（PA 包裝合法空工令）", () => {
-  const r = { ...baseValidOrphan(), "Type報工類別": "PA-Pack" };
+  const r = { ...baseValidOrphan(), "Type報工類別": "PA包裝" };
   assert.equal(isForm16Orphan(makeRecord(r), { creatorAccount: "羅智加" }), false);
 });
 
@@ -84,7 +84,7 @@ test("isForm16Orphan — 欄位用 fallback key 也能 resolve", () => {
   const r = {
     "No.工令單單號": "", // 第 3 candidate，其他兩個不在
     "計畫停機?": "No",
-    "Type報工類別": "HF-Forge",
+    "Type報工類別": "HF鍛造",
     "開單者帳號": "羅智加",
   };
   assert.equal(isForm16Orphan(makeRecord(r), { creatorAccount: "羅智加" }), true);
@@ -93,12 +93,12 @@ test("isForm16Orphan — 欄位用 fallback key 也能 resolve", () => {
 test("isForm16Orphan — reportType 用 Type報工類別 / 報工類別 兩個 key 擇一", () => {
   const withPrimary = {
     ...baseValidOrphan(),
-    "Type報工類別": "HF-Forge",
+    "Type報工類別": "HF鍛造",
   };
   const withFallback: Record<string, string> = {
     "工令單單號": "",
     "計畫停機?": "No",
-    "報工類別": "HF-Forge", // fallback key
+    "報工類別": "HF鍛造", // fallback key
     "開單者帳號": "羅智加",
   };
   assert.equal(
@@ -141,7 +141,7 @@ test("parseForm16CreatedAtMs — 空值 / 不符格式回 null", () => {
 });
 
 test("detectNonWhitelistedOrphanType — 白名單類別回 null（已由 isForm16Orphan 處理）", () => {
-  const r = { ...baseValidOrphan(), "Type報工類別": "TI-ProcessA" };
+  const r = { ...baseValidOrphan(), "Type報工類別": "TI搓牙" };
   assert.equal(
     detectNonWhitelistedOrphanType(makeRecord(r), { creatorAccount: "羅智加" }),
     null

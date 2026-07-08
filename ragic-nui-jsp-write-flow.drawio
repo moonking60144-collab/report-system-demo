@@ -1,0 +1,66 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Ragic .nui 與 JSP 寫入流程" id="ragic-nui-jsp-write-flow-v4">
+    <mxGraphModel dx="1600" dy="920" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="920" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Ragic .nui 與 JSP Endpoint 關係" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=32;fontStyle=1;fontColor=#0f172a;" vertex="1" parent="1">
+          <mxGeometry x="180" y="35" width="1240" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="subtitle" value="公式存在 .nui；JSP endpoint 是 Ragic 讀取、儲存、解析 .nui 的入口。" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=19;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="180" y="88" width="1240" height="34" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nui" value="&lt;b&gt;.nui 設計來源檔&lt;/b&gt;&lt;br&gt;&lt;br&gt;每張表單一份 builder 設計檔&lt;br&gt;例：51_Sheet51_index.nui&lt;br&gt;&lt;br&gt;&lt;b&gt;公式行&lt;/b&gt;&lt;br&gt;D,7,6,1036641,... f=F6*D6+123456" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;strokeWidth=2;fontSize=19;fontColor=#0f172a;spacing=18;align=left;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="90" y="175" width="410" height="225" as="geometry" />
+        </mxCell>
+
+        <mxCell id="jsp" value="&lt;b&gt;JSP Endpoint&lt;/b&gt;&lt;br&gt;&lt;br&gt;form_builder.jsp：讀 .nui&lt;br&gt;save_builder.jsp：Ragic 儲存 .nui&lt;br&gt;txtedit.jsp：workflow 區塊&lt;br&gt;formJSONDef.jsp：解析成 JSON" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0fdf4;strokeColor=#86efac;strokeWidth=2;fontSize=19;fontColor=#0f172a;spacing=18;align=left;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="595" y="175" width="410" height="225" as="geometry" />
+        </mxCell>
+
+        <mxCell id="verify" value="&lt;b&gt;讀回驗證&lt;/b&gt;&lt;br&gt;&lt;br&gt;form_builder.jsp 已讀到 +123456&lt;br&gt;formJSONDef.jsp 已讀到 attr_f&lt;br&gt;&lt;br&gt;實際表單頁 HTML 不含公式字串" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eff6ff;strokeColor=#93c5fd;strokeWidth=2;fontSize=19;fontColor=#0f172a;spacing=18;align=left;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="175" width="410" height="225" as="geometry" />
+        </mxCell>
+
+        <mxCell id="path-save" value="&lt;b&gt;路徑 A：走 Ragic 儲存流程&lt;/b&gt;&lt;br&gt;&lt;br&gt;GET form_builder.jsp&lt;br&gt;PATCH 公式&lt;br&gt;POST save_builder.jsp&lt;br&gt;read-back verify&lt;br&gt;&lt;br&gt;&lt;b&gt;適合：需要 Ragic 原生修改紀錄&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7fee7;strokeColor=#bef264;strokeWidth=2;fontSize=19;fontColor=#0f172a;spacing=18;align=left;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="520" width="520" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="path-direct" value="&lt;b&gt;路徑 B：直接改 .nui&lt;/b&gt;&lt;br&gt;&lt;br&gt;server 端 patch .nui&lt;br&gt;不需要 browser session&lt;br&gt;formJSONDef.jsp 驗證&lt;br&gt;工具自建 backup / audit / rollback&lt;br&gt;&lt;br&gt;&lt;b&gt;適合：大量公式重構&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fffbeb;strokeColor=#fcd34d;strokeWidth=2;fontSize=19;fontColor=#0f172a;spacing=18;align=left;verticalAlign=middle;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="920" y="520" width="520" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="decision" value="建議：MVP 先做 direct .nui patch 的 dry-run / apply；若必須保留 Ragic 原生 audit，改走 save_builder.jsp。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fefce8;strokeColor=#eab308;strokeWidth=2;fontSize=21;fontStyle=1;fontColor=#0f172a;spacing=18;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="180" y="810" width="1240" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow1" value="" style="endArrow=classic;startArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="nui" target="jsp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow2" value="" style="endArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="jsp" target="verify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow3" value="" style="endArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="jsp" target="path-save">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow4" value="" style="endArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="nui" target="path-direct">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow5" value="" style="endArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="path-save" target="decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow6" value="" style="endArrow=classic;html=1;strokeColor=#64748b;strokeWidth=3;" edge="1" parent="1" source="path-direct" target="decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

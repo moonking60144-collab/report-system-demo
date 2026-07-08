@@ -36,7 +36,7 @@ export function calculateDutyForDay(
   members: ItDutyMember[],
   overrides: ItDutyOverride[],
   daySwaps: ItDutyDaySwap[],
-  options: RotationOptions = {}
+  options: RotationOptions
 ): DayDutyResult {
   const target = dayjs(date);
   const isoWeek = formatIsoWeek(target);
@@ -87,20 +87,18 @@ export function findNextDutyDateForMember(
     blockedDates?: ReadonlySet<string>;
     /** 最多往後找幾天（避免無限迴圈）*/
     searchDays?: number;
-  } & RotationOptions = {}
+  } & RotationOptions
 ): string | null {
   const start = options.fromDate
     ? dayjs(options.fromDate)
     : dayjs().add(1, "day");
   const limit = options.searchDays ?? 365;
   const blocked = options.blockedDates ?? new Set<string>();
-  const passOptions: RotationOptions = {};
-  if (options.autoAnchorIsoWeek !== undefined) {
-    passOptions.autoAnchorIsoWeek = options.autoAnchorIsoWeek;
-  }
-  if (options.weeksPerSlot !== undefined) {
-    passOptions.weeksPerSlot = options.weeksPerSlot;
-  }
+  const passOptions: RotationOptions = {
+    anchorIsoWeek: options.anchorIsoWeek,
+    anchorMemberId: options.anchorMemberId,
+    weeksPerSlot: options.weeksPerSlot,
+  };
   let cursor = start.startOf("day");
   // 兩階段：
   //  Phase 1 (foundEnd=false)：等 creditor 現在這輪結束（連續 base 是 creditor 的時段）

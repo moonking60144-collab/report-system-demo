@@ -241,6 +241,65 @@ export function buildInitialFormState(
   };
 }
 
+export function applyCreateDefaultsToFormState(
+  formId: WorkReportFormId,
+  formState: FormState,
+  entryContext?: WorkReportRecord | null,
+  machineOptions: FormOptionItem[] = [],
+  operatorOptions: FormOptionItem[] = []
+): FormState {
+  const defaults = buildInitialFormState(
+    formId,
+    "create",
+    null,
+    entryContext,
+    machineOptions,
+    operatorOptions
+  );
+  const next: FormState = { ...formState };
+  const entryDefaultProcessCode = String(entryContext?.defaultProcessCode ?? "").trim();
+  const draftMachineId = String(next.machineId ?? "").trim();
+  const machineDefaults = draftMachineId
+    ? inferOperatorDefaultByMachine(draftMachineId, machineOptions)
+    : {};
+  const draftOperatorId = String(next.operatorId ?? "").trim();
+  const operatorDefaults = draftOperatorId
+    ? inferOperatorDefaultSelection(draftOperatorId, entryContext, machineOptions)
+    : {};
+  const resolvedMachineId =
+    String(next.machineId ?? "").trim() ||
+    String(defaults.machineId ?? "").trim() ||
+    String(operatorDefaults.machineId ?? "").trim();
+  const resolvedOperatorId =
+    String(next.operatorId ?? "").trim() ||
+    String(defaults.operatorId ?? "").trim();
+  const resolvedProcessCode =
+    String(next.processCode ?? "").trim() ||
+    entryDefaultProcessCode ||
+    String(machineDefaults.processCode ?? "").trim() ||
+    String(operatorDefaults.processCode ?? "").trim() ||
+    String(defaults.processCode ?? "").trim();
+  const resolvedReportType =
+    String(next.reportType ?? "").trim() ||
+    inferReportTypeFromProcessCode(resolvedProcessCode) ||
+    String(machineDefaults.reportType ?? "").trim() ||
+    String(operatorDefaults.reportType ?? "").trim() ||
+    String(defaults.reportType ?? "").trim();
+  const resolvedOperatorName =
+    String(next.operatorName ?? "").trim() ||
+    resolveOperatorDisplayName(resolvedOperatorId, operatorOptions) ||
+    String(defaults.operatorName ?? "").trim();
+
+  return {
+    ...next,
+    machineId: resolvedMachineId,
+    operatorId: resolvedOperatorId,
+    operatorName: resolvedOperatorName,
+    processCode: resolvedProcessCode,
+    reportType: resolvedReportType,
+  };
+}
+
 export function hasAdvancedFieldValues(formState: FormState): boolean {
   const advancedKeys: Array<keyof FormState> = [
     "setupAdjustType",

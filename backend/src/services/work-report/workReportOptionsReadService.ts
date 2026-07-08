@@ -1,5 +1,5 @@
 import { env } from "../../config/env";
-import { getFormConfig } from "../../config/forms";
+import { getFormConfig, listFormConfigs } from "../../config/forms";
 import type { RagicReadPriority } from "../../infra/ragicRequestScheduler";
 import { ragicClient } from "../../ragic/client";
 import type { LinkedFieldMapping } from "../../types/formConfig";
@@ -39,6 +39,13 @@ export class WorkReportOptionsReadService {
     }
   >();
   private readonly optionsPromiseByKey = new Map<string, Promise<FormOptionMap>>();
+  private optionsCacheGeneration = 0;
+
+  constructor() {
+    ragicClient.onFormCacheCleared((sourceFormPath) => {
+      this.clearOptionsCacheForSourceForm(sourceFormPath);
+    });
+  }
 
   /**
    * Priority default = "user"（多數 caller 是使用者開 picker / list 拉 options），
@@ -66,23 +73,29 @@ export class WorkReportOptionsReadService {
     if (cached && cached.expiresAt > now) {
       return cached.value;
     }
-    const inflight = this.optionsPromiseByKey.get(cacheKey);
+    const inFlightKey = this.buildOptionsInFlightKey(cacheKey, priority);
+    const inflight = this.optionsPromiseByKey.get(inFlightKey);
     if (inflight) {
       return inflight;
     }
 
+    const generation = this.optionsCacheGeneration;
     const loadPromise = this.buildFormOptions(config.linkedFields, requestedFields, priority)
       .then((nextResult) => {
-        this.optionsCacheByKey.set(cacheKey, {
-          expiresAt: Date.now() + env.CACHE_TTL * 1000,
-          value: nextResult,
-        });
+        if (this.optionsCacheGeneration === generation) {
+          this.optionsCacheByKey.set(cacheKey, {
+            expiresAt: Date.now() + env.CACHE_TTL * 1000,
+            value: nextResult,
+          });
+        }
         return nextResult;
       })
       .finally(() => {
-        this.optionsPromiseByKey.delete(cacheKey);
+        if (this.optionsPromiseByKey.get(inFlightKey) === loadPromise) {
+          this.optionsPromiseByKey.delete(inFlightKey);
+        }
       });
-    this.optionsPromiseByKey.set(cacheKey, loadPromise);
+    this.optionsPromiseByKey.set(inFlightKey, loadPromise);
     return loadPromise;
   }
 
@@ -187,6 +200,55 @@ export class WorkReportOptionsReadService {
   private buildOptionsCacheKey(formId: string, requestedFields: string[]): string {
     const normalizedFields = [...requestedFields].sort().join(",");
     return `${formId}:${normalizedFields}`;
+  }
+
+  private buildOptionsInFlightKey(cacheKey: string, priority: RagicReadPriority): string {
+    return `${cacheKey}\0${priority}`;
+  }
+
+  private clearOptionsCacheForSourceForm(sourceFormPath?: string): void {
+    if (!sourceFormPath) {
+      this.optionsCacheGeneration += 1;
+      this.optionsCacheByKey.clear();
+      this.optionsPromiseByKey.clear();
+      return;
+    }
+
+    const normalizedSourcePath = this.normalizeFormPath(sourceFormPath);
+    const affectedFormIds = listFormConfigs()
+      .filter((config) =>
+        Object.values(config.linkedFields ?? {}).some(
+          (linkedField) =>
+            this.normalizeFormPath(linkedField.sourceFormPath) === normalizedSourcePath
+        )
+      )
+      .map((config) => config.formId);
+
+    if (affectedFormIds.length === 0) {
+      return;
+    }
+
+    this.optionsCacheGeneration += 1;
+    for (const formId of affectedFormIds) {
+      this.deleteOptionsCacheByPrefix(`${formId}:`);
+    }
+  }
+
+  private deleteOptionsCacheByPrefix(prefix: string): void {
+    for (const key of this.optionsCacheByKey.keys()) {
+      if (key.startsWith(prefix)) {
+        this.optionsCacheByKey.delete(key);
+      }
+    }
+    for (const key of this.optionsPromiseByKey.keys()) {
+      if (key.startsWith(prefix)) {
+        this.optionsPromiseByKey.delete(key);
+      }
+    }
+  }
+
+  private normalizeFormPath(formPath: string): string {
+    return formPath.trim().replace(/\/+$/, "");
   }
 
   private pickFirstNonEmptyText(value: unknown): string | undefined {
@@ -316,7 +378,7 @@ export class WorkReportOptionsReadService {
     }
 
     const label =
-      this.pickFirstNonEmptyText(row.data["部門群組"]) ??
+      this.pickFirstNonEmptyText(row.data["宏得部門"]) ??
       this.pickFirstNonEmptyText(row.data["共同瀏覽部門群組"]);
     if (!label) {
       return undefined;

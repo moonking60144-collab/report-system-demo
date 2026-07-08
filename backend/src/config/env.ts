@@ -3,9 +3,8 @@ import { randomBytes } from "node:crypto";
 
 dotenv.config();
 
-// Brand-neutral env names (UPSTREAM_*) — 自動 fallback 到舊的 RAGIC_* 變數名
-// 讓 .env.demo / .env.example 用 brand-neutral 名稱，env.ts 內部 key 不變
-// 兩邊都可填；若都填以 UPSTREAM_* 為準，但實務上不該同時設兩個同義變數
+// Brand-neutral env names (UPSTREAM_*)：demo repo 對外文件避免綁死特定 SaaS 名稱；
+// runtime 仍沿用主系統的 RAGIC_* key，兩者自動互補。
 const ENV_ALIASES: Array<[string, string]> = [
   ["UPSTREAM_PROTOCOL", "RAGIC_PROTOCOL"],
   ["UPSTREAM_DOMAIN", "RAGIC_DOMAIN"],
@@ -56,6 +55,7 @@ const ENV_ALIASES: Array<[string, string]> = [
   ["UPSTREAM_CIRCUIT_FAILURE_THRESHOLD", "RAGIC_CIRCUIT_FAILURE_THRESHOLD"],
   ["UPSTREAM_CIRCUIT_COOLDOWN_MS", "RAGIC_CIRCUIT_COOLDOWN_MS"],
 ];
+
 for (const [neutral, legacy] of ENV_ALIASES) {
   if (process.env[neutral] !== undefined && process.env[legacy] === undefined) {
     process.env[legacy] = process.env[neutral];
@@ -64,12 +64,11 @@ for (const [neutral, legacy] of ENV_ALIASES) {
   }
 }
 
-// Demo mode：DEMO_MODE=true 時把 Ragic 上游切成記憶體 mock，並注入必填 env 預設值
-// 讓專案能在面試官的機器上 zero-config 啟動。實際的 mock 切換在 ragic/client.ts 出口處。
 const isDemoMode =
   process.env.DEMO_MODE === "true" ||
   process.env.DEMO_MODE === "1" ||
   process.env.DEMO_MODE === "yes";
+
 if (isDemoMode) {
   process.env.RAGIC_PROTOCOL ??= "https";
   process.env.RAGIC_DOMAIN ??= "demo.local";
@@ -77,8 +76,6 @@ if (isDemoMode) {
   process.env.RAGIC_FORM_104_PATH ??= "/default/forms8/104";
   process.env.RAGIC_FORM_105_PATH ??= "/default/forms8/105";
   process.env.RAGIC_FORM_16_PATH ??= "/default/c1/16";
-  // demo 下 write target = test，需要把 test 路徑也填上，否則 resolveWritePath 會回 null
-  // 直接指到跟 prod 同一張表（mock 內部用 normalizeFormPath 收斂掉 /test 後綴）
   process.env.RAGIC_FORM_104_TEST_PATH ??= "/default/forms8/104";
   process.env.RAGIC_FORM_105_TEST_PATH ??= "/default/forms8/105";
   process.env.RAGIC_FORM_16_TEST_PATH ??= "/default/c1/16";
@@ -97,22 +94,22 @@ if (isDemoMode) {
   process.env.RAGIC_SOURCE_MACHINE ??= "/default/forms51/1";
   process.env.RAGIC_SOURCE_OPERATOR ??= "/default/forms11/13";
   process.env.RAGIC_SOURCE_PROCESS ??= "/default/forms51/3";
-  // demo 預設直接展示 SQLite read-model + generation swap：
-  // 104/105 列表 / 詳情優先走本地 snapshot，server 啟動後再用第一輪 auto-sync 建好基準。
-  // 在第一輪 sync 完成前仍會 fallback 到 mock live 讀取，不會卡死。
   process.env.SQLITE_READ_FORMS ??= "104,105";
   process.env.SQLITE_AUTO_SYNC_FORMS ??= "104,105";
   process.env.SQLITE_AUTO_SYNC_ENABLED ??= "true";
   process.env.SQLITE_AUTO_SYNC_STARTUP_DELAY_MS ??= "1000";
-  // 啟動預熱不做；104 已切 SQLite read-model，full-cache prewarm 反而是舊路徑雜訊
   process.env.REPORT_FULL_CACHE_PREWARM_ON_START ??= "false";
   process.env.FORM16_SQLITE_AUTO_SYNC_ENABLED ??= "false";
+  process.env.FORM16_PLANNED_IDLE_SYNC_ENABLED ??= "false";
+  process.env.FORM16_WRITE_REVERIFY_ENABLED ??= "false";
+  process.env.RAGIC_FIELD_INDEX_AUTO_REFRESH_ENABLED ??= "false";
   process.env.RUNTIME_HEALTH_LOG_ENABLED ??= "false";
   process.env.FORM16_ORPHAN_CLEANUP_ENABLED ??= "false";
+  process.env.DEV_AI_ENABLED ??= "false";
+  process.env.DEV_AI_CONVERSATION_HISTORY_ENABLED ??= "false";
+  process.env.TRUST_PROXY ??= "1";
   process.env.CORS_ORIGIN ??= "http://localhost:5173,http://localhost:5174";
 
-  // Demo reset key：沒給就自動產生一支 16-byte hex（32 字），server log 提示
-  // 開發者可以直接複製進 X-Demo-Key header 呼 /api/__demo/reset
   if (!process.env.DEMO_RESET_KEY) {
     const generated = randomBytes(16).toString("hex");
     process.env.DEMO_RESET_KEY = generated;
@@ -123,16 +120,10 @@ if (isDemoMode) {
     );
   }
 
-  // Notice admin 帳密：demo 預設 demo / demo（SHA-256 hex of "demo"）
-  // 跟 .env.demo 一致；讓開發者模式登入可以 zero-config 用 demo/demo 進入
   process.env.NOTICE_ADMIN_USERNAME ??= "demo";
   process.env.NOTICE_ADMIN_PASSWORD_HASH ??=
     "2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
 
-  // Fly.io：FLY_APP_NAME 由 platform 注入，代表跑在 Fly 機器上。
-  // 預設的 ./.cache / ./.data 在容器內 working dir 不可寫（也不會持久），
-  // 把所有 SQLite / JSON 狀態檔指到 /data（fly.toml mounts 的 volume）才會在
-  // 部署 / 重啟 / scale 之間保留。已被 .env 或 Dockerfile ENV 設過的不覆蓋。
   if (process.env.FLY_APP_NAME) {
     process.env.SQLITE_DB_FILE ??= "/data/work-report-read-model.v1.sqlite3";
     process.env.REPORT_FULL_CACHE_FILE ??= "/data/reports-104-full.v1.json";
@@ -140,10 +131,19 @@ if (isDemoMode) {
     process.env.RAGIC_CALLBACK_TASK_STORE_FILE ??= "/data/ragic-callback-tasks.v1.json";
     process.env.WORK_REPORT_TASK_REGISTRY_STORE_FILE ??= "/data/work-report-task-registry.v1.json";
     process.env.SYSTEM_NOTICE_FILE ??= "/data/system-notice.v1.json";
+    process.env.FORM16_WRITE_REVERIFY_STORE_FILE ??= "/data/form16-write-reverify.v1.json";
+    process.env.DEV_AI_CONVERSATION_DB_FILE ??= "/data/dev-ai-conversations.v1.sqlite3";
   }
 }
 
 type WriteTarget = "test" | "prod";
+
+const DEFAULT_CORS_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5174",
+];
 
 function readRequiredEnv(key: string): string {
   const value = process.env[key];
@@ -198,22 +198,47 @@ function readStringListEnv(key: string, fallback: string[]): string[] {
   return list.length > 0 ? list : fallback;
 }
 
+function readTrustProxyEnv(): boolean | number | string {
+  const value = process.env.TRUST_PROXY;
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+
+  const numeric = Number(normalized);
+  if (Number.isInteger(numeric) && numeric >= 0) {
+    return numeric;
+  }
+
+  return value.trim();
+}
+
 function readCorsOriginsEnv(): string[] {
   const multiValue = process.env.CORS_ORIGINS;
   if (multiValue) {
-    return readStringListEnv("CORS_ORIGINS", ["http://localhost:5173"]);
+    return readStringListEnv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS);
   }
 
   const singleOrCsvValue = process.env.CORS_ORIGIN;
   if (!singleOrCsvValue) {
-    return ["http://localhost:5173"];
+    return DEFAULT_CORS_ORIGINS;
   }
 
   const list = singleOrCsvValue
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-  return list.length > 0 ? list : ["http://localhost:5173"];
+  return list.length > 0 ? list : DEFAULT_CORS_ORIGINS;
 }
 
 function readWriteTargetEnv(): WriteTarget {
@@ -224,19 +249,120 @@ function readWriteTargetEnv(): WriteTarget {
   return "test";
 }
 
+const legacyRagicGlobalRatePerSecond = Math.max(
+  1,
+  Math.trunc(readNumberEnv("RAGIC_GLOBAL_RATE_PER_SECOND", 8))
+);
+const legacyRagicGlobalBurstCapacity = Math.max(
+  1,
+  Math.trunc(readNumberEnv("RAGIC_GLOBAL_BURST_CAPACITY", 12))
+);
+const defaultRagicBackgroundRatePerSecond = Math.max(
+  1,
+  Math.floor(legacyRagicGlobalRatePerSecond / 4)
+);
+const defaultRagicForegroundRatePerSecond = Math.max(
+  1,
+  legacyRagicGlobalRatePerSecond - defaultRagicBackgroundRatePerSecond
+);
+const defaultRagicBackgroundBurstCapacity = Math.max(
+  1,
+  Math.floor(legacyRagicGlobalBurstCapacity / 4)
+);
+const defaultRagicForegroundBurstCapacity = Math.max(
+  1,
+  legacyRagicGlobalBurstCapacity - defaultRagicBackgroundBurstCapacity
+);
+const defaultRagicMutationRatePerSecond = Math.max(
+  1,
+  Math.floor(defaultRagicForegroundRatePerSecond / 2)
+);
+const defaultRagicMutationBurstCapacity = Math.max(
+  1,
+  Math.floor(defaultRagicForegroundBurstCapacity / 2)
+);
+
+// USE_TEST_API_KEY=true 時改用 TEST_API_KEY (測試用 service account)，
+// 用於把 backend 暫時切到測試身分跑整套流程（驗證 service account 權限是否齊全）。
+// 切換時印一行醒目警告，避免忘記改回去。
+function resolveRagicApiKey(): string {
+  const useTestKey = readBooleanEnv("USE_TEST_API_KEY", false);
+  const mainKey = readRequiredEnv("RAGIC_API_KEY");
+  if (!useTestKey) {
+    return mainKey;
+  }
+  const testKey = process.env.TEST_API_KEY ?? "";
+  if (!testKey) {
+    console.warn(
+      "[env] USE_TEST_API_KEY=true 但 TEST_API_KEY 為空，fallback 使用 RAGIC_API_KEY"
+    );
+    return mainKey;
+  }
+  console.warn(
+    "[env] !!! USE_TEST_API_KEY=true — Ragic API 改用 TEST_API_KEY (非主 key)，正式部署前記得改回 false"
+  );
+  if (!process.env.ADMIN_API_KEY) {
+    console.warn(
+      "[env] !!! USE_TEST_API_KEY=true 但 ADMIN_API_KEY 未設 — dev mode 重新抓取會 fallback 用 TEST_API_KEY，service account 通常無 admin tool 權限 → refresh 會炸。建議補 ADMIN_API_KEY=<個人帳號 key>"
+    );
+  }
+  return testKey;
+}
+
 export const env = {
   NODE_ENV: process.env.NODE_ENV ?? "development",
   DEMO_MODE: isDemoMode,
-  // 僅 demo mode 有意義；non-demo 留空字串避免外洩 / 誤呼叫
   DEMO_RESET_KEY: process.env.DEMO_RESET_KEY ?? "",
   PORT: readNumberEnv("PORT", 3000),
-  CORS_ORIGIN: process.env.CORS_ORIGIN ?? "http://localhost:5173",
+  TRUST_PROXY: readTrustProxyEnv(),
+  CORS_ORIGIN: process.env.CORS_ORIGIN ?? DEFAULT_CORS_ORIGINS.join(","),
   CORS_ORIGINS: readCorsOriginsEnv(),
   SERVE_FRONTEND_FROM_BACKEND: readBooleanEnv("SERVE_FRONTEND_FROM_BACKEND", false),
   FRONTEND_STATIC_DIR: process.env.FRONTEND_STATIC_DIR ?? "",
   RAGIC_PROTOCOL: readRequiredEnv("RAGIC_PROTOCOL"),
   RAGIC_DOMAIN: readRequiredEnv("RAGIC_DOMAIN"),
-  RAGIC_API_KEY: readRequiredEnv("RAGIC_API_KEY"),
+  // Ragic Builder 安裝目錄的 cust/def/app 根（只有 backend 跟 Ragic 同台才設；空=停用「直讀 .nui」）。
+  // server 例：D:\Ragic\RagicBuilder\cust\def\app。本機沒這目錄就留空。
+  RAGIC_BUILDER_PATH: process.env.RAGIC_BUILDER_PATH ?? "",
+  RAGIC_API_KEY: resolveRagicApiKey(),
+  /**
+   * Ragic admin tool 專用 key（dev mode 重新抓取欄位定義走 /sims/doc.jsp 這類
+   * admin-only endpoint）。Service account 一般沒 admin tool 權限，必須用
+   * 個人帳號 key。空值時 fallback 到 RAGIC_API_KEY（向後相容、原本沒換
+   * service account 的環境不用設）。
+   */
+  ADMIN_API_KEY: process.env.ADMIN_API_KEY ?? "",
+  /**
+   * dev mode 欄位索引 refresh 是否啟用 content hash skip。
+   * 預設 true：抓回 doc.jsp HTML 後算 sha1，跟上次成功 refresh 的 hash
+   * 比對命中 → 跳過 parse + replaceAll 的 25~30s。
+   * 設 false 是 escape hatch（debug / 強制重抓）。
+   */
+  RAGIC_FIELD_INDEX_HASH_SKIP: readBooleanEnv("RAGIC_FIELD_INDEX_HASH_SKIP", true),
+  /**
+   * dev mode 欄位索引背景自動 refresh。預設每 30 分鐘抓一次 doc.jsp 重建索引，
+   * 讓使用者開 dev modal 永遠讀到「最近一次背景更新」的本機 SQLite（<100ms），
+   * 不用開 modal 才等 refresh。hash skip 命中時背景 refresh 幾乎 no-op。
+   *   - ENABLED：總開關（false = 不背景跑，回到純手動「重新抓取」）
+   *   - INTERVAL_MS：間隔，預設 1800000(30min)，下限 60s
+   *   - STARTUP_DELAY_MS：啟動後延遲首次，避開啟動尖峰，預設 60s
+   */
+  RAGIC_FIELD_INDEX_AUTO_REFRESH_ENABLED: readBooleanEnv(
+    "RAGIC_FIELD_INDEX_AUTO_REFRESH_ENABLED",
+    true
+  ),
+  RAGIC_FIELD_INDEX_AUTO_REFRESH_INTERVAL_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("RAGIC_FIELD_INDEX_AUTO_REFRESH_INTERVAL_MS", 1_800_000))
+  ),
+  RAGIC_FIELD_INDEX_AUTO_REFRESH_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("RAGIC_FIELD_INDEX_AUTO_REFRESH_STARTUP_DELAY_MS", 60_000))
+  ),
+  RAGIC_FORMULA_SIBLINGS_SLOW_LOG_THRESHOLD_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("RAGIC_FORMULA_SIBLINGS_SLOW_LOG_THRESHOLD_MS", 1_000))
+  ),
   RAGIC_FORM_104_PATH: readRequiredEnv("RAGIC_FORM_104_PATH"),
   RAGIC_FORM_104_TEST_PATH: process.env.RAGIC_FORM_104_TEST_PATH ?? "",
   RAGIC_FORM_104_CLOSE_ACTION_BUTTON_ID: process.env.RAGIC_FORM_104_CLOSE_ACTION_BUTTON_ID ?? "",
@@ -258,6 +384,14 @@ export const env = {
   RAGIC_FORM_16_PROD_TYPE_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_PROD_TYPE_FIELD_ID"),
   RAGIC_FORM_16_REMARK_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_REMARK_FIELD_ID"),
   RAGIC_FORM_16_DATE_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_DATE_FIELD_ID"),
+  // 稼動表 Excel 匯出：使用者在 Ragic「發佈到網路」做好的完整下載網址（含 APIKey + view，view 已自己篩好）。
+  // 後端當 proxy 直接抓這條網址、原樣轉給前端下載，把含 key 的網址藏在後端、同事按鈕不必看到 key。
+  // 建議用 .csv 結尾的網址（稼動表「從文字檔」吃 CSV）；留空時匯出 endpoint 回明確錯誤、不影響主流程。
+  REPORT_EXCEL_CSV: process.env.REPORT_EXCEL_CSV ?? "",
+  REPORT_EXCEL_CSV_TIMEOUT_MS: Math.max(
+    10_000,
+    Math.trunc(readNumberEnv("REPORT_EXCEL_CSV_TIMEOUT_MS", 120_000))
+  ),
   RAGIC_ACTION_BUTTON_TIMEOUT_MS: Math.max(
     1_000,
     Math.trunc(readNumberEnv("RAGIC_ACTION_BUTTON_TIMEOUT_MS", 30_000))
@@ -281,7 +415,10 @@ export const env = {
   CACHE_CHECK_PERIOD: readNumberEnv("CACHE_CHECK_PERIOD", 60),
   SQLITE_ENABLED: readBooleanEnv("SQLITE_ENABLED", true),
   SQLITE_READ_ENABLED: readBooleanEnv("SQLITE_READ_ENABLED", true),
-  SQLITE_READ_FORMS: readStringListEnv("SQLITE_READ_FORMS", ["105"]),
+  SQLITE_READ_FORMS: readStringListEnv("SQLITE_READ_FORMS", ["104", "105"]),
+  // snapshot 超過此毫秒數未更新（全量 sync 與 callback 都會推進 snapshotAt）
+  // 即視為過舊 → 回退 Ragic 直讀，避免背景同步默默掛掉後使用者持續看舊資料
+  // 而不自知。0 = 停用檢查。
   SQLITE_READ_MAX_STALENESS_MS: Math.max(
     0,
     Math.trunc(readNumberEnv("SQLITE_READ_MAX_STALENESS_MS", 2 * 60 * 60 * 1000))
@@ -295,6 +432,16 @@ export const env = {
   SQLITE_AUTO_SYNC_ENABLED: readBooleanEnv("SQLITE_AUTO_SYNC_ENABLED", false),
   SQLITE_AUTO_SYNC_FORMS: readStringListEnv("SQLITE_AUTO_SYNC_FORMS", []),
   FORM16_SQLITE_AUTO_SYNC_ENABLED: readBooleanEnv("FORM16_SQLITE_AUTO_SYNC_ENABLED", true),
+  // 計畫停機統計 SQLite 同步：背景定時撈近半年 (P)計畫停機分進 SQLite，讓圖表查 SQLite 秒回。
+  FORM16_PLANNED_IDLE_SYNC_ENABLED: readBooleanEnv("FORM16_PLANNED_IDLE_SYNC_ENABLED", true),
+  FORM16_PLANNED_IDLE_SYNC_INTERVAL_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("FORM16_PLANNED_IDLE_SYNC_INTERVAL_MS", 30 * 60 * 1000))
+  ),
+  FORM16_PLANNED_IDLE_SYNC_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("FORM16_PLANNED_IDLE_SYNC_STARTUP_DELAY_MS", 120_000))
+  ),
   SQLITE_AUTO_SYNC_INTERVAL_MS: Math.max(
     60_000,
     Math.trunc(readNumberEnv("SQLITE_AUTO_SYNC_INTERVAL_MS", 30 * 60 * 1000))
@@ -310,6 +457,10 @@ export const env = {
   RAGIC_SYNC_READ_CONCURRENCY: Math.max(
     1,
     Math.trunc(readNumberEnv("RAGIC_SYNC_READ_CONCURRENCY", 4))
+  ),
+  RAGIC_MUTATION_READ_CONCURRENCY: Math.max(
+    1,
+    Math.trunc(readNumberEnv("RAGIC_MUTATION_READ_CONCURRENCY", 4))
   ),
   RAGIC_BACKGROUND_READ_CONCURRENCY: Math.max(
     1,
@@ -333,19 +484,114 @@ export const env = {
     1_000,
     Math.trunc(readNumberEnv("RAGIC_BACKGROUND_READ_TIMEOUT_MS", 30_000))
   ),
-  // 全域 token bucket 限制每秒打 Ragic 上限。所有 lane 的請求都要先過這個閘
-  // 避免 user(12) + sync(4) + background(4) + write(2) = 22 個同時 burst 打爆 Ragic
-  RAGIC_GLOBAL_RATE_PER_SECOND: Math.max(
-    1,
-    Math.trunc(readNumberEnv("RAGIC_GLOBAL_RATE_PER_SECOND", 8))
+  RAGIC_MUTATION_READ_TIMEOUT_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("RAGIC_MUTATION_READ_TIMEOUT_MS", 10_000))
   ),
-  RAGIC_GLOBAL_BURST_CAPACITY: Math.max(
+  RAGIC_MUTATION_READ_MAX_RETRIES: Math.max(
+    0,
+    Math.trunc(readNumberEnv("RAGIC_MUTATION_READ_MAX_RETRIES", 1))
+  ),
+  WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS: Math.max(
+    250,
+    Math.trunc(readNumberEnv("WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS", 1_500))
+  ),
+  // 舊版總預算設定保留為相容欄位；實際 runtime 已拆成 foreground/mutation/background
+  // 三個 bucket，避免背景同步或一般 refresh 吃掉 mutation precondition 的 token。
+  RAGIC_GLOBAL_RATE_PER_SECOND: legacyRagicGlobalRatePerSecond,
+  RAGIC_GLOBAL_BURST_CAPACITY: legacyRagicGlobalBurstCapacity,
+  RAGIC_FOREGROUND_RATE_PER_SECOND: Math.max(
     1,
-    Math.trunc(readNumberEnv("RAGIC_GLOBAL_BURST_CAPACITY", 12))
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_FOREGROUND_RATE_PER_SECOND",
+        defaultRagicForegroundRatePerSecond
+      )
+    )
+  ),
+  RAGIC_FOREGROUND_BURST_CAPACITY: Math.max(
+    1,
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_FOREGROUND_BURST_CAPACITY",
+        defaultRagicForegroundBurstCapacity
+      )
+    )
+  ),
+  RAGIC_MUTATION_RATE_PER_SECOND: Math.max(
+    1,
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_MUTATION_RATE_PER_SECOND",
+        defaultRagicMutationRatePerSecond
+      )
+    )
+  ),
+  RAGIC_MUTATION_BURST_CAPACITY: Math.max(
+    1,
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_MUTATION_BURST_CAPACITY",
+        defaultRagicMutationBurstCapacity
+      )
+    )
+  ),
+  RAGIC_BACKGROUND_RATE_PER_SECOND: Math.max(
+    1,
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_BACKGROUND_RATE_PER_SECOND",
+        defaultRagicBackgroundRatePerSecond
+      )
+    )
+  ),
+  RAGIC_BACKGROUND_BURST_CAPACITY: Math.max(
+    1,
+    Math.trunc(
+      readNumberEnv(
+        "RAGIC_BACKGROUND_BURST_CAPACITY",
+        defaultRagicBackgroundBurstCapacity
+      )
+    )
   ),
   RAGIC_WRITE_TIMEOUT_MS: Math.max(
     1_000,
     Math.trunc(readNumberEnv("RAGIC_WRITE_TIMEOUT_MS", 30_000))
+  ),
+  FORM16_WRITE_VERIFY_TIMEOUT_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("FORM16_WRITE_VERIFY_TIMEOUT_MS", 10_000))
+  ),
+  FORM16_WRITE_VERIFY_MAX_RETRIES: Math.max(
+    0,
+    Math.trunc(readNumberEnv("FORM16_WRITE_VERIFY_MAX_RETRIES", 0))
+  ),
+  FORM16_WRITE_REVERIFY_ENABLED: readBooleanEnv("FORM16_WRITE_REVERIFY_ENABLED", true),
+  FORM16_WRITE_REVERIFY_STORE_FILE:
+    process.env.FORM16_WRITE_REVERIFY_STORE_FILE ?? "./.data/form16-write-reverify.v1.json",
+  FORM16_WRITE_REVERIFY_INTERVAL_MS: Math.max(
+    10_000,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_INTERVAL_MS", 60_000))
+  ),
+  FORM16_WRITE_REVERIFY_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_STARTUP_DELAY_MS", 30_000))
+  ),
+  FORM16_WRITE_REVERIFY_MAX_PER_RUN: Math.max(
+    1,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_MAX_PER_RUN", 20))
+  ),
+  FORM16_WRITE_REVERIFY_MAX_ATTEMPTS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_MAX_ATTEMPTS", 6))
+  ),
+  FORM16_WRITE_REVERIFY_TIMEOUT_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_TIMEOUT_MS", 30_000))
+  ),
+  FORM16_WRITE_REVERIFY_MAX_RETRIES: Math.max(
+    0,
+    Math.trunc(readNumberEnv("FORM16_WRITE_REVERIFY_MAX_RETRIES", 1))
   ),
   FORM16_SQLITE_REFRESH_INTERVAL_MS: Math.max(
     10_000,
@@ -415,6 +661,14 @@ export const env = {
     "REPORT_FULL_CACHE_PREWARM_ON_START",
     true
   ),
+  WORK_REPORT_OPTIONS_PREWARM_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("WORK_REPORT_OPTIONS_PREWARM_STARTUP_DELAY_MS", 120_000))
+  ),
+  WORK_REPORT_OPTIONS_PREWARM_BETWEEN_FORMS_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("WORK_REPORT_OPTIONS_PREWARM_BETWEEN_FORMS_DELAY_MS", 10_000))
+  ),
   REPORT_FULL_CACHE_MAX_RECORDS: Math.max(
     1000,
     Math.trunc(readNumberEnv("REPORT_FULL_CACHE_MAX_RECORDS", 20000))
@@ -472,6 +726,113 @@ export const env = {
     100,
     Math.trunc(readNumberEnv("WORK_REPORT_TASK_REGISTRY_HISTORY_LIMIT", 5000))
   ),
+  DEV_AI_ENABLED: readBooleanEnv("DEV_AI_ENABLED", false),
+  DEV_AI_PROVIDER: process.env.DEV_AI_PROVIDER?.trim() || "google",
+  GOOGLE_GEMINI_API_KEY: process.env.GOOGLE_GEMINI_API_KEY?.trim() ?? "",
+  GOOGLE_GEMINI_MODEL: process.env.GOOGLE_GEMINI_MODEL?.trim() || "gemini-3.5-flash",
+  GOOGLE_GEMINI_FAST_MODEL: process.env.GOOGLE_GEMINI_FAST_MODEL?.trim() || "",
+  GOOGLE_GEMINI_THINKING_LEVEL:
+    process.env.GOOGLE_GEMINI_THINKING_LEVEL?.trim() || "minimal",
+  GOOGLE_GEMINI_STORE_INTERACTIONS: readBooleanEnv(
+    "GOOGLE_GEMINI_STORE_INTERACTIONS",
+    false
+  ),
+  DEV_AI_MAX_CONTEXT_CHARS: Math.max(
+    4_000,
+    Math.trunc(readNumberEnv("DEV_AI_MAX_CONTEXT_CHARS", 24_000))
+  ),
+  DEV_AI_CHAT_MAX_CONTEXT_CHARS: Math.max(
+    4_000,
+    Math.trunc(readNumberEnv("DEV_AI_CHAT_MAX_CONTEXT_CHARS", 16_000))
+  ),
+  DEV_AI_MAX_OUTPUT_TOKENS: Math.max(
+    256,
+    Math.trunc(readNumberEnv("DEV_AI_MAX_OUTPUT_TOKENS", 2_048))
+  ),
+  DEV_AI_CHAT_MAX_OUTPUT_TOKENS: Math.max(
+    256,
+    Math.trunc(readNumberEnv("DEV_AI_CHAT_MAX_OUTPUT_TOKENS", 1_024))
+  ),
+  DEV_AI_REQUEST_TIMEOUT_MS: Math.max(
+    5_000,
+    Math.trunc(readNumberEnv("DEV_AI_REQUEST_TIMEOUT_MS", 30_000))
+  ),
+  DEV_AI_MAX_CONCURRENT_REQUESTS: Math.max(
+    1,
+    Math.min(8, Math.trunc(readNumberEnv("DEV_AI_MAX_CONCURRENT_REQUESTS", 2)))
+  ),
+  DEV_AI_SUGGEST_RATE_LIMIT_PER_MINUTE: Math.max(
+    1,
+    Math.trunc(readNumberEnv("DEV_AI_SUGGEST_RATE_LIMIT_PER_MINUTE", 6))
+  ),
+  DEV_AI_KNOWLEDGE_DIR:
+    process.env.DEV_AI_KNOWLEDGE_DIR?.trim() || "./.data/dev-ai/knowledge",
+  DEV_AI_KNOWLEDGE_MAX_ITEMS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("DEV_AI_KNOWLEDGE_MAX_ITEMS", 8))
+  ),
+  DEV_AI_KNOWLEDGE_CACHE_TTL_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("DEV_AI_KNOWLEDGE_CACHE_TTL_MS", 15_000))
+  ),
+  DEV_AI_APPROVED_EXAMPLES_FILE:
+    process.env.DEV_AI_APPROVED_EXAMPLES_FILE?.trim() ||
+    "./.data/dev-ai/knowledge/approved-examples.jsonl",
+  DEV_AI_COMPILED_KNOWLEDGE_DIR:
+    process.env.DEV_AI_COMPILED_KNOWLEDGE_DIR?.trim() ||
+    "./.data/dev-ai/knowledge/compiled",
+  DEV_AI_CONVERSATION_HISTORY_ENABLED: readBooleanEnv(
+    "DEV_AI_CONVERSATION_HISTORY_ENABLED",
+    false
+  ),
+  DEV_AI_CONVERSATION_DB_FILE:
+    process.env.DEV_AI_CONVERSATION_DB_FILE?.trim() ||
+    "./.data/dev-ai/conversations.v1.sqlite3",
+  DEV_AI_THREAD_CONTEXT_MESSAGES: Math.max(
+    0,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_CONTEXT_MESSAGES", 12))
+  ),
+  DEV_AI_THREAD_LIST_LIMIT: Math.max(
+    1,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_LIST_LIMIT", 50))
+  ),
+  DEV_AI_THREAD_DETAIL_MESSAGE_LIMIT: Math.max(
+    20,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_DETAIL_MESSAGE_LIMIT", 200))
+  ),
+  DEV_AI_THREAD_DETAIL_ARTIFACT_LIMIT: Math.max(
+    20,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_DETAIL_ARTIFACT_LIMIT", 100))
+  ),
+  DEV_AI_MAX_THREADS_PER_ACTOR: Math.max(
+    10,
+    Math.trunc(readNumberEnv("DEV_AI_MAX_THREADS_PER_ACTOR", 200))
+  ),
+  DEV_AI_MAX_MESSAGES_PER_THREAD: Math.max(
+    20,
+    Math.trunc(readNumberEnv("DEV_AI_MAX_MESSAGES_PER_THREAD", 300))
+  ),
+  DEV_AI_MAX_ARTIFACTS_PER_THREAD: Math.max(
+    20,
+    Math.trunc(readNumberEnv("DEV_AI_MAX_ARTIFACTS_PER_THREAD", 150))
+  ),
+  DEV_AI_THREAD_RETENTION_DAYS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_RETENTION_DAYS", 180))
+  ),
+  DEV_AI_ARCHIVED_THREAD_RETENTION_DAYS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("DEV_AI_ARCHIVED_THREAD_RETENTION_DAYS", 30))
+  ),
+  DEV_AI_THREAD_SUMMARY_ENABLED: readBooleanEnv(
+    "DEV_AI_THREAD_SUMMARY_ENABLED",
+    true
+  ),
+  DEV_AI_THREAD_SUMMARY_AFTER_MESSAGES: Math.max(
+    2,
+    Math.trunc(readNumberEnv("DEV_AI_THREAD_SUMMARY_AFTER_MESSAGES", 2))
+  ),
+  DEV_AI_STORE_RAW_OUTPUT: readBooleanEnv("DEV_AI_STORE_RAW_OUTPUT", false),
   SYSTEM_NOTICE_FILE:
     process.env.SYSTEM_NOTICE_FILE ?? "./.data/system-notice.v1.json",
   NOTICE_ADMIN_USERNAME: process.env.NOTICE_ADMIN_USERNAME ?? "",
@@ -479,6 +840,18 @@ export const env = {
   NOTICE_TOKEN_TTL_MINUTES: Math.max(
     5,
     Math.trunc(readNumberEnv("NOTICE_TOKEN_TTL_MINUTES", 10080))
+  ),
+  NOTICE_LOGIN_MAX_FAILURES: Math.max(
+    1,
+    Math.trunc(readNumberEnv("NOTICE_LOGIN_MAX_FAILURES", 8))
+  ),
+  NOTICE_LOGIN_WINDOW_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("NOTICE_LOGIN_WINDOW_MS", 15 * 60 * 1000))
+  ),
+  NOTICE_LOGIN_LOCK_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("NOTICE_LOGIN_LOCK_MS", 15 * 60 * 1000))
   ),
   // Form 16 孤兒背景清理：預設關閉，確認 2A/2B/2C 上線穩定後再手動 env 打開
   FORM16_ORPHAN_CLEANUP_ENABLED: readBooleanEnv("FORM16_ORPHAN_CLEANUP_ENABLED", false),

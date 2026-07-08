@@ -319,6 +319,40 @@
   margin-top: 4px;
 }
 
+.itduty-hero-card__notes {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: var(--it-bg-primary);
+  border: var(--it-border-hairline) solid var(--it-border-subtle);
+  border-radius: var(--it-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.itduty-hero-card__note-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.itduty-hero-card__note-date {
+  color: var(--it-accent-strong);
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  flex-shrink: 0;
+}
+
+.itduty-hero-card__note-text {
+  color: var(--it-text-default);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 /* === Month calendar === */
 
 .itduty-calendar {
@@ -391,6 +425,10 @@
 .itduty-calendar__day-cell {
   position: relative;
   min-height: 56px;
+  /* min-width: 0 必加 — Grid 的 1fr 預設 minmax(auto, 1fr)，內部
+   * 有 white-space: nowrap 的文字（如長假日名）會把 auto 撐開
+   * → 整列被推爆。設 0 後 1fr 才會誠實壓縮 */
+  min-width: 0;
   padding: 4px 6px;
   border: var(--it-border-hairline) solid var(--it-border-subtle);
   border-radius: var(--it-radius-sm);
@@ -466,19 +504,35 @@
   color: var(--it-warn);
 }
 
+.itduty-calendar__day-note-mark {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--it-accent);
+  /* 半透明深色 ring 對任意背景（normal / holiday / weekend / today）都有對比 */
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+
 .itduty-calendar__day-number {
   line-height: 22px;
   color: var(--it-text-default);
 }
 
 .itduty-calendar__day-holiday-mark {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   font-size: 10px;
   color: var(--it-warn);
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  word-break: break-word;
   margin-top: 2px;
+  line-height: 1.25;
 }
 
 .itduty-calendar__duty-cell {
@@ -1032,6 +1086,34 @@
   font-size: 14px;
   font-weight: 500;
   color: var(--it-text-strong);
+}
+
+.itduty-modal-form__divider {
+  border: 0;
+  border-top: var(--it-border-hairline) solid var(--it-border-subtle);
+  margin: 18px 0 12px;
+}
+
+.itduty-modal-form__section-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--it-text-strong);
+  margin-bottom: 4px;
+}
+
+.itduty-modal-form__section-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--it-text-muted);
+}
+
+.itduty-modal-form__char-counter {
+  display: block;
+  text-align: right;
+  font-size: 11px;
+  color: var(--it-text-muted);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 .itduty-modal-form__hint {

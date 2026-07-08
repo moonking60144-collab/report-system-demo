@@ -226,13 +226,32 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.05em;
   color: #1a3a5c;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
 }
 
+.app-version-tag {
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #94a3b8;
+  font-family: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+/* chips 列獨立成 title-layer 的全寬 grid 項，6 顆同列、開發者模式靠右 */
 .page-view-switch {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 0.35rem;
   flex-wrap: wrap;
+}
+
+.page-view-chip--push-right {
+  margin-left: auto;
 }
 
 .page-view-chip {
@@ -375,7 +394,7 @@ h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
+  width: 44px;
   height: 34px;
   border-radius: 10px;
   border: 1px solid #cbd5e1;

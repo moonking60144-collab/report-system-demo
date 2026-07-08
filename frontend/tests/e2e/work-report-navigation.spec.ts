@@ -2,28 +2,30 @@ import { expect, test } from "@playwright/test";
 
 const OPERATOR_GROUP_STORAGE_KEY = "work-report:operator-group-preference:v1";
 const PENDING_MUTATION_REPLAY_STORAGE_KEY = "work-report:pending-mutation-replay:v1";
+const INLINE_EDITABLE_DETAIL_URL =
+  "/reports/104/17382?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes";
 
 const MOCK_OPERATOR_OPTIONS_WITH_GROUPS = [
   {
     value: "TR0001",
-    label: "TR0001 - Process A #1",
-    display: "Process A #1",
-    operatorGroupKey: "DEPT-PROCA",
-    operatorGroupLabel: "DEPT-PROCA",
+    label: "TR0001 - 搓牙甲",
+    display: "搓牙甲",
+    operatorGroupKey: "C02搓牙組",
+    operatorGroupLabel: "C02搓牙組",
   },
   {
     value: "TR0002",
-    label: "TR0002 - Process A #2",
-    display: "Process A #2",
-    operatorGroupKey: "DEPT-PROCA",
-    operatorGroupLabel: "DEPT-PROCA",
+    label: "TR0002 - 搓牙乙",
+    display: "搓牙乙",
+    operatorGroupKey: "C02搓牙組",
+    operatorGroupLabel: "C02搓牙組",
   },
   {
     value: "HD0001",
     label: "HD0001 - 鍛造甲",
     display: "鍛造甲",
-    operatorGroupKey: "DEPT-FORGE",
-    operatorGroupLabel: "DEPT-FORGE",
+    operatorGroupKey: "C01鍛造組",
+    operatorGroupLabel: "C01鍛造組",
   },
   {
     value: "MG0001",
@@ -81,6 +83,54 @@ async function dismissSystemNoticeIfPresent(page: import("@playwright/test").Pag
   if (await dismissButton.count()) {
     await dismissButton.first().click({ force: true });
   }
+}
+
+async function scrollDetailTableToBottom(page: import("@playwright/test").Page) {
+  const tableScroll = page.locator(".detail-table-scroll");
+  await expect(tableScroll).toBeVisible();
+  await tableScroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect
+    .poll(async () =>
+      page.locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']").count()
+    )
+    .toBeGreaterThan(0);
+}
+
+async function getLocatorVerticalBounds(locator: import("@playwright/test").Locator) {
+  return locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      top: rect.top,
+      bottom: rect.bottom,
+      height: rect.height,
+    };
+  });
+}
+
+async function getBatchCreateDraftCount(page: import("@playwright/test").Page) {
+  const summaryText = await page.locator(".detail-table-head-summary").textContent();
+  const matched = (summaryText ?? "").match(/Batch Create \((\d+) rows?\)|批次新增中（(\d+) 列）/);
+  return Number(matched?.[1] ?? matched?.[2] ?? 0);
+}
+
+async function setColumnCheckbox(
+  panel: import("@playwright/test").Locator,
+  columnKey: string,
+  checked: boolean
+) {
+  const checkbox = panel.locator(`input[data-column-key="${columnKey}"]`);
+  await expect(checkbox).toHaveCount(1);
+  await checkbox.evaluate((element, nextChecked) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new Error("column control is not a checkbox input");
+    }
+    if (element.checked !== nextChecked) {
+      element.click();
+    }
+  }, checked);
+  await expect(checkbox).toBeChecked({ checked });
 }
 
 async function installMockRealtimeBootReload(page: import("@playwright/test").Page) {
@@ -256,12 +306,12 @@ test.describe("work-report navigation stability", () => {
     );
     await dismissSystemNoticeIfPresent(page);
 
-    await page.getByRole("tab", { name: /(Process A Report|Thread Rolling)/ }).click();
+    await page.getByRole("tab", { name: /(搓牙報工|Thread Rolling)/ }).click();
     await expect(
       page.getByRole("button", { name: /(未結案可執行|Open Runnable)/ })
     ).toHaveClass(/is-active/);
 
-    await page.getByRole("tab", { name: /(Process B Report|Heading)/ }).click();
+    await page.getByRole("tab", { name: /(打頭報工|Heading)/ }).click();
     await expect(
       page.getByRole("button", { name: /(未結案工單|Open Work Orders)/ })
     ).toHaveClass(/is-active/);
@@ -292,7 +342,7 @@ test.describe("work-report navigation stability", () => {
     );
     await dismissSystemNoticeIfPresent(page);
 
-    await page.getByRole("tab", { name: /(Process A Report|Thread Rolling)/ }).click();
+    await page.getByRole("tab", { name: /(搓牙報工|Thread Rolling)/ }).click();
     const workOrderButton = page.locator(".ragic-table .ant-table-tbody .work-order-cell-button").first();
     await workOrderButton.click({ force: true });
 
@@ -318,7 +368,7 @@ test.describe("work-report navigation stability", () => {
     await expect(targetRow.locator("[data-inline-editor-key='inputOptions']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='shiftType']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='countSetupTimeFlag']")).toHaveCount(1);
-    await expect(targetRow.locator("[data-inline-editor-key='setupTimeStandardHours']")).toHaveCount(1);
+    await expect(targetRow.locator("[data-inline-editor-key='setupTimeStandardHours']")).toHaveCount(0);
     await expect(targetRow.locator("[data-inline-editor-key='setupLossQtyPerPcs']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='processLossQtyPerPcs']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='totalContainerQty']")).toHaveCount(1);
@@ -462,9 +512,8 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("明細表底部會保留空白新增列，點一下就進入 inline create", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+    await scrollDetailTableToBottom(page);
 
     const placeholderRows = page.locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']");
     await expect(placeholderRows).toHaveCount(3);
@@ -477,23 +526,129 @@ test.describe("work-report navigation stability", () => {
     await expect(targetPlaceholderRow.locator("[data-inline-editor-key='machineId']")).toHaveCount(1);
     await expect(targetPlaceholderRow.locator("[data-inline-editor-key='operatorId']")).toHaveCount(1);
     await expect(targetPlaceholderRow.locator("[data-inline-editor-key='productionQty']")).toHaveCount(1);
-    await expect(targetPlaceholderRow.getByRole("button", { name: /(儲存|Save)/ })).toBeVisible();
+    await expect(page.locator(".detail-batch-create-save-btn")).toBeVisible();
   });
 
-  test("底部空白新增列儲存時會走 create 背景任務", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+  test("底部 inline 新增列選取下拉後不會被 virtual scroll 拉動", async ({ page }) => {
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+    await scrollDetailTableToBottom(page);
+
+    const targetPlaceholderRow = page
+      .locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']")
+      .first();
+    await targetPlaceholderRow.locator("td").first().click({ force: true });
+    await expect(targetPlaceholderRow).toHaveClass(/is-inline-editing/);
+    await targetPlaceholderRow.locator("[data-inline-editor-key='date']").fill("2222-02-22");
+    await targetPlaceholderRow.locator("[data-inline-editor-key='productionQty']").fill("25");
+
+    await page.waitForTimeout(250);
+    const before = await getLocatorVerticalBounds(targetPlaceholderRow);
+    await targetPlaceholderRow.locator("[data-inline-editor-key='inputOptions']").click();
+    const dialog = page.getByRole("dialog", { name: /(選擇預設報工時間|Select Input Option)/ });
+    await expect(dialog).toBeVisible();
+    await dialog.locator(".detail-picker-option[data-option-value='加班2H']").click();
+    await expect(dialog).toHaveCount(0);
+    await page.waitForTimeout(250);
+    const after = await getLocatorVerticalBounds(targetPlaceholderRow);
+
+    expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(2);
+    expect(Math.abs(after.bottom - before.bottom)).toBeLessThanOrEqual(2);
+  });
+
+  test("底部 inline 新增列 fill handle 往下拖會跟著 scroll 並延伸下方新增列", async ({ page }) => {
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+    await scrollDetailTableToBottom(page);
+
+    const targetPlaceholderRow = page
+      .locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']")
+      .first();
+    await targetPlaceholderRow.locator("td").first().click({ force: true });
+    await expect(targetPlaceholderRow).toHaveClass(/is-inline-editing/);
+    await targetPlaceholderRow.locator("[data-inline-editor-key='date']").fill("2222-02-22");
+    await targetPlaceholderRow.locator("[data-inline-editor-key='productionQty']").fill("25");
+
+    const handle = targetPlaceholderRow.locator("td[data-inline-cell-key='date'] .detail-inline-fill-handle");
+    await expect(handle).toBeVisible();
+    const handleBox = await handle.boundingBox();
+    const tableBox = await page.locator(".detail-table-scroll").boundingBox();
+    if (!handleBox || !tableBox) {
+      throw new Error("missing fill handle or table bounds");
+    }
+    const beforeScrollTop = await page.locator(".detail-table-scroll").evaluate((element) => element.scrollTop);
+
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    for (let index = 0; index < 10; index += 1) {
+      await page.mouse.move(handleBox.x + handleBox.width / 2, tableBox.y + tableBox.height - 10, {
+        steps: 3,
+      });
+      await page.waitForTimeout(120);
+    }
+    await page.mouse.up();
+
+    const afterScrollTop = await page.locator(".detail-table-scroll").evaluate((element) => element.scrollTop);
+    const draftCount = await getBatchCreateDraftCount(page);
+    expect(afterScrollTop).toBeGreaterThan(beforeScrollTop);
+    expect(draftCount).toBeGreaterThan(1);
+    expect(draftCount).toBeLessThanOrEqual(20);
+  });
+
+  test("底部 inline 新增列 fill handle 往右拖不會觸發上下抖動", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 768 });
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+    await scrollDetailTableToBottom(page);
+
+    const targetPlaceholderRow = page
+      .locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']")
+      .first();
+    await targetPlaceholderRow.locator("td").first().click({ force: true });
+    await expect(targetPlaceholderRow).toHaveClass(/is-inline-editing/);
+    await targetPlaceholderRow.locator("[data-inline-editor-key='date']").fill("2222-02-22");
+    await targetPlaceholderRow.locator("[data-inline-editor-key='productionQty']").fill("25");
+
+    const handle = targetPlaceholderRow.locator("td[data-inline-cell-key='date'] .detail-inline-fill-handle");
+    await expect(handle).toBeVisible();
+    const handleBox = await handle.boundingBox();
+    const tableBox = await page.locator(".detail-table-scroll").boundingBox();
+    if (!handleBox || !tableBox) {
+      throw new Error("missing fill handle or table bounds");
+    }
+    const beforeBounds = await getLocatorVerticalBounds(targetPlaceholderRow);
+    const beforeScrollTop = await page.locator(".detail-table-scroll").evaluate((element) => element.scrollTop);
+
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    for (let index = 0; index < 14; index += 1) {
+      await page.mouse.move(tableBox.x + tableBox.width - 8, handleBox.y + handleBox.height / 2, {
+        steps: 4,
+      });
+      await page.waitForTimeout(120);
+    }
+    await page.mouse.up();
+
+    const afterBounds = await getLocatorVerticalBounds(targetPlaceholderRow);
+    const afterScrollTop = await page.locator(".detail-table-scroll").evaluate((element) => element.scrollTop);
+    const draftCount = await getBatchCreateDraftCount(page);
+
+    expect(afterScrollTop - beforeScrollTop).toBe(0);
+    expect(Math.abs(afterBounds.top - beforeBounds.top)).toBeLessThanOrEqual(2);
+    expect(Math.abs(afterBounds.bottom - beforeBounds.bottom)).toBeLessThanOrEqual(2);
+    expect(draftCount).toBe(1);
+  });
+
+  test("底部空白新增列儲存時會走 batch create 背景任務", async ({ page }) => {
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+    await scrollDetailTableToBottom(page);
 
     const targetPlaceholderRow = page
       .locator(".detail-subtable tbody tr[data-row-kind='create-placeholder']")
       .first();
 
-    const taskId = "create-task-inline-001";
+    const taskId = "batch-create-task-inline-001";
     let createRequestSeen = false;
     let taskPollCount = 0;
 
-    await page.route("**/api/forms/104/reports/26187?async=1", async (route) => {
+    await page.route("**/api/forms/104/reports/17382/batch-create", async (route) => {
       if (route.request().method() !== "POST") {
         await route.fallback();
         return;
@@ -508,17 +663,18 @@ test.describe("work-report navigation stability", () => {
             taskId,
             status: "pending",
             createdAt: "2026-03-16T10:00:00.000Z",
+            requestedCount: 1,
           },
           meta: {
             formId: "104",
-            entryId: "26187",
+            entryId: "17382",
             accepted: true,
           },
         }),
       });
     });
 
-    await page.route(`**/api/forms/104/reports/tasks/${taskId}`, async (route) => {
+    await page.route(`**/api/forms/104/tasks/${taskId}`, async (route) => {
       taskPollCount += 1;
       const status = taskPollCount < 2 ? "running" : "success";
       await route.fulfill({
@@ -528,12 +684,24 @@ test.describe("work-report navigation stability", () => {
           data: {
             taskId,
             formId: "104",
-            entryId: "26187",
-            queueKey: "104:26187",
+            entryId: "17382",
+            rowId: status === "success" ? "199999" : null,
+            taskType: "create-report-batch",
+            queueKey: "104:17382",
             status,
             createdAt: "2026-03-16T10:00:00.000Z",
+            startedAt: "2026-03-16T10:00:00.500Z",
+            finishedAt: status === "success" ? "2026-03-16T10:00:01.000Z" : null,
             updatedAt: "2026-03-16T10:00:01.000Z",
-            ...(status === "success" ? { result: { rowId: "199999" } } : {}),
+            message: status === "success" ? "批次新增完成（1/1）" : "批次新增背景任務處理中",
+            errorCode: null,
+            errorMessage: null,
+            actorClientId: "e2e-client",
+            actorTabId: "e2e-tab",
+            actorIp: null,
+            actorLabel: null,
+            source: null,
+            batchCreatedRowIds: status === "success" ? ["199999"] : [],
           },
           meta: {
             formId: "104",
@@ -546,34 +714,20 @@ test.describe("work-report navigation stability", () => {
     await targetPlaceholderRow.click({ force: true });
     await targetPlaceholderRow.locator("[data-inline-editor-key='date']").fill("2026-03-16");
 
-    const machineTrigger = targetPlaceholderRow.locator("[data-inline-editor-key='machineId']");
-    await machineTrigger.click();
-    const machineDialog = page.getByRole("dialog", { name: /(選擇機台|Select Machine)/ });
-    await expect(machineDialog).toBeVisible();
-    await machineDialog.locator(".detail-picker-option").first().click();
-    await expect(machineDialog).toHaveCount(0);
-
-    const operatorTrigger = targetPlaceholderRow.locator("[data-inline-editor-key='operatorId']");
-    await operatorTrigger.click();
-    const operatorDialog = page.getByRole("dialog", { name: /(選擇操作員|Select Operator)/ });
-    await expect(operatorDialog).toBeVisible();
-    await operatorDialog.locator(".detail-picker-option").first().click();
-    await expect(operatorDialog).toHaveCount(0);
-
     await targetPlaceholderRow.locator("[data-inline-editor-key='startTime']").fill("08:00");
     await targetPlaceholderRow.locator("[data-inline-editor-key='endTime']").fill("17:00");
     await targetPlaceholderRow.locator("[data-inline-editor-key='productionQty']").fill("25");
-    await targetPlaceholderRow.getByRole("button", { name: /(儲存|Save)/ }).click();
+    await page.locator(".detail-batch-create-save-btn").click();
 
     await expect
       .poll(() => (createRequestSeen ? "seen" : "pending"))
       .toBe("seen");
-    await expect(page.locator(".detail-system-status")).toContainText(/已受理新增|Create accepted/i);
+    await expect(page.locator(".detail-system-status")).toContainText(/已受理批次新增|Accepted batch create/i);
     await expect
       .poll(() => taskPollCount)
       .toBeGreaterThan(1);
     await expect(page.locator(".detail-system-status")).toContainText(
-      /已完成新增報工明細|Report detail created/i
+      /批次新增完成|Batch create/i
     );
   });
 
@@ -589,72 +743,69 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("隱藏單一可直編欄位後，不會再出現對應 editor", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
 
     await page.getByRole("button", { name: /(欄位|Columns)/ }).click();
     const panel = page.locator(".detail-column-settings-panel");
     await expect(panel).toBeVisible();
 
-    const qtyCheckbox = panel
-      .getByRole("checkbox", { name: /^(產量|Qty)$/ });
-    await qtyCheckbox.uncheck();
+    await setColumnCheckbox(panel, "productionQty", false);
 
     const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
     await targetRow.dblclick({ force: true });
 
     await expect(targetRow.locator("[data-inline-editor-key='inputOptions']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='shiftType']")).toHaveCount(1);
-    await expect(targetRow.locator("input[type='time']")).toHaveCount(2);
+    await expect(targetRow.locator("[data-inline-editor-key='startTime']")).toHaveCount(1);
+    await expect(targetRow.locator("[data-inline-editor-key='endTime']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='productionQty']")).toHaveCount(0);
   });
 
   test("若所有可直編欄位都被隱藏，雙擊列不進半套編輯", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
 
     await page.getByRole("button", { name: /(欄位|Columns)/ }).click();
     const panel = page.locator(".detail-column-settings-panel");
     await expect(panel).toBeVisible();
 
-    const editableLabels = [
-      /^(日期|Date)$/,
-      /^(機台|Machine)$/,
-      /^(操作員工號|Operator ID)$/,
-      /^(製程|Process)$/,
-      /^(預設報工時間|Input Options)$/,
-      /^(班別|Shift)$/,
-      /^(開工時間|Start Time)$/,
-      /^(完工時間|End Time)$/,
-      /^(扣除休息時間|Break Time)$/,
-      /^(產量|Qty)$/,
-      /^Count Setup Time計算架車時間\? \(v\)$/,
-      /^\[標準\]架車時間 \(Hr\)$/,
-      /^Setup Loss架車損耗\/PCS$/,
-      /^Process Loss製程損耗\/PCS$/,
-      /^Total Container Qty結案容器數$/,
-      /^Container Unit結案容器單位$/,
-      /^\(P\)Planned Idle計劃停機\/分$/,
-      /^\(S\)Unplanned Idle自主停機\/分$/,
-      /^\(M\)Absent or Training人員請假\.上課\/分$/,
-      /^\(C\)待料No Material\/分$/,
-      /^\(E\)Waiting for QC Approval 待判\/分$/,
-      /^\(Q\)Meeting 開會\/分$/,
-      /^\(N\)Cleaning打掃\/分$/,
-      /^RD SamplingRD件試樣\/分$/,
-      /^\(H\)Support Other Machines支援其他車台\/分$/,
-      /^\(D\)Machine Breakdown 機台損壞\/分$/,
-      /^\(K\)Machine Adjustment 機台調機\/分$/,
-      /^\(F\)Others 其他\/分$/,
-      /^\(B\)Waiting for Dies 待模\/分$/,
-      /^\(R\)Testing Dies 試模\/分$/,
+    const editableColumnKeys = [
+      "date",
+      "plannedIdle",
+      "machineId",
+      "operatorId",
+      "processCode",
+      "inputOptions",
+      "shiftType",
+      "startTime",
+      "endTime",
+      "breakTime",
+      "productionQty",
+      "remark",
+      "setupAdjustType",
+      "setupAdjustMinutes",
+      "countSetupTimeFlag",
+      "setupLossQtyPerPcs",
+      "processLossQtyPerPcs",
+      "totalContainerQty",
+      "containerUnit",
+      "plannedIdleMinutes",
+      "unplannedIdleMinutes",
+      "absentOrTrainingMinutes",
+      "noMaterialMinutes",
+      "waitingQcApprovalMinutes",
+      "meetingMinutes",
+      "cleaningMinutes",
+      "rdSamplingMinutes",
+      "supportOtherMachinesMinutes",
+      "machineBreakdownMinutes",
+      "machineAdjustmentMinutes",
+      "othersMinutes",
+      "waitingForDiesMinutes",
+      "testingDiesMinutes",
     ];
 
-    for (const labelPattern of editableLabels) {
-      const checkbox = panel.getByRole("checkbox", { name: labelPattern });
-      await checkbox.uncheck();
+    for (const columnKey of editableColumnKeys) {
+      await setColumnCheckbox(panel, columnKey, false);
     }
 
     const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
@@ -667,7 +818,8 @@ test.describe("work-report navigation stability", () => {
     await expect(targetRow.locator("[data-inline-editor-key='processCode']")).toHaveCount(0);
     await expect(targetRow.locator("[data-inline-editor-key='inputOptions']")).toHaveCount(0);
     await expect(targetRow.locator("[data-inline-editor-key='shiftType']")).toHaveCount(0);
-    await expect(targetRow.locator("input[type='time']")).toHaveCount(0);
+    await expect(targetRow.locator("[data-inline-editor-key='startTime']")).toHaveCount(0);
+    await expect(targetRow.locator("[data-inline-editor-key='endTime']")).toHaveCount(0);
     await expect(targetRow.locator("[data-inline-editor-key='productionQty']")).toHaveCount(0);
     await expect(targetRow.getByRole("button", { name: /(儲存|Save)/ })).toHaveCount(0);
   });
@@ -840,17 +992,15 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("顯示 remark 與 setup 欄位後，會進入第二階段直編", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
 
     await page.getByRole("button", { name: /(欄位|Columns)/ }).click();
     const panel = page.locator(".detail-column-settings-panel");
     await expect(panel).toBeVisible();
 
-    await panel.getByRole("checkbox", { name: /^(備註|Remark)$/ }).check();
-    await panel.getByRole("checkbox", { name: /^Setup\/Adjust架車\(BA\)or調機\(SA\)$/ }).check();
-    await panel.getByRole("checkbox", { name: /^Setup\/Adjust \(Min\)架\.調車\/分鐘$/ }).check();
+    await setColumnCheckbox(panel, "remark", true);
+    await setColumnCheckbox(panel, "setupAdjustType", true);
+    await setColumnCheckbox(panel, "setupAdjustMinutes", true);
 
     const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
     await targetRow.dblclick({ force: true });
@@ -860,27 +1010,63 @@ test.describe("work-report navigation stability", () => {
     await expect(targetRow.locator("[data-inline-editor-key='setupAdjustMinutes']")).toHaveCount(1);
   });
 
-  test("日期與 setup/container 欄位會進入後續階段直編，計畫停機維持 display-only", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+  test("Enter 會從 inline 欄位開啟 setup 類 picker，取消後焦點留在 trigger", async ({ page }) => {
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
+
+    await page.getByRole("button", { name: /(欄位|Columns)/ }).click();
+    const panel = page.locator(".detail-column-settings-panel");
+    await expect(panel).toBeVisible();
+
+    await setColumnCheckbox(panel, "remark", true);
+    await setColumnCheckbox(panel, "setupAdjustType", true);
+    await setColumnCheckbox(panel, "setupAdjustMinutes", true);
+
+    const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
+    await targetRow.dblclick({ force: true });
+
+    const remarkEditor = targetRow.locator("[data-inline-editor-key='remark']");
+    const setupAdjustTrigger = targetRow.locator("[data-inline-editor-key='setupAdjustType']");
+    const setupAdjustMinutesInput = targetRow.locator("[data-inline-editor-key='setupAdjustMinutes']");
+    const countSetupTimeTrigger = targetRow.locator("[data-inline-editor-key='countSetupTimeFlag']");
+
+    await remarkEditor.focus();
+    await remarkEditor.press("Enter");
+
+    const setupDialog = page.getByRole("dialog", { name: /(選擇架車或調機|Select Setup or Adjustment)/ });
+    await expect(setupDialog).toBeVisible();
+    await setupDialog.getByRole("button", { name: /(取消|Cancel)/ }).click();
+    await expect(setupDialog).toHaveCount(0);
+    await expect(setupAdjustTrigger).toBeFocused();
+
+    await setupAdjustMinutesInput.fill("15");
+    await setupAdjustMinutesInput.press("Enter");
+
+    const countSetupDialog = page.getByRole("dialog", {
+      name: /(選擇是否計算架車時間|Select Count Setup Time)/,
+    });
+    await expect(countSetupDialog).toBeVisible();
+    await countSetupDialog.getByRole("button", { name: /(取消|Cancel)/ }).click();
+    await expect(countSetupDialog).toHaveCount(0);
+    await expect(countSetupTimeTrigger).toBeFocused();
+  });
+
+  test("日期、計畫停機與 setup/container 欄位會進入後續階段直編", async ({ page }) => {
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
 
     const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
     await targetRow.dblclick({ force: true });
 
     await expect(targetRow.locator("[data-inline-editor-key='date']")).toHaveCount(1);
-    await expect(targetRow.locator("[data-inline-editor-key='setupTimeStandardHours']")).toHaveCount(1);
+    await expect(targetRow.locator("[data-inline-editor-key='setupTimeStandardHours']")).toHaveCount(0);
     await expect(targetRow.locator("[data-inline-editor-key='setupLossQtyPerPcs']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='processLossQtyPerPcs']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='totalContainerQty']")).toHaveCount(1);
     await expect(targetRow.locator("[data-inline-editor-key='containerUnit']")).toHaveCount(1);
-    await expect(targetRow.locator("[data-inline-editor-key='plannedIdle']")).toHaveCount(0);
+    await expect(targetRow.locator("[data-inline-editor-key='plannedIdle']")).toHaveCount(1);
   });
 
   test("linked 欄位會進入第三階段直編，operator 變更時會同步顯示姓名", async ({ page }) => {
-    await page.goto(
-      "/reports/104/26187?page=1&pageSize=25&landingPage=thread-rolling-104&topView=report&fStatus=%E6%9C%AA%E7%B5%90%E6%A1%88&fStartSchedule=yes&fMachine=W1"
-    );
+    await page.goto(INLINE_EDITABLE_DETAIL_URL);
 
     const targetRow = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0);
     await targetRow.dblclick({ force: true });
@@ -1028,7 +1214,7 @@ test.describe("work-report navigation stability", () => {
     await expect(operatorTrigger.locator(".detail-inline-picker-value")).toHaveText(String(nextOperatorValue));
   });
 
-  test("104 操作員群組預設為 Process A 組，切換後會記住並同步到新增明細", async ({ page }) => {
+  test("104 操作員群組預設為搓牙組，切換後會記住並同步到新增明細", async ({ page }) => {
     await resetOperatorGroupPreference(page);
     await mockOperatorOptionsWithGroups(page, "104");
     await page.goto(
@@ -1043,7 +1229,7 @@ test.describe("work-report navigation stability", () => {
 
     const dialog = page.getByRole("dialog", { name: /(選擇操作員|Select Operator)/ });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "DEPT-PROCA" })).toHaveClass(/is-active/);
+    await expect(dialog.getByRole("button", { name: "C02搓牙組" })).toHaveClass(/is-active/);
     await expect(dialog.locator(".detail-picker-option")).toHaveCount(3);
     await expect(dialog.locator(".detail-picker-option[data-option-value='TR0001']")).toBeVisible();
     await expect(dialog.locator(".detail-picker-option[data-option-value='TR0002']")).toBeVisible();
@@ -1109,7 +1295,7 @@ test.describe("work-report navigation stability", () => {
 
     const createPickerDialog = page.getByRole("dialog", { name: /(選擇操作員|Select Operator)/ });
     await expect(createPickerDialog).toBeVisible();
-    await expect(createPickerDialog.getByRole("button", { name: "DEPT-FORGE" })).toHaveClass(
+    await expect(createPickerDialog.getByRole("button", { name: "C01鍛造組" })).toHaveClass(
       /is-active/
     );
     await expect(

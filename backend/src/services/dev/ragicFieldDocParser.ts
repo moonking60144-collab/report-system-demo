@@ -32,7 +32,7 @@ import type {
 /** 把 <td> 內含 <br>、<b> 等簡單去除，只留純文字 */
 function stripHtmlTags(html: string): string {
   return html
-    .replace(/<br\s*\/?>/gi, "; ")
+    .replace(/\s*<br\s*\/?>\s*/gi, "; ")
     .replace(/<[^>]*>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
@@ -43,6 +43,27 @@ function stripHtmlTags(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * 移除「非 paramTable」的巢狀 table（欄位表的 td 偶爾整張塞一張 table）。
+ * 巢狀 table 的 </table>/</tr> 會讓後面非貪婪的 paramTable 抽取與 <tr> 切分
+ * 提早截斷、外層整列被吃掉，所以先迭代移除最內層、非 paramTable 的 table，
+ * 留 direct-child 結構再 parse。正常 doc 沒巢狀（table 數 === paramTable 數）
+ * 直接回傳，不跑迴圈，不影響 regex parser 的效能。
+ */
+function stripNestedTables(html: string): string {
+  const totalTables = (html.match(/<table\b/gi) || []).length;
+  const paramTables = (html.match(/<table\b[^>]*\bparamTable\b/gi) || []).length;
+  if (totalTables <= paramTables) return html;
+  const innerTable = /<table\b(?![^>]*\bparamTable\b)(?:(?!<table\b)[\s\S])*?<\/table>/gi;
+  let prev = "";
+  let cur = html;
+  while (cur !== prev) {
+    prev = cur;
+    cur = cur.replace(innerTable, "");
+  }
+  return cur;
 }
 
 /** 從一段 HTML 抓出第一個符合 regex 的 group 1，找不到回 null */
@@ -71,8 +92,12 @@ function parseFieldTable(tableHtml: string): ParsedRagicField[] {
       cells.push(stripHtmlTags(c[1] ?? ""));
     }
     if (cells.length < 4) continue;
-    const [pos, name, idRaw, type, note] = cells;
+    const [pos, name, idRaw, type] = cells;
     if (!idRaw || !/^\d+$/.test(idRaw)) continue;
+    // Ragic doc.jsp 表頭歷史上是 5 欄（pos/name/id/type/note），
+    // 但 2026 起多了「API 可寫入」「寫入格式」兩欄變 7 欄，
+    // 真正的「備註」永遠是最後一欄。取最後一欄當 note，未來再變動也兼容。
+    const note = cells.length >= 5 ? cells[cells.length - 1] : null;
     fields.push({
       pos: pos || null,
       name: name || idRaw,
@@ -119,6 +144,10 @@ function countMatches(html: string, re: RegExp): number {
  */
 export function parseRagicDocHtml(html: string): ParseRagicDocResult {
   const forms: ParsedRagicForm[] = [];
+
+  // 先抽掉巢狀 table，否則下面非貪婪的 paramTable 抽取與 <tr> 切分會被內層
+  // </table>/</tr> 提早截斷、外層欄位整列遺失（正常 doc 無巢狀，會 early-exit）。
+  html = stripNestedTables(html);
 
   const h3Count = countMatches(html, /<h3>[\s\S]*?<\/h3>/g);
   const h4Count = countMatches(html, /<h4[^>]*>[\s\S]*?<\/h4>/g);

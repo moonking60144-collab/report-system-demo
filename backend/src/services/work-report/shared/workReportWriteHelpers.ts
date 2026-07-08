@@ -2,7 +2,7 @@ import { AxiosError } from "axios";
 import { resolveWritePath } from "../../../config/env";
 import { ragicClient, RagicRecord, RagicWriteOptions } from "../../../ragic/client";
 import { FormConfig } from "../../../types/formConfig";
-import { HttpError } from "../../../utils/httpError";
+import { HttpError, UpstreamError } from "../../../utils/httpError";
 
 export function extractRagicErrorDetail(error: unknown): {
   status?: number;
@@ -28,10 +28,10 @@ export function throwRagicHttpError(
     throw error;
   }
   const { status, message } = extractRagicErrorDetail(error);
-  throw new HttpError(
-    502,
+  throw new UpstreamError(
     `${options.messagePrefix}${status ? ` (HTTP ${status})` : ""}：${message}`,
-    options.code
+    options.code,
+    { status, message }
   );
 }
 

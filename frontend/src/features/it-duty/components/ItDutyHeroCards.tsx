@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import dayjs from "dayjs";
 import type {
+  ItDutyDayNote,
   ItDutyDaySwap,
   ItDutyMember,
   ItDutyOverride,
@@ -18,7 +19,11 @@ interface Props {
   members: ItDutyMember[];
   overrides: ItDutyOverride[];
   daySwaps: ItDutyDaySwap[];
+  dayNotes: ItDutyDayNote[];
   weeksPerSlot: number;
+  /** rotation 持久化 anchor — 由 page 從 setting 拉下後傳入 */
+  anchorIsoWeek: string | null;
+  anchorMemberId: number | null;
   onAssign: (
     isoWeek: string,
     currentOverride: ItDutyOverride | null,
@@ -39,6 +44,8 @@ interface CardData {
   todayIsSwapped: boolean;
   /** 該週裡的 swap 數量（不含今天）*/
   weekSwapCount: number;
+  /** 該週的純備註（依日期升冪）*/
+  weekDayNotes: ItDutyDayNote[];
   daysToHandover: number;
   holidayCount: number;
   isCurrent: boolean;
@@ -53,7 +60,10 @@ export function ItDutyHeroCards({
   members,
   overrides,
   daySwaps,
+  dayNotes,
   weeksPerSlot,
+  anchorIsoWeek,
+  anchorMemberId,
   onAssign,
 }: Props) {
   const { t } = useTranslation("itDuty");
@@ -64,7 +74,8 @@ export function ItDutyHeroCards({
     return [currentIsoWeek, shiftIsoWeek(currentIsoWeek, 1)].map((isoWeek, idx) => {
       const range = parseIsoWeek(isoWeek);
       const baseResult = calculateDutyForWeek(isoWeek, members, overrides, {
-        autoAnchorIsoWeek: currentIsoWeek,
+        anchorIsoWeek,
+        anchorMemberId,
         weeksPerSlot,
       });
       const overrideMatch = overrides.find((o) => o.isoWeek === isoWeek) ?? null;
@@ -91,7 +102,7 @@ export function ItDutyHeroCards({
           members,
           overrides,
           daySwaps,
-          { autoAnchorIsoWeek: currentIsoWeek, weeksPerSlot }
+          { anchorIsoWeek, anchorMemberId, weeksPerSlot }
         );
         todayActualMember = dayResult.member;
       }
@@ -99,6 +110,12 @@ export function ItDutyHeroCards({
       const weekSwapCount = todaySwap
         ? Math.max(0, weekSwaps.length - 1)
         : weekSwaps.length;
+
+      const rangeStart = range.start.format("YYYY-MM-DD");
+      const rangeEnd = range.end.format("YYYY-MM-DD");
+      const weekDayNotes = dayNotes
+        .filter((n) => n.noteDate >= rangeStart && n.noteDate <= rangeEnd)
+        .sort((a, b) => (a.noteDate < b.noteDate ? -1 : 1));
 
       return {
         isoWeek,
@@ -108,12 +125,22 @@ export function ItDutyHeroCards({
         todayActualMember,
         todayIsSwapped: !!todaySwap,
         weekSwapCount,
+        weekDayNotes,
         daysToHandover,
         holidayCount: holidays.length,
         isCurrent: idx === 0,
       };
     });
-  }, [currentIsoWeek, members, overrides, daySwaps, weeksPerSlot]);
+  }, [
+    currentIsoWeek,
+    members,
+    overrides,
+    daySwaps,
+    dayNotes,
+    weeksPerSlot,
+    anchorIsoWeek,
+    anchorMemberId,
+  ]);
 
   return (
     <div className="itduty-hero-grid">
@@ -208,6 +235,24 @@ export function ItDutyHeroCards({
                 </>
               ) : null}
             </div>
+            {card.weekDayNotes.length > 0 ? (
+              <ul className="itduty-hero-card__notes">
+                {card.weekDayNotes.map((n) => (
+                  <li
+                    key={n.id}
+                    className="itduty-hero-card__note-item"
+                    title={n.note}
+                  >
+                    <span className="itduty-hero-card__note-date">
+                      {dayjs(n.noteDate).format("MM/DD")}
+                    </span>
+                    <span className="itduty-hero-card__note-text">
+                      {n.note}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <div className="itduty-hero-card__actions">
               <button
                 type="button"

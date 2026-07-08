@@ -7,6 +7,7 @@ const log = createLogger("batch-create-row-key-cleanup");
 
 const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小時跑一次
 const CLEANUP_RETENTION_DAYS = 14; // 保留 14 天內的 idempotency 映射
+const STALE_PENDING_AFTER_MS = 30 * 60 * 1000; // pending 超過 30 分鐘視為寫入結果未知
 
 let cleanupTimer: NodeJS.Timeout | null = null;
 let startupTimer: NodeJS.Timeout | null = null;
@@ -18,6 +19,21 @@ function resolveThresholdIso(): string {
 
 async function runOnce(): Promise<void> {
   if (!env.SQLITE_ENABLED) return;
+  const now = Date.now();
+  const stalePendingThresholdIso = new Date(now - STALE_PENDING_AFTER_MS).toISOString();
+  const stalePendingCount = await batchCreateRowKeyRepository.markStalePendingIndeterminate({
+    thresholdIso: stalePendingThresholdIso,
+    errorMessage: "pending 超過 30 分鐘未完成，可能是 server restart/crash 或 Ragic 寫入結果未知",
+    updatedAt: new Date(now).toISOString(),
+  });
+  if (stalePendingCount > 0) {
+    log.warn({
+      event: "stale-pending-marked-indeterminate",
+      count: stalePendingCount,
+      thresholdIso: stalePendingThresholdIso,
+    });
+  }
+
   const thresholdIso = resolveThresholdIso();
   const deleted = await batchCreateRowKeyRepository.cleanupOlderThan(thresholdIso);
   if (deleted > 0) {

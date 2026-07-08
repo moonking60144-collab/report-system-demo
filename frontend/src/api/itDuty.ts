@@ -2,7 +2,8 @@ import { createApiClient } from "./apiClient";
 import {
   getOrCreateClientId,
   getOrCreateTabId,
-} from "../features/work-report/debug/clientIdentity";
+} from "../utils/clientIdentity";
+import { readSystemNoticeAdminToken } from "../utils/systemNoticeAdminSession";
 
 const api = createApiClient();
 
@@ -16,6 +17,10 @@ function buildActorHeaders(): Record<string, string> {
     if (label && label.trim()) {
       headers["x-debug-device-label"] = label.trim();
     }
+  }
+  const token = readSystemNoticeAdminToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
   }
   return headers;
 }
@@ -44,6 +49,14 @@ export interface ItDutyOverride {
 
 export interface ItDutySetting {
   weeksPerSlot: number;
+  /**
+   * Rotation 演算法的初始錨點。後端第一次有 member 時 seed、之後固定不變
+   * → 解決「時間漂移」（autoAnchor 跟著今天走、歷史週反覆改變）。
+   * member 刪除/停用時 anchor_member_id 後端會 refill 成最早 active member，
+   * anchor_iso_week 保持不變。完全沒 active member 時兩者都會是 null。
+   */
+  anchorIsoWeek: string | null;
+  anchorMemberId: number | null;
   updatedAt: string;
 }
 
@@ -66,6 +79,21 @@ export interface ItDutyDebtEntry {
   creditorMemberId: number;
   unsettledDays: number;
 }
+
+export interface ItDutyDayNote {
+  id: number;
+  noteDate: string; // YYYY-MM-DD
+  note: string;
+  updatedByLabel: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Modal 內所有 note textarea 共用的長度上限（含 swap note + day note）。
+ * 後端 routes/itDuty.ts MAX_NOTE_LENGTH 也是 200，兩邊對齊。
+ */
+export const IT_DUTY_NOTE_MAX_LENGTH = 200;
 
 export async function fetchItDutyMembers(): Promise<ItDutyMember[]> {
   const response = await api.get<{ data: ItDutyMember[] }>("/it/duty/members", {
@@ -214,4 +242,35 @@ export async function fetchItDutyDebts(): Promise<ItDutyDebtEntry[]> {
     headers: buildActorHeaders(),
   });
   return response.data.data;
+}
+
+export async function fetchItDutyDayNotes(
+  range?: { from: string; to: string }
+): Promise<ItDutyDayNote[]> {
+  const response = await api.get<{ data: ItDutyDayNote[] }>(
+    "/it/duty/day-notes",
+    {
+      params: range ? { from: range.from, to: range.to } : undefined,
+      headers: buildActorHeaders(),
+    }
+  );
+  return response.data.data;
+}
+
+export async function upsertItDutyDayNote(
+  noteDate: string,
+  note: string
+): Promise<ItDutyDayNote> {
+  const response = await api.put<{ data: ItDutyDayNote }>(
+    `/it/duty/day-notes/${noteDate}`,
+    { note },
+    { headers: buildActorHeaders() }
+  );
+  return response.data.data;
+}
+
+export async function deleteItDutyDayNote(noteDate: string): Promise<void> {
+  await api.delete(`/it/duty/day-notes/${noteDate}`, {
+    headers: buildActorHeaders(),
+  });
 }

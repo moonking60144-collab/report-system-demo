@@ -1,5 +1,7 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import { asyncHandler } from "./asyncHandler";
+import { assertClientNotBlocked } from "./clientBlockGuard";
+import { verifySystemNoticeBearerToken } from "./systemNoticeAuth";
 import { HttpError } from "../utils/httpError";
 import { readTaskActorContext } from "./taskActorContext";
 import {
@@ -11,6 +13,29 @@ const ISO_WEEK_REGEX = /^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/;
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_NAME_LENGTH = 64;
 const MAX_NOTE_LENGTH = 200;
+
+type VerifyAdminToken = (authorizationHeader: string | undefined) => unknown;
+
+interface CreateItDutyRouterOptions {
+  verifyAdminToken?: VerifyAdminToken;
+}
+
+function createMutationGuard(verifyAdminToken: VerifyAdminToken) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+      next();
+      return;
+    }
+
+    try {
+      verifyAdminToken(req.header("authorization"));
+      assertClientNotBlocked(req);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
 
 function readPositiveInteger(value: unknown, fieldName: string): number {
   const parsed = Number(value);
@@ -127,8 +152,14 @@ function readDateParam(value: unknown, fieldName: string): string {
   return trimmed;
 }
 
-export function createItDutyRouter(repository: ItDutyRepository): Router {
+export function createItDutyRouter(
+  repository: ItDutyRepository,
+  options: CreateItDutyRouterOptions = {}
+): Router {
   const router = Router();
+  const verifyAdminToken = options.verifyAdminToken ?? verifySystemNoticeBearerToken;
+
+  router.use("/it/duty", createMutationGuard(verifyAdminToken));
 
   router.get(
     "/it/duty/members",
@@ -453,6 +484,71 @@ export function createItDutyRouter(repository: ItDutyRepository): Router {
     asyncHandler(async (_req, res) => {
       const data = await repository.listDebts();
       res.json({ data });
+    })
+  );
+
+  // === 日級純備註（跟代班 / 債務無關） ===
+  // 跟 day-swap 一致：不帶 from/to 走全量；帶了就走範圍。
+  router.get(
+    "/it/duty/day-notes",
+    asyncHandler(async (req, res) => {
+      const fromRaw = typeof req.query.from === "string" ? req.query.from : "";
+      const toRaw = typeof req.query.to === "string" ? req.query.to : "";
+      if (!fromRaw && !toRaw) {
+        const data = await repository.listAllDayNotes();
+        res.json({ data });
+        return;
+      }
+      const from = readDateParam(fromRaw, "from");
+      const to = readDateParam(toRaw, "to");
+      const data = await repository.listDayNotesInRange(from, to);
+      res.json({ data });
+    })
+  );
+
+  router.put(
+    "/it/duty/day-notes/:date",
+    asyncHandler(async (req, res) => {
+      const noteDate = readDateParam(req.params.date, "date");
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const rawNote = body.note;
+      if (typeof rawNote !== "string") {
+        throw new HttpError(400, "缺少必要欄位：note", "INVALID_PAYLOAD");
+      }
+      const trimmed = rawNote.trim();
+      if (!trimmed) {
+        throw new HttpError(400, "note 不可為空", "INVALID_PAYLOAD");
+      }
+      if (trimmed.length > MAX_NOTE_LENGTH) {
+        throw new HttpError(
+          400,
+          `note 長度不可超過 ${MAX_NOTE_LENGTH}`,
+          "INVALID_PAYLOAD"
+        );
+      }
+      const actor = readTaskActorContext(req);
+      const data = await repository.upsertDayNote({
+        noteDate,
+        note: trimmed,
+        updatedByLabel: actor.actorLabel,
+      });
+      res.json({ data });
+    })
+  );
+
+  router.delete(
+    "/it/duty/day-notes/:date",
+    asyncHandler(async (req, res) => {
+      const noteDate = readDateParam(req.params.date, "date");
+      const ok = await repository.deleteDayNote(noteDate);
+      if (!ok) {
+        throw new HttpError(
+          404,
+          `找不到備註 date=${noteDate}`,
+          "DAY_NOTE_NOT_FOUND"
+        );
+      }
+      res.json({ data: { ok: true } });
     })
   );
 

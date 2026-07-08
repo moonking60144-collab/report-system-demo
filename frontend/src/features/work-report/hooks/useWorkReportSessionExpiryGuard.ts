@@ -5,9 +5,10 @@ import {
   sendDebugClientDisconnectBeacon,
 } from "../../../api/debugClients";
 import {
+  getOrCreateClientBootId,
   getOrCreateClientId,
   getOrCreateTabId,
-} from "../debug/clientIdentity";
+} from "../../../utils/clientIdentity";
 import {
   buildWorkReportSessionExpiredPath,
   clearWorkReportSessionExpiryState,
@@ -34,6 +35,7 @@ export function useWorkReportSessionExpiryGuard({
   const navigate = useNavigate();
   const clientId = useMemo(() => getOrCreateClientId(), []);
   const tabId = useMemo(() => getOrCreateTabId(), []);
+  const clientBootId = useMemo(() => getOrCreateClientBootId(), []);
   const expiredRef = useRef(false);
   const currentPathRef = useRef(currentPath);
   const lastActivityWriteAtRef = useRef(0);
@@ -48,7 +50,7 @@ export function useWorkReportSessionExpiryGuard({
         return;
       }
       expiredRef.current = true;
-      const disconnectPayload = { clientId, tabId };
+      const disconnectPayload = { clientId, tabId, clientBootId };
       const accepted = sendDebugClientDisconnectBeacon(disconnectPayload);
       if (!accepted) {
         void reportDebugClientDisconnect(disconnectPayload).catch(() => {
@@ -60,7 +62,7 @@ export function useWorkReportSessionExpiryGuard({
         { replace: true }
       );
     },
-    [clientId, navigate, tabId]
+    [clientBootId, clientId, navigate, tabId]
   );
 
   useEffect(() => {

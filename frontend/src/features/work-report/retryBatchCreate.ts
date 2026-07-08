@@ -6,9 +6,58 @@ import {
 } from "../../api/workReport";
 import { enqueueRetryPoll } from "./batchRetryPollManager";
 import {
+  deleteRetryableBatchCreateRecordChain,
   replaceRetryableBatchCreateRecord,
   type RetryableBatchCreateRecord,
 } from "./taskBatchRetryStore";
+import type { WorkReportQueueTask } from "../../api/workReport";
+
+export type BatchCreateRetryBlockReason = "indeterminate" | "precondition" | "statusUnknown";
+
+function readTaskFailureText(task: WorkReportQueueTask): string {
+  return `${task.errorCode ?? ""} ${task.errorMessage ?? ""} ${task.message ?? ""}`;
+}
+
+export function getBatchCreateRetryBlockReason(
+  task: WorkReportQueueTask
+): BatchCreateRetryBlockReason | null {
+  if (task.taskType !== "create-report-batch" || task.status !== "failed") {
+    return null;
+  }
+  if (task.batchWriteIndeterminate === true) {
+    return "indeterminate";
+  }
+  const text = readTaskFailureText(task);
+  if (text.includes("寫入結果尚未確認") || text.includes("clientRowKey")) {
+    return "indeterminate";
+  }
+  if (
+    text.includes("ENTRY_STATUS_UNKNOWN") ||
+    text.includes("無法確認工令狀態") ||
+    text.includes("work order status could not be confirmed")
+  ) {
+    return "statusUnknown";
+  }
+  if (
+    text.includes("ENTRY_CONFLICT") ||
+    text.includes("ENTRY_EDIT_LOCKED") ||
+    text.includes("批次新增尚未開始，前置檢查失敗") ||
+    text.includes("批次新增前置檢查失敗")
+  ) {
+    return "precondition";
+  }
+  return null;
+}
+
+function getBatchCreateRetryBlockedMessage(reason: BatchCreateRetryBlockReason): string {
+  if (reason === "indeterminate") {
+    return "這筆舊批次新增任務已被標記為寫入結果不明，不能重送；請確認是否已建立，並重新新增一筆。";
+  }
+  if (reason === "statusUnknown") {
+    return "這筆批次新增在開始前因無法確認工令狀態而中止，不能沿用舊資料重送；請稍後刷新工令後重新新增。";
+  }
+  return "這筆批次新增在開始前就因工令狀態已變更而失敗，不能沿用舊資料重送；請刷新工令後重新新增。";
+}
 
 /**
  * 共用 batch-create retry 流程：drawer / badge 都能呼叫
@@ -20,6 +69,12 @@ export async function retryBatchCreateFromRecord(
   record: RetryableBatchCreateRecord
 ): Promise<BatchCreateTaskAcceptedResult> {
   const task = await fetchWorkReportQueueTask(record.formId, record.taskId);
+
+  const retryBlockReason = getBatchCreateRetryBlockReason(task);
+  if (retryBlockReason) {
+    deleteRetryableBatchCreateRecordChain(record.taskId);
+    throw new Error(getBatchCreateRetryBlockedMessage(retryBlockReason));
+  }
 
   const useFinalizeRetry =
     task.batchFinalizeFailed === true &&
@@ -38,6 +93,7 @@ export async function retryBatchCreateFromRecord(
         record.entryId,
         record.rows,
         {
+          expectedEntryLastUpdatedAt: record.expectedEntryLastUpdatedAt,
           editSessionId: record.editSessionId,
           workOrderNo: record.workOrderNo ?? null,
         }

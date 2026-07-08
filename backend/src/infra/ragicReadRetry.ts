@@ -1,5 +1,8 @@
 import { AxiosError } from "axios";
 import { env } from "../config/env";
+import { createLogger } from "../observability/logger";
+
+const log = createLogger("ragic-read-retry");
 
 const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -10,13 +13,29 @@ const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   "EPIPE",
 ]);
 
+export interface ReadRetryLogPayload {
+  event: "retry";
+  label: string;
+  priority?: string;
+  timeoutMs?: number;
+  attempt: number;
+  maxRetries: number;
+  waitMs: number;
+  reason: string;
+  scheduler?: unknown;
+}
+
 interface ReadRetryOptions {
   maxRetries?: number;
   baseDelayMs?: number;
   label?: string;
+  priority?: string;
+  timeoutMs?: number;
+  getSchedulerStats?: () => unknown;
+  retryLogSink?: (payload: ReadRetryLogPayload) => void;
 }
 
-function isRetryableReadError(error: unknown): boolean {
+export function isRetryableReadError(error: unknown): boolean {
   if (!(error instanceof AxiosError)) {
     return false;
   }
@@ -81,13 +100,22 @@ export async function runWithReadRetry<T>(
       }
 
       const waitMs = calculateBackoffDelay(baseDelayMs, attempt);
-      console.warn("[ragic-read-retry]", {
+      const payload: ReadRetryLogPayload = {
+        event: "retry",
         label,
+        ...(options.priority ? { priority: options.priority } : {}),
+        ...(typeof options.timeoutMs === "number" ? { timeoutMs: options.timeoutMs } : {}),
         attempt: attempt + 1,
         maxRetries,
         waitMs,
         reason: getRetryErrorMessage(error),
-      });
+        ...(options.getSchedulerStats ? { scheduler: options.getSchedulerStats() } : {}),
+      };
+      if (options.retryLogSink) {
+        options.retryLogSink(payload);
+      } else {
+        log.warn(payload);
+      }
 
       await delay(waitMs);
       attempt += 1;

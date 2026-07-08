@@ -3,23 +3,11 @@ import {
   getOrCreateClientBootId,
   getOrCreateClientId,
   getOrCreateTabId,
-} from "../debug/clientIdentity";
-
-type RealtimeEventType =
-  | "work-report-form-updated"
-  | "work-report-entry-updated"
-  | "system-notice-force-refresh"
-  | "system-notice-content-updated";
-
-interface RealtimeEventPayload {
-  id: string;
-  type: RealtimeEventType;
-  occurredAt: string;
-  formId?: string;
-  entryId?: string;
-  forceRefreshToken?: string;
-  noticeRevision?: number;
-}
+} from "../../../utils/clientIdentity";
+import type {
+  RealtimeEventPayload,
+  RealtimeEventType,
+} from "@shared-types/realtime";
 
 interface RealtimeLifecyclePayload {
   bootId?: string;

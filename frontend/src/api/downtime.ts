@@ -1,6 +1,6 @@
 import { createApiClient } from "./apiClient";
 import type { FormOptionMap } from "./workReport";
-import { getOrCreateClientId, getOrCreateTabId } from "../features/work-report/debug/clientIdentity";
+import { getOrCreateClientId, getOrCreateTabId } from "../utils/clientIdentity";
 
 const api = createApiClient();
 
@@ -13,6 +13,7 @@ function buildActorHeaders(): Record<string, string> {
 
 export interface Form16DowntimeRecord {
   id: string;
+  snapshotHash: string | null;
   date: string | null;
   machineId: string | null;
   processCode: string | null;
@@ -37,7 +38,7 @@ export interface CreateForm16DowntimePayload {
   /**
    * Idempotency key。同一次送出流程（含 retry）要重用同一個 UUID，
    * backend 會用它擋掉 retry 風暴造成的重複寫入。
-   * 不帶也能跑，只是失去保護。
+   * queued create 必填；同一次送出流程（含 retry）重用同一個 key。
    */
   clientRowKey?: string;
 }
@@ -86,26 +87,129 @@ export async function fetchForm16DowntimeRecords(
   };
 }
 
+// 匯出稼動表用的 c1/6 期間統計檔（後端 proxy 抓 Ragic 發佈網址原樣轉發）。
+// 後端要去抓外部網址，可能等幾秒，timeout 放長。
+export async function exportForm16DowntimeMonthlyCsv(): Promise<Blob> {
+  const response = await api.get<Blob>("/downtime/export/monthly-csv", {
+    responseType: "blob",
+    timeout: 180_000,
+  });
+  return response.data;
+}
+
+// 下載已灌好期間資料的樞紐分析表 xlsx（後端抓同一條發佈 CSV、注入空白範本後回傳）。
+// attendanceDays 選填：當月應出勤天數，後端會灌進 3 張機台運轉分析表的 F 欄。
+export async function exportForm16AnalysisXlsx(attendanceDays?: number): Promise<Blob> {
+  const response = await api.get<Blob>("/downtime/export/analysis-xlsx", {
+    responseType: "blob",
+    timeout: 180_000,
+    params: {
+      ...(typeof attendanceDays === "number" ? { attendanceDays } : {}),
+    },
+  });
+  return response.data;
+}
+
+export interface PlannedIdleMachineSummary {
+  machineId: string;
+  prodType: string;
+  totalMinutes: number;
+  totalDays: number;
+  count: number;
+}
+
+export interface PlannedIdleSummary {
+  month: string;
+  machines: PlannedIdleMachineSummary[];
+  source?: string;
+}
+
+// 每機台當月計畫停機彙總（後端撈當月、加總 (P)計畫停機分）。month 選填 YYYY/MM，不帶為當月。
+export async function fetchPlannedIdleSummary(
+  month?: string,
+  refresh?: boolean
+): Promise<PlannedIdleSummary> {
+  const response = await api.get<{
+    data: PlannedIdleMachineSummary[];
+    meta: { month: string; machineCount: number; source?: string };
+  }>("/downtime/planned-idle-summary", {
+    params: {
+      ...(month ? { month } : {}),
+      ...(refresh ? { refresh: 1 } : {}),
+    },
+    timeout: 120_000,
+  });
+  return {
+    month: response.data.meta.month,
+    machines: response.data.data,
+    source: response.data.meta.source,
+  };
+}
+
 export interface DowntimeTaskAccepted {
   taskId: string;
-  status: string;
+  status: DowntimeTaskStatus;
+  createdAt: string;
+  entryId?: string;
 }
 
 /** @deprecated 保留別名避免 breaking change；新程式碼請用 DowntimeTaskAccepted */
 export type CreateForm16DowntimeAccepted = DowntimeTaskAccepted;
 
-export interface DowntimeTaskResult {
+export type DowntimeTaskStatus = "pending" | "running" | "success" | "failed";
+
+export type DowntimeTaskType =
+  | "create-downtime"
+  | "update-downtime"
+  | "delete-downtime";
+
+export interface DowntimeQueueTask {
   taskId: string;
-  taskType: string;
-  status: "pending" | "running" | "success" | "failed";
-  message: string | null;
+  taskType: DowntimeTaskType;
+  status: DowntimeTaskStatus;
+  formId: "16";
+  workOrderNo: string | null;
+  entryId: string | null;
   rowId: string | null;
+  queueKey: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+  message: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  actorClientId: string | null;
+  actorTabId: string | null;
+  actorIp: string | null;
+  actorLabel: string | null;
+  source: string | null;
 }
 
 export async function createForm16DowntimeRecord(
-  payload: CreateForm16DowntimePayload
+  payload: CreateForm16DowntimePayload & { clientRowKey: string }
 ): Promise<DowntimeTaskAccepted> {
   const response = await api.post<{ data: DowntimeTaskAccepted }>("/downtime/records", payload, {
+    headers: buildActorHeaders(),
+  });
+  return response.data.data;
+}
+
+export async function fetchDowntimeTasks(
+  options: {
+    status?: DowntimeTaskStatus;
+    taskType?: DowntimeTaskType;
+    actorClientId?: string;
+    limit?: number;
+  } = {}
+): Promise<DowntimeQueueTask[]> {
+  const response = await api.get<{ data: DowntimeQueueTask[] }>("/downtime/tasks", {
+    params: {
+      ...(options.status ? { status: options.status } : {}),
+      ...(options.taskType ? { taskType: options.taskType } : {}),
+      ...(options.actorClientId ? { actorClientId: options.actorClientId } : {}),
+      ...(typeof options.limit === "number" ? { limit: options.limit } : {}),
+    },
     headers: buildActorHeaders(),
   });
   return response.data.data;
@@ -119,6 +223,7 @@ export interface UpdateForm16DowntimePayload {
   operatorId?: string;
   plannedIdleMinutes?: number;
   remark?: string;
+  expectedSnapshotHash?: string | null;
 }
 
 export async function updateForm16DowntimeRecord(
@@ -134,16 +239,24 @@ export async function updateForm16DowntimeRecord(
 }
 
 export async function deleteForm16DowntimeRecord(
-  entryId: string
+  entryId: string,
+  options: { expectedSnapshotHash?: string | null } = {}
 ): Promise<DowntimeTaskAccepted> {
   const response = await api.delete<{ data: DowntimeTaskAccepted }>(
     `/downtime/records/${entryId}`,
-    { headers: buildActorHeaders() }
+    {
+      headers: {
+        ...buildActorHeaders(),
+        ...(options.expectedSnapshotHash
+          ? { "x-downtime-snapshot-hash": options.expectedSnapshotHash }
+          : {}),
+      },
+    }
   );
   return response.data.data;
 }
 
-export async function fetchDowntimeTask(taskId: string): Promise<DowntimeTaskResult> {
-  const response = await api.get<{ data: DowntimeTaskResult }>(`/downtime/tasks/${taskId}`);
+export async function fetchDowntimeTask(taskId: string): Promise<DowntimeQueueTask> {
+  const response = await api.get<{ data: DowntimeQueueTask }>(`/downtime/tasks/${taskId}`);
   return response.data.data;
 }

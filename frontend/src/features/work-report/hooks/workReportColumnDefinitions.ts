@@ -374,7 +374,7 @@ export function buildFormAwareColumns(args: BuildWorkReportColumnDefinitionsArgs
       render: renderValue,
     },
     {
-      title: "結案狀態",
+      title: "[MIS]結案狀態",
       dataIndex: "misCloseStatus",
       width: 130,
       render: renderValue,

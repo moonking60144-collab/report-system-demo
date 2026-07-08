@@ -3,13 +3,13 @@ import { FormConfig } from "../../types/formConfig";
 
 export const FORM_105_CONFIG: FormConfig = {
   formId: "105",
-  formName: "[105] Work Order Report — Process B",
+  formName: "[105] 工令單打頭報工+排程",
   ragicPath: env.RAGIC_FORM_105_PATH,
   mainFields: {
     // NOTE: 105 列表檢視目前仍沿用 104 同構主欄位，但這裡改成明確配置，避免日後被 104 隱性牽動。
     startSchedule: "開始排程?",
     workOrderNo: "工令單單號",
-    machineCode: "預設機台",
+    machineCode: "[MIS]車",
     modificationStatus: "修改狀態",
     forgingMother: "鍛造母件",
     customerPartNo: "客戶料號",
@@ -36,7 +36,7 @@ export const FORM_105_CONFIG: FormConfig = {
     finishedWireSize: "成品線徑",
     status: "工令狀態",
     ragicUnfinishedStatus: "更新[未結案]判斷",
-    misCloseStatus: "結案狀態",
+    misCloseStatus: "[MIS]結案狀態",
     workOrderRemark: "工令單備註",
     productUsageType: "產品料號用途種類",
     moldCondition: "模具況狀",
@@ -61,7 +61,7 @@ export const FORM_105_CONFIG: FormConfig = {
     startSchedule: "1032313",
     workOrderNo: "1005984",
     machineCode:
-      "預設機台|預設內製機台|[標準]預設機台|[預設]機台對照碼|機台|1015511|機台排程表對照碼|1006031|1017833|[指定]機台對照碼",
+      "[MIS]車|預設內製機台|[標準]預設機台|[預設]機台對照碼|機台|1015511|機台排程表對照碼|1006031|1017833|[指定]機台對照碼",
     modificationStatus:
       "1028076|修改狀態|修改<br>狀態|修改&lt;br&gt;狀態|修改\n狀態",
     forgingMother: "1006030",
@@ -149,6 +149,7 @@ export const FORM_105_CONFIG: FormConfig = {
     subtableId: "_subtable_1002178",
     requiredFields: [
       "date",
+      "processCode",
       "machineId",
       "operatorId",
       "startTime",

@@ -11,9 +11,9 @@ import {
 // - 還會出現「資料回傳格式範例」「敘述欄位」這類 h4 必須略過
 const SAMPLE_HTML = `
 <html><body>
-<h3><span style='color:#888;'>表單:</span>✍[104] Work Order Report — Process A</h3>
-表單網址:<a href='https://demo.local/default/forms8/104' target='_blank'>https://demo.local/default/forms8/104</a><br/>
-API 網址:<a href='https://demo.local/default/forms8/104?api=true' target='_blank'>...</a>
+<h3><span style='color:#888;'>表單:</span>✍[104] 工令單搓牙報工+排程</h3>
+表單網址:<a href='https://fdtw.app/default/forms8/104' target='_blank'>https://fdtw.app/default/forms8/104</a><br/>
+API 網址:<a href='https://fdtw.app/default/forms8/104?api=true' target='_blank'>...</a>
 <h4 style='margin:15px 0 0 0;'>主表單欄位</h4>
 主表單Key: 1005987<table class='paramTable'>
 <tr>
@@ -51,7 +51,7 @@ API 網址:<a href='https://demo.local/default/forms8/104?api=true' target='_bla
 </table>
 
 <h3><span>表單:</span>[105] 報工表</h3>
-表單網址:<a href='https://demo.local/default/forms8/105'>https://demo.local/default/forms8/105</a>
+表單網址:<a href='https://fdtw.app/default/forms8/105'>https://fdtw.app/default/forms8/105</a>
 <h4>主表單欄位</h4>
 主表單Key: 999<table class='paramTable'>
 <tr>
@@ -74,7 +74,7 @@ test("parseRagicDocHtml 抓出兩張 form 且 health.ok=true", () => {
 test("parseRagicDocHtml 解析 form name + path + main key", () => {
   const { forms } = parseRagicDocHtml(SAMPLE_HTML);
   const f104 = forms[0]!;
-  assert.equal(f104.formName, "✍[104] Work Order Report — Process A");
+  assert.equal(f104.formName, "✍[104] 工令單搓牙報工+排程");
   assert.equal(f104.formPath, "default/forms8/104");
   assert.equal(f104.mainKey, "1005987");
 });
@@ -118,7 +118,7 @@ test("parseRagicDocHtml 略過 資料回傳格式範例 / 敘述欄位 等非欄
 test("parseRagicDocHtml 跳過沒有 paramTable 的 form 不會炸", () => {
   const html = `
     <h3><span>表單:</span>空表</h3>
-    表單網址:<a href='https://demo.local/default/forms8/999'>x</a>
+    表單網址:<a href='https://fdtw.app/default/forms8/999'>x</a>
     <h4>主表單欄位</h4>
     主表單Key: 1
   `;
@@ -132,7 +132,7 @@ test("parseRagicDocHtml 跳過沒有 paramTable 的 form 不會炸", () => {
 test("parseRagicDocHtml 過濾非數字的 field id", () => {
   const html = `
     <h3><span>表單:</span>怪表</h3>
-    表單網址:<a href='https://demo.local/default/forms8/666'>x</a>
+    表單網址:<a href='https://fdtw.app/default/forms8/666'>x</a>
     <h4>主表單欄位</h4>
     <table class='paramTable'>
     <tr><th>位置</th><th>名</th><th>id</th><th>型</th><th>註</th></tr>
@@ -152,6 +152,68 @@ test("parseRagicDocHtml 完全空 html → health.ok=false 且 warnings 列出�
   assert.equal(forms.length, 0);
   assert.equal(health.ok, false);
   assert.ok(health.warnings.length >= 2);
+});
+
+test("parseRagicDocHtml 巢狀 table 不會污染外層 row 計數", () => {
+  // 主表 paramTable 有 2 個合法 row；其中第一個 td 故意塞一張巢狀 table（含 1 row）。
+  // 用 .find("tr") 會把巢狀 row 也算進來 → 期望實作改用 direct-child 後不會出現。
+  const html = `
+    <h3><span>表單:</span>巢狀表</h3>
+    表單網址:<a href='https://fdtw.app/default/forms8/777'>x</a>
+    <h4>主表單欄位</h4>
+    主表單Key: 7770000
+    <table class='paramTable'>
+      <tr><th>位置</th><th>名</th><th>id</th><th>型</th><th>註</th></tr>
+      <tr>
+        <td>
+          A1
+          <table><tr><td>內層 phantom 1</td><td>x</td><td>9999999</td><td>x</td><td>x</td></tr></table>
+        </td>
+        <td>外層欄位 1</td><td>1111111</td><td>文字</td><td>n1</td>
+      </tr>
+      <tr>
+        <td>A2</td><td>外層欄位 2</td><td>2222222</td><td>文字</td><td>n2</td>
+      </tr>
+    </table>
+  `;
+  const { forms } = parseRagicDocHtml(html);
+  assert.equal(forms.length, 1);
+  const fields = forms[0]!.mainFields;
+  assert.equal(fields.length, 2, "外層 table 應只解析 2 筆，巢狀 row 不應被算入");
+  assert.equal(fields[0]?.id, "1111111");
+  assert.equal(fields[1]?.id, "2222222");
+});
+
+test("parseRagicDocHtml formName 內部多空白／換行 collapse 成單空格", () => {
+  const html = `
+    <h3><span style='color:#888;'>表單:</span>  ✍[104]   工令單
+    搓牙\t報工+排程  </h3>
+    表單網址:<a href='https://fdtw.app/default/forms8/104'>x</a>
+    <h4>主表單欄位</h4>
+    主表單Key: 1
+    <table class='paramTable'>
+      <tr><th>位置</th><th>名</th><th>id</th><th>型</th><th>註</th></tr>
+      <tr><td>A1</td><td>x</td><td>123</td><td>文字</td><td></td></tr>
+    </table>
+  `;
+  const { forms } = parseRagicDocHtml(html);
+  assert.equal(forms.length, 1);
+  assert.equal(forms[0]?.formName, "✍[104] 工令單 搓牙 報工+排程");
+});
+
+test("parseRagicDocHtml cell 內 <br> 兩側 whitespace 仍然分號隔開", () => {
+  const html = `
+    <h3><span>表單:</span>br 測試</h3>
+    表單網址:<a href='https://fdtw.app/default/forms8/888'>x</a>
+    <h4>主表單欄位</h4>
+    主表單Key: 1
+    <table class='paramTable'>
+      <tr><th>位置</th><th>名</th><th>id</th><th>型</th><th>註</th></tr>
+      <tr><td>A1</td><td>x</td><td>123</td><td>文字</td><td>  唯讀  <br/>  必填  </td></tr>
+    </table>
+  `;
+  const { forms } = parseRagicDocHtml(html);
+  assert.equal(forms[0]?.mainFields[0]?.note, "唯讀; 必填");
 });
 
 test("flattenParsedFormsToInsertRows 把主表 + 子表都攤平", () => {

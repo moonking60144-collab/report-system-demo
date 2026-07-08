@@ -16,6 +16,32 @@ import { FixedHorizontalScrollbar } from "./FixedHorizontalScrollbar";
 import type { FormState } from "../../../components/report-form/types";
 import type { DetailTableRow, InlineEditableDetailKey } from "../hooks/detail/types";
 import { showClosedLockWarning } from "../utils/closedLockWarning";
+import { WorkReportDetailBatchCreateActions } from "./detail-table/WorkReportDetailBatchCreateActions";
+import { WorkReportDetailBatchDeleteActions } from "./detail-table/WorkReportDetailBatchDeleteActions";
+import { WorkReportDetailColumnSettings } from "./detail-table/WorkReportDetailColumnSettings";
+import { WorkReportDetailDefaultActions } from "./detail-table/WorkReportDetailDefaultActions";
+import { WorkReportDetailScrollHintButton } from "./detail-table/WorkReportDetailScrollHintButton";
+import { WorkReportDetailTableSummaryBar } from "./detail-table/WorkReportDetailTableSummaryBar";
+
+// 欄位視覺分組（沿用 i18n 既有的 reasonSection 停機原因 14 欄 / setupSection 架調車8欄）：
+// 給 th/td 掛 class 上淡背景，讓「現在在填停機原因區」一眼可辨。只加 class，不動 column 定義/autofill。
+const DOWNTIME_KEYS = new Set<string>([
+  "plannedIdleMinutes", "unplannedIdleMinutes", "absentOrTrainingMinutes",
+  "noMaterialMinutes", "waitingQcApprovalMinutes", "meetingMinutes",
+  "cleaningMinutes", "rdSamplingMinutes", "supportOtherMachinesMinutes",
+  "machineBreakdownMinutes", "machineAdjustmentMinutes", "othersMinutes",
+  "waitingForDiesMinutes", "testingDiesMinutes",
+]);
+const SETUP_KEYS = new Set<string>([
+  "setupAdjustType", "setupAdjustMinutes", "countSetupTimeFlag",
+  "setupTimeStandardHours", "setupLossQtyPerPcs", "processLossQtyPerPcs",
+  "totalContainerQty", "containerUnit",
+]);
+function colGroupClass(key: string): string {
+  if (DOWNTIME_KEYS.has(key)) return "detail-col-downtime";
+  if (SETUP_KEYS.has(key)) return "detail-col-setup";
+  return "";
+}
 
 interface DetailColumnDefinitionLike {
   key: string;
@@ -144,6 +170,12 @@ function findRowIndexForOffset(rowOffsets: number[], target: number): number {
   return Math.max(0, Math.min(rowOffsets.length - 2, upperIndex - 1));
 }
 
+const DETAIL_ROW_FALLBACK_HEIGHT = 70;
+const DETAIL_EDITING_ROW_FALLBACK_HEIGHT = 120;
+const DETAIL_PLACEHOLDER_ROW_FALLBACK_HEIGHT = 50;
+const DETAIL_PLACEHOLDER_DRAFT_ROW_FALLBACK_HEIGHT = 62;
+const DETAIL_PLACEHOLDER_EDITING_ROW_FALLBACK_HEIGHT = 120;
+
 interface DetailTableRowViewProps {
   item: DetailTableRow;
   placeholderRow: boolean;
@@ -166,6 +198,7 @@ interface DetailTableRowViewProps {
   isBatchCreateFillPreviewCell: (rowId: string, key: InlineEditableDetailKey) => boolean;
   onFillPreviewHover: (rowId: string, key: InlineEditableDetailKey) => void;
   onDetailRowClick: (event: ReactMouseEvent<HTMLTableRowElement>, row: DetailTableRow) => void;
+  onMeasuredRowHeight: (rowId: string, height: number) => void;
   /** 把所有會影響此 row render 結果的訊號 pack 成單一字串，memo equality 只比這個 key。
    *  Why: 原本 20+ 行手寫 === 比對，加新 prop 必須手動回來補一條，漏掉就 stale render
    *       （editingRowDraft 卡死就是這樣發生的）。
@@ -194,11 +227,40 @@ const DetailTableRowView = memo(function DetailTableRowView({
   isBatchCreateFillPreviewCell,
   onFillPreviewHover,
   onDetailRowClick,
+  onMeasuredRowHeight,
+  rowMemoKey,
 }: DetailTableRowViewProps) {
   const normalizedRowClassName = rowClassName?.trim() || undefined;
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
+
+  useLayoutEffect(() => {
+    const node = rowRef.current;
+    if (!node) {
+      return;
+    }
+
+    const publishHeight = () => {
+      const height = Math.ceil(node.getBoundingClientRect().height);
+      if (height > 0) {
+        onMeasuredRowHeight(item.rowId, height);
+      }
+    };
+
+    publishHeight();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(publishHeight);
+    resizeObserver.observe(node);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [item.rowId, onMeasuredRowHeight, rowMemoKey]);
 
   return (
     <tr
+      ref={rowRef}
       data-row-id={item.rowId}
       data-row-kind={placeholderRow ? "create-placeholder" : "detail"}
       className={[
@@ -240,6 +302,7 @@ const DetailTableRowView = memo(function DetailTableRowView({
             }
             className={[
               column.className,
+              colGroupClass(columnKey),
               isFillSourceCell ? "detail-inline-fill-source" : "",
               isFillPreviewCell ? "detail-inline-fill-preview" : "",
               isFillRectCell ? "detail-inline-fill-rect" : "",
@@ -348,10 +411,51 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
   onHandleManualCloseWorkOrder,
   onOpenCreateModal,
 }: WorkReportDetailTableSectionProps) {
+  // inline 編輯時追當前 focus 的欄位（事件委派讀 data-inline-cell-key）→ 表頭高亮 + 浮動標籤，
+  // 解寬表格「不知道在填哪一欄」。只加這個 state，不碰 cell/autofill/批次（cell 是另一個 memo component）。
+  const [focusedColKey, setFocusedColKey] = useState<string | null>(null);
+  const focusedColLabel = focusedColKey
+    ? renderedDetailColumns.find((c) => c.key === focusedColKey)?.label ?? null
+    : null;
   const { i18n, t } = useTranslation(["workReport", "common"]);
   const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
   const [virtualViewportHeight, setVirtualViewportHeight] = useState(0);
+  // 雙層 scroll 的智慧鈕：接近頂顯示 ↓（帶往下）、接近底顯示 ↑（帶回頂）；點擊時 window + 表格內部一起動
+  const [scrollHint, setScrollHint] = useState<"down" | "up" | null>(null);
+  useEffect(() => {
+    const el = detailTableScrollRef.current;
+    const compute = () => {
+      const tableMax = el ? el.scrollHeight - el.clientHeight : 0;
+      const winMax = document.documentElement.scrollHeight - window.innerHeight;
+      if (tableMax <= 40 && winMax <= 40) {
+        setScrollHint(null);
+        return;
+      }
+      const tp = tableMax > 40 ? (el?.scrollTop ?? 0) / tableMax : 0;
+      const wp = winMax > 40 ? window.scrollY / winMax : 0;
+      setScrollHint(Math.max(tp, wp) < 0.5 ? "down" : "up");
+    };
+    const raf = requestAnimationFrame(compute);
+    window.addEventListener("scroll", compute, { passive: true });
+    el?.addEventListener("scroll", compute, { passive: true });
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", compute);
+      el?.removeEventListener("scroll", compute);
+    };
+  }, [detailTableScrollRef]);
+  // sticky 卡頂：量標題列(sticky-stack)高度 → CSS 變數，讓表格區(outer)黏在它下方、高度自適應視窗
+  useEffect(() => {
+    const stack = document.querySelector<HTMLElement>(".detail-sticky-stack");
+    if (!stack) return;
+    const root = document.documentElement;
+    const update = () => root.style.setProperty("--detail-sticky-stack-h", `${stack.offsetHeight}px`);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(stack);
+    return () => ro.disconnect();
+  }, []);
   const columnSettingsRef = useRef<HTMLDivElement | null>(null);
   const effectiveColumnSettingsOpen =
     columnSettingsOpen && !batchDeleteMode && !batchCreateMode;
@@ -393,20 +497,40 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
     () => autoHighlightedInlineKeys.join("|"),
     [autoHighlightedInlineKeys]
   );
+  const [measuredRowHeightsByRowId, setMeasuredRowHeightsByRowId] = useState<Record<string, number>>({});
+  const handleMeasuredRowHeight = useCallback((rowId: string, height: number) => {
+    setMeasuredRowHeightsByRowId((previous) => {
+      if (previous[rowId] === height) {
+        return previous;
+      }
+      return {
+        ...previous,
+        [rowId]: height,
+      };
+    });
+  }, []);
   const rowEstimateHeights = useMemo(
     () =>
       displayDetailRows.map((item) => {
+        const measuredHeight = measuredRowHeightsByRowId[item.rowId];
+        if (measuredHeight) {
+          return measuredHeight;
+        }
         const placeholderRow = isCreatePlaceholderRow(item);
         const draftedRow = Boolean(getBatchCreateDraftForRow(item.rowId));
         if (editingRowId === item.rowId) {
-          return placeholderRow ? 96 : 104;
+          return placeholderRow
+            ? DETAIL_PLACEHOLDER_EDITING_ROW_FALLBACK_HEIGHT
+            : DETAIL_EDITING_ROW_FALLBACK_HEIGHT;
         }
         if (placeholderRow) {
-          return draftedRow ? 62 : 48;
+          return draftedRow
+            ? DETAIL_PLACEHOLDER_DRAFT_ROW_FALLBACK_HEIGHT
+            : DETAIL_PLACEHOLDER_ROW_FALLBACK_HEIGHT;
         }
-        return 52;
+        return DETAIL_ROW_FALLBACK_HEIGHT;
       }),
-    [displayDetailRows, editingRowId, getBatchCreateDraftForRow]
+    [displayDetailRows, editingRowId, getBatchCreateDraftForRow, measuredRowHeightsByRowId]
   );
   const rowOffsets = useMemo(() => {
     const offsets = [0];
@@ -546,256 +670,161 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
   const handleToggleColumnSettings = useCallback(() => {
     setColumnSettingsOpen((previous) => !previous);
   }, []);
+  const closedLockedMessage = t("workReport:detailPage.closedLockedMessage");
+  const isRecordClosed = recordStatus === "已結案";
+  const detailRecordsCountText = t("workReport:table.detailRecordsCount", {
+    count: detailRowsCount,
+  });
+  const batchCreateEditingText = batchCreateMode
+    ? t("workReport:detailPage.batchCreateEditing", { count: batchCreateDraftCount })
+    : null;
+  const editingText = editingRowId !== null ? "編輯中..." : null;
+  const focusedColHint = focusedColLabel ? `正在填：${focusedColLabel}` : null;
+  const isColumnSettingsDisabled = batchDeleteMode || batchCreateMode;
+  const isDefaultModeButtonDisabled = isColumnSettingsDisabled;
+  const handleEnterBatchDeleteMode = useCallback(() => {
+    if (isRecordClosed) {
+      showClosedLockWarning(closedLockedMessage);
+      return;
+    }
+    onEnterBatchDeleteMode();
+  }, [closedLockedMessage, isRecordClosed, onEnterBatchDeleteMode]);
+  const handleOpenMainMachine = useCallback(() => {
+    if (isRecordClosed) {
+      showClosedLockWarning(closedLockedMessage);
+      return;
+    }
+    onOpenMainMachineModal();
+  }, [closedLockedMessage, isRecordClosed, onOpenMainMachineModal]);
+  const handleOpenCreateModal = useCallback(() => {
+    if (isRecordClosed) {
+      showClosedLockWarning(closedLockedMessage);
+      return;
+    }
+    onOpenCreateModal();
+  }, [closedLockedMessage, isRecordClosed, onOpenCreateModal]);
+  const closeActionDisabled = workOrderClosing ||
+    batchCreateMode ||
+    loading ||
+    refreshing ||
+    submitting ||
+    hasActiveMutationTask ||
+    editingRowId !== null ||
+    modalOpen;
+  const batchDeleteActionDisabled = loading || refreshing || submitting || hasActiveMutationTask;
+  const handleScrollHintJump = () => {
+    const el = detailTableScrollRef.current;
+    if (scrollHint === "up") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      el?.scrollTo({ top: 0, behavior: "smooth" });
+    } else {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+      el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }
+  };
+  const scrollHintBackToTopLabel = t("workReport:detailPage.backToTop");
+  const scrollHintBackToBottomLabel = t("workReport:detailPage.backToBottom");
 
   return (
     <section className="detail-table-outer" aria-label={t("workReport:table.detailRecordsTitle")}>
       <div className="detail-table-head">
         <div className="detail-table-head-main">
-          <div className="detail-table-head-summary">
-            <strong>{t("workReport:table.detailRecordsCount", { count: detailRowsCount })}</strong>
-            {batchCreateMode ? (
-              <span className="detail-editing-pill" role="status" aria-live="polite">
-                {t("workReport:detailPage.batchCreateEditing", { count: batchCreateDraftCount })}
-              </span>
-            ) : editingRowId !== null ? (
-              <span className="detail-editing-pill" role="status" aria-live="polite">
-                編輯中...
-              </span>
-            ) : null}
-          </div>
+          <WorkReportDetailTableSummaryBar
+            detailRecordsCountText={detailRecordsCountText}
+            batchCreateEditingText={batchCreateEditingText}
+            editingText={editingText}
+            focusedColHint={focusedColHint}
+          />
           <div className="detail-table-head-actions">
-            <div className="detail-column-settings" ref={columnSettingsRef}>
-              <button
-                type="button"
-                className="detail-column-settings-btn"
-                onClick={handleToggleColumnSettings}
-                aria-expanded={effectiveColumnSettingsOpen}
-                aria-label={t("workReport:table.columnSettingsButton")}
-                disabled={batchDeleteMode || batchCreateMode}
-              >
-                ⚙ {t("workReport:table.columnSettingsButton")}
-              </button>
-              {effectiveColumnSettingsOpen && (
-                <section className="detail-column-settings-panel">
-                  <strong className="detail-column-settings-title">
-                    {t("workReport:table.columnSettingsTitle")}
-                  </strong>
-                  <p className="detail-column-settings-hint">
-                    {t("workReport:table.columnSettingsHint")}
-                  </p>
-                  <div className="detail-column-settings-actions">
-                    <button
-                      type="button"
-                      className="detail-column-settings-action-btn"
-                      onClick={onShowAllColumns}
-                      disabled={batchDeleteMode || batchCreateMode}
-                    >
-                      {t("workReport:table.columnSettingsShowAll")}
-                    </button>
-                    <button
-                      type="button"
-                      className="detail-column-settings-action-btn"
-                      onClick={onResetDefaultColumns}
-                      disabled={batchDeleteMode || batchCreateMode}
-                    >
-                      {t("workReport:table.columnSettingsResetDefault")}
-                    </button>
-                  </div>
-                  <div className="detail-column-settings-list">
-                    {toggleableDetailColumns.map((column) => {
-                      const checked = !hiddenColumnKeys.has(column.key);
-                      return (
-                        <label key={`column-toggle-${column.key}`} className="detail-column-settings-item">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => onToggleColumnVisibility(column.key)}
-                            disabled={batchDeleteMode || batchCreateMode}
-                          />
-                          <span>{column.label}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </section>
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={onRefresh}
-              disabled={
-                batchDeleteMode ||
-                batchCreateMode ||
-                loading ||
-                refreshing ||
-                submitting ||
-                hasActiveMutationTask
-              }
-            >
-              {t("workReport:detailPage.refresh")}
-            </button>
-            <button
-              type="button"
-              className="detail-page-task-btn"
-              onClick={onOpenTaskQueue}
-              disabled={batchDeleteMode || batchCreateMode || loading || refreshing}
-            >
-              {t("workReport:taskQueue.button")}
-            </button>
-            {batchDeleteMode ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onToggleSelectAllBatchDeleteRows}
-                  disabled={loading || refreshing || submitting}
-                >
-                  {allBatchDeleteRowsSelected
-                    ? t("workReport:detailPage.clearBatchSelection")
-                    : t("workReport:detailPage.selectAllOnPage")}
-                </button>
-                <button
-                  type="button"
-                  onClick={onClearBatchDeleteSelection}
-                  disabled={selectedBatchDeleteCount === 0}
-                >
-                  {t("workReport:detailPage.clearBatchSelection")}
-                </button>
-                <button
-                  type="button"
-                  className="detail-delete-btn"
-                  onClick={onHandleBatchDelete}
-                  disabled={selectedBatchDeleteCount === 0 || submitting}
-                >
-                  {t("workReport:detailPage.batchDeleteAction", { count: selectedBatchDeleteCount })}
-                </button>
-                <button type="button" onClick={onCancelBatchDeleteMode}>
-                  {t("common:actions.cancel")}
-                </button>
-              </>
-            ) : batchCreateMode ? (
-              <>
-                <button
-                  type="button"
-                  className="detail-batch-create-save-btn"
-                  onClick={onSaveBatchCreate}
-                  disabled={submitting}
-                >
-                  {submitting ? t("common:actions.saving") : t("common:actions.save")}
-                </button>
-                <button
-                  type="button"
-                  className="detail-batch-create-cancel-btn"
-                  onClick={onCancelBatchCreate}
-                  disabled={submitting}
-                >
-                  {t("common:actions.cancel")}
-                </button>
-                <button
-                  type="button"
-                  className="detail-clear-btn"
-                  onClick={onClearBatchCreate}
-                  disabled={submitting}
-                >
-                  {t("workReport:reportForm.actions.clearAll")}
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className={`detail-delete-btn${recordStatus === "已結案" ? " is-locked" : ""}`}
-                onClick={() => {
-                  if (recordStatus === "已結案") {
-                    showClosedLockWarning(t("workReport:detailPage.closedLockedMessage"));
-                    return;
-                  }
-                  onEnterBatchDeleteMode();
+            <WorkReportDetailColumnSettings
+              columnSettingsRef={columnSettingsRef}
+              open={effectiveColumnSettingsOpen}
+              disabled={isColumnSettingsDisabled}
+              ariaLabel={t("workReport:table.columnSettingsButton")}
+              toggleableColumns={toggleableDetailColumns}
+              hiddenColumnKeys={hiddenColumnKeys}
+              labels={{
+                button: `⚙ ${t("workReport:table.columnSettingsButton")}`,
+                panelTitle: t("workReport:table.columnSettingsTitle"),
+                hint: t("workReport:table.columnSettingsHint"),
+                showAll: t("workReport:table.columnSettingsShowAll"),
+                resetDefault: t("workReport:table.columnSettingsResetDefault"),
+              }}
+              onToggle={handleToggleColumnSettings}
+              onShowAllColumns={onShowAllColumns}
+              onResetDefaultColumns={onResetDefaultColumns}
+              onToggleColumnVisibility={onToggleColumnVisibility}
+            />
+            {!batchCreateMode && !batchDeleteMode ? (
+              <WorkReportDetailDefaultActions
+                state={{
+                  disableRefresh: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasActiveMutationTask,
+                  disableTaskQueue: isDefaultModeButtonDisabled || loading || refreshing,
+                  disableMainMachine: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasActiveMutationTask || editingRowId !== null || modalOpen,
+                  disableBatchDelete: batchDeleteActionDisabled,
+                  disableClose: closeActionDisabled,
+                  disableReopen: closeActionDisabled,
+                  disableAddDetail: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasBlockingMutationTask,
+                  isRecordClosed,
+                  workOrderClosing,
                 }}
-                disabled={loading || refreshing || submitting || hasActiveMutationTask}
-              >
-                {t("workReport:detailPage.batchDeleteButton")}
-              </button>
-            )}
-            <button
-              type="button"
-              className={recordStatus === "已結案" ? "is-locked" : undefined}
-              onClick={() => {
-                if (recordStatus === "已結案") {
-                  showClosedLockWarning(t("workReport:detailPage.closedLockedMessage"));
-                  return;
-                }
-                onOpenMainMachineModal();
-              }}
-              disabled={
-                batchDeleteMode ||
-                batchCreateMode ||
-                loading ||
-                refreshing ||
-                submitting ||
-                hasActiveMutationTask ||
-                editingRowId !== null ||
-                modalOpen
-              }
-            >
-              {t("workReport:detailPage.changeMainMachine")}
-            </button>
-            {recordStatus === "已結案" ? (
-              <button
-                type="button"
-                className="detail-page-reopen-btn"
-                onClick={() => onHandleManualCloseWorkOrder("reopen")}
-                disabled={
-                  workOrderClosing ||
-                  batchCreateMode ||
-                  loading ||
-                  refreshing ||
-                  submitting ||
-                  hasActiveMutationTask ||
-                  editingRowId !== null ||
-                  modalOpen
-                }
-              >
-                {workOrderClosing ? t("common:actions.saving") : t("workReport:detailPage.manualReopen")}
-              </button>
+                labels={{
+                  refresh: t("workReport:detailPage.refresh"),
+                  taskQueue: t("workReport:taskQueue.button"),
+                  changeMainMachine: t("workReport:detailPage.changeMainMachine"),
+                  manualClose: t("workReport:detailPage.manualClose"),
+                  manualReopen: t("workReport:detailPage.manualReopen"),
+                  addDetail: t("common:actions.addDetail"),
+                  batchDeleteButton: t("workReport:detailPage.batchDeleteButton"),
+                  saving: t("common:actions.saving"),
+                }}
+                onRefresh={onRefresh}
+                onOpenTaskQueue={onOpenTaskQueue}
+                onOpenMainMachineModal={handleOpenMainMachine}
+                onManualClose={() => onHandleManualCloseWorkOrder("close")}
+                onManualReopen={() => onHandleManualCloseWorkOrder("reopen")}
+                onOpenCreateModal={handleOpenCreateModal}
+                onEnterBatchDeleteMode={handleEnterBatchDeleteMode}
+              />
+            ) : null}
+            {batchDeleteMode ? (
+              <WorkReportDetailBatchDeleteActions
+                state={{
+                  allBatchDeleteRowsSelected,
+                  selectedBatchDeleteCount,
+                  loading,
+                  refreshing,
+                  submitting,
+                }}
+                labels={{
+                  selectAllOnPage: t("workReport:detailPage.selectAllOnPage"),
+                  clearSelection: t("workReport:detailPage.clearBatchSelection"),
+                  batchDeleteAction: t("workReport:detailPage.batchDeleteAction", {
+                    count: selectedBatchDeleteCount,
+                  }),
+                  cancel: t("common:actions.cancel"),
+                }}
+                onToggleSelectAll={onToggleSelectAllBatchDeleteRows}
+                onClearSelection={onClearBatchDeleteSelection}
+                onHandleBatchDelete={onHandleBatchDelete}
+                onCancelBatchDeleteMode={onCancelBatchDeleteMode}
+              />
+            ) : batchCreateMode ? (
+              <WorkReportDetailBatchCreateActions
+                submitting={submitting}
+                labels={{
+                  save: t("common:actions.save"),
+                  saving: t("common:actions.saving"),
+                  cancel: t("common:actions.cancel"),
+                  clearAll: t("workReport:reportForm.actions.clearAll"),
+                }}
+                onSaveBatchCreate={onSaveBatchCreate}
+                onCancelBatchCreate={onCancelBatchCreate}
+                onClearBatchCreate={onClearBatchCreate}
+              />
             ) : (
-              <button
-                type="button"
-                className="detail-page-close-btn"
-                onClick={() => onHandleManualCloseWorkOrder("close")}
-                disabled={
-                  workOrderClosing ||
-                  batchCreateMode ||
-                  loading ||
-                  refreshing ||
-                  submitting ||
-                  hasActiveMutationTask ||
-                  editingRowId !== null ||
-                  modalOpen
-                }
-              >
-                {workOrderClosing ? t("common:actions.saving") : t("workReport:detailPage.manualClose")}
-              </button>
+              null
             )}
-            <button
-              type="button"
-              className={`detail-page-primary-btn${recordStatus === "已結案" ? " is-locked" : ""}`}
-              onClick={() => {
-                if (recordStatus === "已結案") {
-                  showClosedLockWarning(t("workReport:detailPage.closedLockedMessage"));
-                  return;
-                }
-                onOpenCreateModal();
-              }}
-              disabled={
-                batchDeleteMode ||
-                batchCreateMode ||
-                loading ||
-                refreshing ||
-                submitting ||
-                hasBlockingMutationTask
-              }
-            >
-              {t("common:actions.addDetail")}
-            </button>
           </div>
         </div>
       </div>
@@ -804,12 +833,27 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
           ref={detailTableScrollRef}
           className="detail-table-scroll"
           onKeyDown={onDetailTableKeyDown}
+          onFocusCapture={(e) => {
+            const cell = (e.target as HTMLElement).closest("[data-inline-cell-key]");
+            const k = cell?.getAttribute("data-inline-cell-key");
+            // 只有可 inline 編輯的欄位才顯示「正在填」；操作欄/唯讀欄的按鈕得到焦點不算
+            setFocusedColKey(k && (inlineEditableColumnKeySet as ReadonlySet<string>).has(k) ? k : null);
+          }}
+          onBlurCapture={() => setFocusedColKey(null)}
         >
           <table className="subtable detail-subtable">
             <thead>
               <tr>
                 {renderedDetailColumns.map((column) => (
-                  <th key={`header-${column.key}`} className={column.className} title={String(column.label)}>
+                  <th
+                    key={`header-${column.key}`}
+                    className={[
+                      column.className,
+                      colGroupClass(column.key),
+                      focusedColKey === column.key ? "detail-col-focused" : "",
+                    ].filter(Boolean).join(" ") || undefined}
+                    title={String(column.label)}
+                  >
                     {column.label}
                   </th>
                 ))}
@@ -925,6 +969,7 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
                     isBatchCreateFillPreviewCell={isBatchCreateFillPreviewCell}
                     onFillPreviewHover={onFillPreviewHover}
                     onDetailRowClick={onDetailRowClick}
+                    onMeasuredRowHeight={handleMeasuredRowHeight}
                     rowMemoKey={rowMemoKey}
                   />
                 );
@@ -940,6 +985,12 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
             </tbody>
           </table>
         </div>
+        <WorkReportDetailScrollHintButton
+          visible={scrollHint}
+          onJump={handleScrollHintJump}
+          backToTopLabel={scrollHintBackToTopLabel}
+          backToBottomLabel={scrollHintBackToBottomLabel}
+        />
       </div>
       <FixedHorizontalScrollbar tableWrapRef={detailTableScrollRef} />
     </section>

@@ -47,7 +47,11 @@ export type LinkedPickerFieldKey =
   | "operatorId"
   | "processCode"
   | "inputOptions"
-  | "shiftType";
+  | "shiftType"
+  | "plannedIdle"
+  | "setupAdjustType"
+  | "countSetupTimeFlag"
+  | "containerUnit";
 
 export interface LinkedPickerState {
   key: LinkedPickerFieldKey;
@@ -56,8 +60,10 @@ export interface LinkedPickerState {
 }
 
 export interface LoadEntryOptions {
-  silent?: boolean;
+  mode?: "foreground" | "refreshing" | "background";
   forceRefresh?: boolean;
+  notifyOnError?: boolean;
+  throwOnError?: boolean;
 }
 
 export type DetailTableRow = WorkReportItem & {

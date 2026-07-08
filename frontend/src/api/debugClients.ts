@@ -39,6 +39,8 @@ export interface DebugClientPresence {
   serverBootIdAtConnect: string | null;
   deployVersionAtConnect: string | null;
   maintenanceMessage: string | null;
+  blocked: boolean;
+  blockedReason: string | null;
   status: "online" | "offline" | "stale";
   updatedAt: string;
 }
@@ -67,7 +69,9 @@ export interface DebugClientCommand {
     | "force-refresh"
     | "force-session-expired"
     | "set-maintenance-message"
-    | "clear-maintenance-message";
+    | "clear-maintenance-message"
+    | "set-blocked"
+    | "clear-blocked";
   createdAt: string;
   createdBy: string;
   message?: string;
@@ -77,6 +81,7 @@ export interface DebugClientCommand {
 export interface DebugClientSummary {
   totalClients: number;
   onlineClients: number;
+  blockedClients: number;
   clientsWithErrors: number;
   realtimeDisconnectedClients: number;
 }
@@ -93,17 +98,39 @@ export async function reportDebugClientPresence(payload: {
   clientBootId: string;
   serverBootIdAtConnect?: string | null;
   deployVersionAtConnect?: string | null;
-}): Promise<{ presence: DebugClientPresence; commands: DebugClientCommand[] }> {
-  const response = await api.post<{ data: { presence: DebugClientPresence; commands: DebugClientCommand[] } }>(
+}): Promise<{ presence: DebugClientPresence }> {
+  const response = await api.post<{ data: { presence: DebugClientPresence } }>(
     "/debug/clients/presence",
     payload
   );
   return response.data.data;
 }
 
+export async function fetchDebugClientCommands(payload: {
+  clientId: string;
+  tabId: string;
+  clientBootId: string;
+}): Promise<DebugClientCommand[]> {
+  const response = await api.post<{ data: { commands: DebugClientCommand[] } }>(
+    "/debug/clients/commands/fetch",
+    payload
+  );
+  return response.data.data.commands;
+}
+
+export async function ackDebugClientCommands(payload: {
+  clientId: string;
+  tabId: string;
+  clientBootId: string;
+  commandIds: string[];
+}): Promise<void> {
+  await api.post("/debug/clients/commands/ack", payload);
+}
+
 export async function reportDebugClientDisconnect(payload: {
   clientId: string;
   tabId: string;
+  clientBootId: string;
 }): Promise<void> {
   await api.post("/debug/clients/disconnect", payload);
 }
@@ -111,6 +138,7 @@ export async function reportDebugClientDisconnect(payload: {
 export function sendDebugClientDisconnectBeacon(payload: {
   clientId: string;
   tabId: string;
+  clientBootId: string;
 }): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
     return false;
@@ -198,7 +226,9 @@ export async function sendDebugClientCommand(
       | "force-refresh"
       | "force-session-expired"
       | "set-maintenance-message"
-      | "clear-maintenance-message";
+      | "clear-maintenance-message"
+      | "set-blocked"
+      | "clear-blocked";
     message?: string;
     reason?: string;
   }

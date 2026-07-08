@@ -24,3 +24,7 @@ export function getFormConfig(formId: string): FormConfig {
 
   return config;
 }
+
+export function listFormConfigs(): FormConfig[] {
+  return Object.values(FORM_CONFIGS);
+}

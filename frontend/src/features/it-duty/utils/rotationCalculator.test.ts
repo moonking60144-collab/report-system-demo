@@ -35,14 +35,14 @@ function makeOverride(
 
 describe("calculateDutyForWeek", () => {
   test("沒成員 → empty", () => {
-    const result = calculateDutyForWeek("2026-W18", [], []);
+    const result = calculateDutyForWeek("2026-W18", [], [], { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member).toBeNull();
     expect(result.source).toBe("empty");
   });
 
   test("沒 override → 預設用 sort=0 第一個 active member", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
-    const result = calculateDutyForWeek("2026-W18", members, []);
+    const result = calculateDutyForWeek("2026-W18", members, [], { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member?.name).toBe("A");
     expect(result.source).toBe("auto");
     expect(result.appliedOverride).toBeNull();
@@ -51,7 +51,7 @@ describe("calculateDutyForWeek", () => {
   test("override 命中當週 → source = override", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const overrides = [makeOverride("2026-W18", 2)];
-    const result = calculateDutyForWeek("2026-W18", members, overrides);
+    const result = calculateDutyForWeek("2026-W18", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member?.name).toBe("B");
     expect(result.source).toBe("override");
   });
@@ -64,10 +64,10 @@ describe("calculateDutyForWeek", () => {
     ];
     // W10 anchor=B；W11=C；W12=A；W13=B
     const overrides = [makeOverride("2026-W10", 2)];
-    const w10 = calculateDutyForWeek("2026-W10", members, overrides);
-    const w11 = calculateDutyForWeek("2026-W11", members, overrides);
-    const w12 = calculateDutyForWeek("2026-W12", members, overrides);
-    const w13 = calculateDutyForWeek("2026-W13", members, overrides);
+    const w10 = calculateDutyForWeek("2026-W10", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
+    const w11 = calculateDutyForWeek("2026-W11", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
+    const w12 = calculateDutyForWeek("2026-W12", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
+    const w13 = calculateDutyForWeek("2026-W13", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
     expect(w10.member?.name).toBe("B");
     expect(w11.member?.name).toBe("C");
     expect(w12.member?.name).toBe("A");
@@ -87,15 +87,15 @@ describe("calculateDutyForWeek", () => {
       makeOverride("2026-W15", 3), // anchor=C
     ];
     // W12 → 最近 override 是 W10 (anchor=A, delta=2) → C
-    expect(calculateDutyForWeek("2026-W12", members, overrides).member?.name).toBe("C");
+    expect(calculateDutyForWeek("2026-W12", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("C");
     // W15 → override 命中 W15 → C
-    const w15 = calculateDutyForWeek("2026-W15", members, overrides);
+    const w15 = calculateDutyForWeek("2026-W15", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
     expect(w15.member?.name).toBe("C");
     expect(w15.source).toBe("override");
     // W16 → anchor=W15(C), delta=1 → A
-    expect(calculateDutyForWeek("2026-W16", members, overrides).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W16", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("A");
     // W17 → anchor=W15(C), delta=2 → B
-    expect(calculateDutyForWeek("2026-W17", members, overrides).member?.name).toBe("B");
+    expect(calculateDutyForWeek("2026-W17", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("B");
   });
 
   test("override 指向已停用的 member → fallback 到前一筆 override", () => {
@@ -109,7 +109,7 @@ describe("calculateDutyForWeek", () => {
       makeOverride("2026-W15", 2), // anchor=B → 已停用 → 跳過
     ];
     // W16：應該回退用 W10(A) 為 anchor，delta=6 → A,C,A,C,A,C,A → activeMembers=[A,C]，offset=(0+6)%2=0 → A
-    const w16 = calculateDutyForWeek("2026-W16", members, overrides);
+    const w16 = calculateDutyForWeek("2026-W16", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
     expect(w16.member?.name).toBe("A");
     expect(w16.appliedOverride?.isoWeek).toBe("2026-W10");
   });
@@ -120,7 +120,7 @@ describe("calculateDutyForWeek", () => {
       makeMember(2, "B", 1, false),
     ];
     const overrides = [makeOverride("2026-W10", 2)];
-    const result = calculateDutyForWeek("2026-W18", members, overrides);
+    const result = calculateDutyForWeek("2026-W18", members, overrides, { anchorIsoWeek: null, anchorMemberId: null });
     expect(result.member?.name).toBe("A");
     expect(result.source).toBe("auto");
     expect(result.appliedOverride).toBeNull();
@@ -133,7 +133,7 @@ describe("calculateDutyForWeek", () => {
       makeMember(3, "C", 2),
     ];
     // 沒 override，autoAnchor=W18 → W18=A, W19=C, W20=A
-    const opts = { autoAnchorIsoWeek: "2026-W18" };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1 };
     expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("C");
     expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("A");
@@ -145,7 +145,7 @@ describe("calculateDutyForWeek", () => {
       makeMember(2, "B", 1),
       makeMember(3, "C", 2),
     ];
-    const opts = { autoAnchorIsoWeek: "2026-W18" };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1 };
     expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("B");
     expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("C");
@@ -156,14 +156,14 @@ describe("calculateDutyForWeek", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
     const overrides = [makeOverride("2025-W52", 1)];
     // 2025-W52 → A; 2026-W01 → B; 2026-W02 → A
-    expect(calculateDutyForWeek("2025-W52", members, overrides).member?.name).toBe("A");
-    expect(calculateDutyForWeek("2026-W01", members, overrides).member?.name).toBe("B");
-    expect(calculateDutyForWeek("2026-W02", members, overrides).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2025-W52", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W01", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("B");
+    expect(calculateDutyForWeek("2026-W02", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("A");
   });
 
   test("weeksPerSlot=2：每人連值 2 週", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
-    const opts = { autoAnchorIsoWeek: "2026-W18", weeksPerSlot: 2 };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1, weeksPerSlot: 2 };
     expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("B");
@@ -177,7 +177,7 @@ describe("calculateDutyForWeek", () => {
       makeMember(2, "B", 1),
       makeMember(3, "C", 2),
     ];
-    const opts = { autoAnchorIsoWeek: "2026-W18", weeksPerSlot: 3 };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1, weeksPerSlot: 3 };
     // W18-W20 = A; W21-W23 = B; W24-W26 = C; W27-W29 = A
     expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("A");
@@ -197,7 +197,7 @@ describe("calculateDutyForWeek", () => {
     // 但 W19 manually 改派為 C → W19 起新 slot
     // → W19=C(override), W20=C(slot 同), W21=A, W22=A, W23=B, W24=B
     const overrides = [makeOverride("2026-W19", 3)];
-    const opts = { autoAnchorIsoWeek: "2026-W18", weeksPerSlot: 2 };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1, weeksPerSlot: 2 };
     expect(calculateDutyForWeek("2026-W18", members, overrides, opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, overrides, opts).member?.name).toBe("C");
     expect(calculateDutyForWeek("2026-W20", members, overrides, opts).member?.name).toBe("C");
@@ -208,7 +208,7 @@ describe("calculateDutyForWeek", () => {
 
   test("weeksPerSlot=1 跟原本行為一致（不傳 = 預設 1）", () => {
     const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
-    const opts = { autoAnchorIsoWeek: "2026-W18" };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1 };
     expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("B");
     expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("A");
@@ -223,7 +223,7 @@ describe("calculateDutyForWeek", () => {
     // autoAnchor=W18 → W18=A,W19=B,W20=C,W21=A
     // 在 W19 改派為 C、不影響後續 → W19=C(override)、W20=C(原本順序)、W21=A(原本)
     const overrides = [makeOverride("2026-W19", 3, false)];
-    const opts = { autoAnchorIsoWeek: "2026-W18" };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1 };
     expect(calculateDutyForWeek("2026-W18", members, overrides, opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, overrides, opts).member?.name).toBe("C");
     expect(calculateDutyForWeek("2026-W20", members, overrides, opts).member?.name).toBe("C");
@@ -238,7 +238,7 @@ describe("calculateDutyForWeek", () => {
     ];
     // 在 W19 改派為 C、且影響後續 → W19=C, W20=A, W21=B, W22=C
     const overrides = [makeOverride("2026-W19", 3, true)];
-    const opts = { autoAnchorIsoWeek: "2026-W18" };
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 1 };
     expect(calculateDutyForWeek("2026-W18", members, overrides, opts).member?.name).toBe("A");
     expect(calculateDutyForWeek("2026-W19", members, overrides, opts).member?.name).toBe("C");
     expect(calculateDutyForWeek("2026-W20", members, overrides, opts).member?.name).toBe("A");
@@ -259,9 +259,67 @@ describe("calculateDutyForWeek", () => {
       makeOverride("2026-W10", 2, true),
       makeOverride("2026-W11", 1, false),
     ];
-    expect(calculateDutyForWeek("2026-W10", members, overrides).member?.name).toBe("B");
-    expect(calculateDutyForWeek("2026-W11", members, overrides).member?.name).toBe("A");
-    expect(calculateDutyForWeek("2026-W12", members, overrides).member?.name).toBe("A");
-    expect(calculateDutyForWeek("2026-W13", members, overrides).member?.name).toBe("B");
+    expect(calculateDutyForWeek("2026-W10", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("B");
+    expect(calculateDutyForWeek("2026-W11", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W12", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W13", members, overrides, { anchorIsoWeek: null, anchorMemberId: null }).member?.name).toBe("B");
+  });
+
+  // === anchor-based rotation (取代舊 autoAnchorIsoWeek + member[0]) ===
+
+  test("anchor 不是 member[0]：從 anchorMemberId 在 active list 的 index 開始輪", () => {
+    const members = [
+      makeMember(1, "A", 0),
+      makeMember(2, "B", 1),
+      makeMember(3, "C", 2),
+    ];
+    // anchor=W18 為 B（id=2，index=1）
+    // → W18=B, W19=C, W20=A, W21=B
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 2 };
+    expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("B");
+    expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("C");
+    expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W21", members, [], opts).member?.name).toBe("B");
+  });
+
+  test("anchorMemberId 已被停用 → fall back 到 activeMembers[0]、anchor 週仍用 anchorIsoWeek", () => {
+    const members = [
+      makeMember(1, "A", 0),
+      makeMember(2, "X", 1, false), // X 停用
+      makeMember(3, "C", 2),
+    ];
+    // anchorMemberId=2 (X) 已停用 → fall back 到 activeMembers[0]=A
+    // activeMembers 變 [A, C] → W18=A, W19=C, W20=A
+    const opts = { anchorIsoWeek: "2026-W18", anchorMemberId: 2 };
+    expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("C");
+    expect(calculateDutyForWeek("2026-W20", members, [], opts).member?.name).toBe("A");
+  });
+
+  test("anchorIsoWeek null（setting 還沒 seed）→ 防禦 fallback 到 activeMembers[0]", () => {
+    const members = [makeMember(1, "A", 0), makeMember(2, "B", 1)];
+    const opts = { anchorIsoWeek: null, anchorMemberId: null };
+    // 沒 anchor 也沒 override → fallback 全部回 activeMembers[0]
+    expect(calculateDutyForWeek("2026-W18", members, [], opts).member?.name).toBe("A");
+    expect(calculateDutyForWeek("2026-W19", members, [], opts).member?.name).toBe("A");
+  });
+
+  test("anchor 跟時間漂移無關：不同呼叫時刻同一 anchor 結果一致", () => {
+    const members = [
+      makeMember(1, "A", 0),
+      makeMember(2, "B", 1),
+      makeMember(3, "C", 2),
+    ];
+    // anchor 固定 W10 → 不論「現在」是 W18 還是 W30，計算 W18 永遠同一結果
+    const opts = { anchorIsoWeek: "2026-W10", anchorMemberId: 1 };
+    const w18 = calculateDutyForWeek("2026-W18", members, [], opts).member?.name;
+    const w19 = calculateDutyForWeek("2026-W19", members, [], opts).member?.name;
+    const w20 = calculateDutyForWeek("2026-W20", members, [], opts).member?.name;
+    // delta from anchor W10: W18=+8 → A,B,C 循環 8 % 3 = 2 → C
+    // W19=+9 → 9%3=0 → A
+    // W20=+10 → 10%3=1 → B
+    expect(w18).toBe("C");
+    expect(w19).toBe("A");
+    expect(w20).toBe("B");
   });
 });

@@ -1,4 +1,4 @@
-import { getOrCreateClientId } from "./debug/clientIdentity";
+import { getOrCreateClientId } from "../../utils/clientIdentity";
 import type { ReportMutationPayload } from "../../api/workReport";
 import type { WorkReportFormId, WorkReportMutationTaskKind } from "./types";
 

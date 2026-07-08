@@ -1,4 +1,4 @@
-import { memo, useCallback } from "react";
+import { memo, useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { ExclamationCircleOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
@@ -13,9 +13,12 @@ import type {
   WorkReportLandingPageKey,
   WorkReportTopView,
 } from "../types";
+import { EfficiencyStatsModal } from "./EfficiencyStatsModal";
+import { CsvIcon } from "./ExportFileIcons";
 import { SystemNoticePanel } from "./SystemNoticePanel";
 import type { NoticeState } from "../types";
 import type { WorkReportSelectableColumnMeta } from "../hooks/workReportColumnDefinitions";
+import { APP_VERSION } from "../../../version";
 
 interface SelectOption {
   value: string;
@@ -118,6 +121,7 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
   systemStatusNotice,
 }: WorkReportToolbarProps) {
   const { t } = useTranslation(["workReport", "common"]);
+  const [efficiencyStatsOpen, setEfficiencyStatsOpen] = useState(false);
   const handleConfirmRefresh = useCallback(() => {
     Modal.confirm({
       title: t("workReport:toolbar.refreshConfirm.title"),
@@ -142,61 +146,13 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
       <div className="toolbar-layer toolbar-layer--title">
         <div className="toolbar-layer-main-row">
           <div className="page-title-block">
-            <h1>{t("workReport:page.title")}</h1>
+            <h1>
+              {t("workReport:page.title")}
+              <span className="app-version-tag" title={`App version ${APP_VERSION}`}>
+                v{APP_VERSION}
+              </span>
+            </h1>
             <div className="page-group-pill">{currentPageGroupLabel}</div>
-            <div className="page-view-switch" role="tablist" aria-label={t("workReport:page.viewSwitchAria")}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTopView === "report" && activeLandingPageKey === "thread-rolling-104"}
-                className={`page-view-chip ${
-                  activeTopView === "report" && activeLandingPageKey === "thread-rolling-104" ? "is-active" : ""
-                }`}
-                onClick={() => onOpenLandingPage("thread-rolling-104")}
-              >
-                {t("workReport:page.views.threadRolling104")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTopView === "report" && activeLandingPageKey === "heading-105"}
-                className={`page-view-chip ${
-                  activeTopView === "report" && activeLandingPageKey === "heading-105" ? "is-active" : ""
-                }`}
-                onClick={() => onOpenLandingPage("heading-105")}
-              >
-                {t("workReport:page.views.heading105")}
-              </button>
-              {onOpenDowntimePage ? (
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={false}
-                  className="page-view-chip"
-                  onClick={onOpenDowntimePage}
-                >
-                  {t("workReport:page.views.downtime16")}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTopView === "local-settings"}
-                className={`page-view-chip ${activeTopView === "local-settings" ? "is-active" : ""}`}
-                onClick={onOpenLocalSettingsView}
-              >
-                {t("workReport:page.views.localSettings")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTopView === "technical-info"}
-                className={`page-view-chip ${activeTopView === "technical-info" ? "is-active" : ""}`}
-                onClick={onOpenTechnicalInfoView}
-              >
-                {t("workReport:page.views.technicalInfo")}
-              </button>
-            </div>
           </div>
 
           <div className="toolbar-title-side">
@@ -335,6 +291,69 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
               </label>
             </div>
           </div>
+        </div>
+        <div className="page-view-switch" role="tablist" aria-label={t("workReport:page.viewSwitchAria")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTopView === "report" && activeLandingPageKey === "thread-rolling-104"}
+            className={`page-view-chip ${
+              activeTopView === "report" && activeLandingPageKey === "thread-rolling-104" ? "is-active" : ""
+            }`}
+            onClick={() => onOpenLandingPage("thread-rolling-104")}
+          >
+            {t("workReport:page.views.threadRolling104")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTopView === "report" && activeLandingPageKey === "heading-105"}
+            className={`page-view-chip ${
+              activeTopView === "report" && activeLandingPageKey === "heading-105" ? "is-active" : ""
+            }`}
+            onClick={() => onOpenLandingPage("heading-105")}
+          >
+            {t("workReport:page.views.heading105")}
+          </button>
+          {onOpenDowntimePage ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={false}
+              className="page-view-chip"
+              onClick={onOpenDowntimePage}
+            >
+              {t("workReport:page.views.downtime16")}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={false}
+            className="page-view-chip"
+            onClick={() => setEfficiencyStatsOpen(true)}
+          >
+            <CsvIcon size="1.05em" />
+            {t("workReport:efficiencyStats.entry")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTopView === "local-settings"}
+            className={`page-view-chip ${activeTopView === "local-settings" ? "is-active" : ""}`}
+            onClick={onOpenLocalSettingsView}
+          >
+            {t("workReport:page.views.localSettings")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTopView === "technical-info"}
+            className={`page-view-chip page-view-chip--push-right ${activeTopView === "technical-info" ? "is-active" : ""}`}
+            onClick={onOpenTechnicalInfoView}
+          >
+            {t("workReport:page.views.technicalInfo")}
+          </button>
         </div>
 
         {activeTopView === "report" && (
@@ -493,6 +512,10 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
         </div>
       </section>
       )}
+      <EfficiencyStatsModal
+        open={efficiencyStatsOpen}
+        onClose={() => setEfficiencyStatsOpen(false)}
+      />
     </header>
   );
 });

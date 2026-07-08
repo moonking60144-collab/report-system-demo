@@ -69,9 +69,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 export type DemoFixture = Record<string, Record<string, RagicRecord>>;
+type FormCacheClearListener = (formPath?: string) => void;
 
 export class MockRagicClient {
   private readonly store: Map<string, Map<string, RagicRecord>> = new Map();
+  private readonly formCacheClearListeners = new Set<FormCacheClearListener>();
   private nextEntryId = 1_000_000;
   private nextSubtableRowId = 50_000;
   private readonly seed: DemoFixture;
@@ -97,6 +99,7 @@ export class MockRagicClient {
     this.nextSubtableRowId = 50_000;
     this.loadSeedIntoStore();
     this.lastResetAt = new Date().toISOString();
+    this.notifyFormCacheCleared();
   }
 
   /** 回傳 reset 元資料給 /__demo/info 使用 */
@@ -413,12 +416,19 @@ export class MockRagicClient {
     );
   }
 
-  clearFormCache(_formPath: string): void {
-    // 記憶體 store 不需要 cache 清除
+  clearFormCache(formPath: string): void {
+    this.notifyFormCacheCleared(formPath);
   }
 
   clearCache(): void {
-    // no-op
+    this.notifyFormCacheCleared();
+  }
+
+  onFormCacheCleared(listener: FormCacheClearListener): () => void {
+    this.formCacheClearListeners.add(listener);
+    return () => {
+      this.formCacheClearListeners.delete(listener);
+    };
   }
 
   getRuntimeStats(): RagicRequestSchedulerStats {
@@ -428,6 +438,19 @@ export class MockRagicClient {
   /** Demo control plane bridge：給 /__demo/info 用，完整 state 走 /__demo/fault-injection */
   getFaultInjection(): { enabled: boolean } {
     return { enabled: getFaultInjectionState().enabled };
+  }
+
+  private notifyFormCacheCleared(formPath?: string): void {
+    for (const listener of this.formCacheClearListeners) {
+      try {
+        listener(formPath);
+      } catch (error) {
+        console.warn("[mock-ragic-client][cache-clear-listener-failed]", {
+          formPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   // --- 內部：寫入時的 merge / subtable 處理 ---

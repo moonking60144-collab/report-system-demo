@@ -92,7 +92,13 @@ export function startSqliteAutoSync(): void {
   }
 
   const scheduleCycle = () => {
-    void runAutoSyncCycle(forms);
+    void runAutoSyncCycle(forms).catch((error) => {
+      // runAutoSyncCycle 內已逐 form try/catch，但 form16 staleness 檢查等
+      // 仍可能 reject 整個 cycle；補一層保險避免變成 unhandledRejection
+      console.warn("[sqlite-auto-sync-cycle-failed]", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   };
 
   autoSyncStartupTimer = setTimeout(() => {

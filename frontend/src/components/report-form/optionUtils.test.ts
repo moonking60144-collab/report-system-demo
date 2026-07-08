@@ -15,8 +15,8 @@ function makeMachineOption(
 ): FormOptionItem {
   return {
     value,
-    label: label ?? `${value} - ${value}Process A Machine`,
-    display: label ?? `${value} - ${value}Process A Machine`,
+    label: label ?? `${value} - ${value}搓牙機`,
+    display: label ?? `${value} - ${value}搓牙機`,
     machineDefault: status
       ? {
           machineCode: value,
@@ -49,14 +49,14 @@ describe("filterActiveMachineOptionsWithCurrentValue", () => {
   test("當前值為報廢時，補回清單頂部並加 status suffix 到 label 跟 display", () => {
     const result = filterActiveMachineOptionsWithCurrentValue([inUse1, retired, inUse2], "P30");
     expect(result.map((o) => o.value)).toEqual(["P30", "P10", "P20"]);
-    expect(result[0]?.label).toBe("P30 - P30Process A Machine（報廢）");
-    expect(result[0]?.display).toBe("P30 - P30Process A Machine（報廢）");
+    expect(result[0]?.label).toBe("P30 - P30搓牙機（報廢）");
+    expect(result[0]?.display).toBe("P30 - P30搓牙機（報廢）");
   });
 
   test("當前值為售出時也加 status suffix 到兩個欄位", () => {
     const result = filterActiveMachineOptionsWithCurrentValue([inUse1, sold], "P40");
-    expect(result[0]?.label).toBe("P40 - P40Process A Machine（售出）");
-    expect(result[0]?.display).toBe("P40 - P40Process A Machine（售出）");
+    expect(result[0]?.label).toBe("P40 - P40搓牙機（售出）");
+    expect(result[0]?.display).toBe("P40 - P40搓牙機（售出）");
   });
 
   test("當前值空字串時不補位", () => {
@@ -113,16 +113,16 @@ describe("buildMachineStatusSuffix", () => {
 describe("decorateMachineOptionLabel", () => {
   test("使用中 / 無狀態回原 label", () => {
     expect(decorateMachineOptionLabel(makeMachineOption("P10", "使用中"))).toBe(
-      "P10 - P10Process A Machine"
+      "P10 - P10搓牙機"
     );
     expect(decorateMachineOptionLabel(makeMachineOption("P10", undefined))).toBe(
-      "P10 - P10Process A Machine"
+      "P10 - P10搓牙機"
     );
   });
 
   test("非使用中加「（狀態）」suffix", () => {
     expect(decorateMachineOptionLabel(makeMachineOption("P30", "報廢"))).toBe(
-      "P30 - P30Process A Machine（報廢）"
+      "P30 - P30搓牙機（報廢）"
     );
   });
 });

@@ -105,14 +105,14 @@ function translateByMap(
 }
 
 const REPORT_TYPE_KEY_MAP: Record<string, string> = {
-  "HF-Forge": "workReport:values.reportType.hfForging",
-  "TI-ProcessA": "workReport:values.reportType.tiThreadRolling",
-  "PROC-LM": "workReport:values.reportType.processingLm",
-  "PROC-EP": "workReport:values.reportType.processingEp",
-  "CH-ManualInspect": "workReport:values.reportType.manualInspectionA",
-  "CH-MachineInspect": "workReport:values.reportType.machineInspectionH",
-  "PA-Pack": "workReport:values.reportType.packaging",
-  "SP-Stock": "workReport:values.reportType.stockPrep",
+  "HF鍛造": "workReport:values.reportType.hfForging",
+  "TI搓牙": "workReport:values.reportType.tiThreadRolling",
+  "3F加工-LM": "workReport:values.reportType.processingLm",
+  "3F加工-EP": "workReport:values.reportType.processingEp",
+  "CH人工全檢A": "workReport:values.reportType.manualInspectionA",
+  "CH機台全檢H": "workReport:values.reportType.machineInspectionH",
+  "PA包裝": "workReport:values.reportType.packaging",
+  "SP備貨": "workReport:values.reportType.stockPrep",
 };
 
 const INPUT_OPTION_KEY_MAP: Record<string, string> = {

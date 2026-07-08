@@ -6,12 +6,88 @@ import { workReportBatchDeleteTaskService } from "../services/work-report/workRe
 import { workReportBatchCreateTaskService } from "../services/work-report/workReportBatchCreateTaskService";
 import { workReportTaskRegistryService } from "../services/work-report/workReportTaskRegistryService";
 import { workReportMutationProjectionService } from "../services/work-report-sync/workReportMutationProjectionService";
+import type {
+  ProjectionApplyResult,
+  ProjectionReason,
+} from "../services/work-report-sync/workReportMutationProjectionServiceFactory";
 import { workReportSyncService } from "../services/work-report-sync/workReportSyncService";
 import { workReportService } from "../services/workReportService";
 import { createWorkReportRouter } from "./workReportRouterFactory";
 import { publishWorkReportFormUpdated, publishWorkReportUpdated } from "../events/realtimeEventBus";
 import type { ReportWritePayload } from "../types/workReport";
 import type { CreateReportBatchSharedState } from "../services/work-report/mutation/runCreateReportFlow";
+import { runBackgroundTask } from "../infra/backgroundTaskRunner";
+
+function shouldPublishAfterBackgroundProjection(result: ProjectionApplyResult): boolean {
+  return result === "applied" || result === "deleted";
+}
+
+async function enqueueProjectionAfterBatchMutation(
+  formId: string,
+  entryId: string,
+  reason: ProjectionReason
+): Promise<void> {
+  let projectionSeq = 0;
+  try {
+    projectionSeq = await workReportMutationProjectionService.enqueueEntryAfterMutation(
+      formId,
+      entryId,
+      reason
+    );
+  } catch (error) {
+    console.warn("[sqlite-entry-projection-enqueue-failed]", {
+      formId,
+      entryId,
+      reason,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  if (projectionSeq <= 0) {
+    return;
+  }
+
+  runBackgroundTask(
+    "work-report-batch-mutation-projection",
+    async () => {
+      const result = await workReportMutationProjectionService.applyQueuedProjectionAfterMutation(
+        formId,
+        entryId,
+        reason,
+        projectionSeq
+      );
+      if (shouldPublishAfterBackgroundProjection(result)) {
+        publishWorkReportUpdated(formId, entryId);
+        publishWorkReportFormUpdated(formId);
+      }
+    },
+    (error) => {
+      console.warn("[sqlite-entry-projection-apply-failed]", {
+        formId,
+        entryId,
+        reason,
+        projectionSeq,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  );
+}
+
+async function finalizeBatchCreateAndPublish(
+  formId: string,
+  entryId: string,
+  createdCount: number,
+  createdRowIds: string[]
+): Promise<void> {
+  if (createdCount <= 0) {
+    return;
+  }
+  await workReportService.finalizeBatchCreate(formId, entryId, createdRowIds);
+  await enqueueProjectionAfterBatchMutation(formId, entryId, "create");
+  publishWorkReportUpdated(formId, entryId);
+  publishWorkReportFormUpdated(formId);
+}
 
 const workReportRouter = createWorkReportRouter({
   requestSync: workReportSyncService.requestSync.bind(workReportSyncService),
@@ -26,6 +102,7 @@ const workReportRouter = createWorkReportRouter({
   getRawPreview: workReportReadService.getRawPreview.bind(workReportReadService),
   getReportByEntryId: workReportReadService.getReportByEntryId.bind(workReportReadService),
   createReport: workReportService.createReport.bind(workReportService),
+  assertCreateEntryAcceptsReports: workReportService.assertCreateEntryAcceptsReports.bind(workReportService),
   enqueueCreateTask: createReportTaskService.enqueue.bind(createReportTaskService),
   getCreateTask: createReportTaskService.getTask.bind(createReportTaskService),
   requestBatchCreate: async (input) =>
@@ -36,58 +113,72 @@ const workReportRouter = createWorkReportRouter({
       };
       return workReportBatchCreateTaskService.requestBatchCreate({
         ...input,
+        beforeRun: async () => {
+          await workReportService.assertEntryEditableBySession({
+            formId: input.formId,
+            entryId: input.entryId,
+            editSessionId: input.editSessionId,
+          });
+          await workReportService.assertEntryLockVersion({
+            formId: input.formId,
+            entryId: input.entryId,
+            editSessionId: input.editSessionId,
+            editLockVersion: input.editLockVersion,
+          });
+          await workReportService.assertBatchCreateEntryAcceptsReports(
+            input.formId,
+            input.entryId
+          );
+        },
         createRow: async (payload) =>
           workReportService.createReport(input.formId, input.entryId, payload as ReportWritePayload, {
             mode: { kind: "batch", shared: batchSharedState },
+            skipEntryPreflight: true,
           }),
         finalizeAfterCreate: async ({ createdCount, createdRowIds }) => {
-          if (createdCount <= 0) {
-            return;
-          }
-          await workReportService.finalizeBatchCreate(
+          await finalizeBatchCreateAndPublish(
             input.formId,
             input.entryId,
+            createdCount,
             createdRowIds
           );
-          await workReportMutationProjectionService.projectEntryAfterMutation(
-            input.formId,
-            input.entryId,
-            "create"
-          );
-          publishWorkReportUpdated(input.formId, input.entryId);
-          publishWorkReportFormUpdated(input.formId);
         },
       });
     })(),
   requestBatchCreateFinalizeRetry: async (input) =>
     workReportBatchCreateTaskService.requestBatchCreateFinalizeRetry({
+      formId: input.formId,
+      entryId: input.entryId,
       taskId: input.taskId,
       actorClientId: input.actorClientId,
       actorTabId: input.actorTabId,
       actorIp: input.actorIp,
       actorLabel: input.actorLabel,
       finalizeAfterCreate: async ({ createdCount, createdRowIds }) => {
-        if (createdCount <= 0) {
-          return;
-        }
-        await workReportService.finalizeBatchCreate(
+        await finalizeBatchCreateAndPublish(
           input.formId,
           input.entryId,
+          createdCount,
           createdRowIds
         );
-        await workReportMutationProjectionService.projectEntryAfterMutation(
-          input.formId,
-          input.entryId,
-          "create"
-        );
-        publishWorkReportUpdated(input.formId, input.entryId);
-        publishWorkReportFormUpdated(input.formId);
       },
     }),
   requestBatchDelete: async ({ onRowDeleted, ...input }) => {
     const taskResponse = await workReportBatchDeleteTaskService.requestBatchDelete({
       ...input,
+      beforeRun: async () =>
+        workReportService.assertEntryNotModified(
+          input.formId,
+          input.entryId,
+          input.expectedEntryLastUpdatedAt
+        ),
       deleteRow: async (rowId) => {
+        await workReportService.assertEntryEditableBySession({
+          formId: input.formId,
+          entryId: input.entryId,
+          rowId,
+          editSessionId: input.editSessionId,
+        });
         const result = await workReportService.hardDeleteReport(
           input.formId,
           input.entryId,

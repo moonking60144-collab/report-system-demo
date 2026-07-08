@@ -29,6 +29,8 @@ services:
         value: "true"
       - key: NODE_ENV
         value: production
+      - key: TRUST_PROXY
+        value: "1"
       # Render 會幫你產生並注入這個值；dashboard 可看
       # 前端 FaultInjectionPanel 第一次展開會跟你要這個 key
       - key: DEMO_RESET_KEY

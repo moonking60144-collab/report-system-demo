@@ -151,7 +151,10 @@ CREATE TABLE IF NOT EXISTS batch_create_row_keys (
   form_id TEXT NOT NULL,
   entry_id TEXT NOT NULL,
   ragic_row_id TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  status TEXT NOT NULL DEFAULT 'confirmed',
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_batch_create_row_keys_created_at
@@ -194,7 +197,10 @@ CREATE TABLE IF NOT EXISTS form16_client_row_keys (
   client_row_key TEXT PRIMARY KEY,
   entry_id TEXT NOT NULL,
   source TEXT NOT NULL,                    -- 'downtime' | 'work-report-104' | 'work-report-105' 等
-  created_at TEXT NOT NULL
+  status TEXT NOT NULL DEFAULT 'confirmed',
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_form16_client_row_keys_created_at
@@ -215,39 +221,65 @@ CREATE INDEX IF NOT EXISTS idx_notice_sessions_expires_at
   ON notice_sessions (expires_at_ms);
 `;
 
+const WORK_REPORT_ENTRY_COLUMN_MIGRATIONS = [
+  { name: "work_order_no", sql: "ALTER TABLE work_report_entries ADD COLUMN work_order_no TEXT" },
+  {
+    name: "customer_part_no",
+    sql: "ALTER TABLE work_report_entries ADD COLUMN customer_part_no TEXT",
+  },
+  { name: "machine_code", sql: "ALTER TABLE work_report_entries ADD COLUMN machine_code TEXT" },
+  { name: "filter_machine_code", sql: "ALTER TABLE work_report_entries ADD COLUMN filter_machine_code TEXT" },
+  { name: "status", sql: "ALTER TABLE work_report_entries ADD COLUMN status TEXT" },
+  {
+    name: "ragic_unfinished_status",
+    sql: "ALTER TABLE work_report_entries ADD COLUMN ragic_unfinished_status TEXT",
+  },
+  { name: "site_running", sql: "ALTER TABLE work_report_entries ADD COLUMN site_running INTEGER" },
+  { name: "start_schedule", sql: "ALTER TABLE work_report_entries ADD COLUMN start_schedule INTEGER" },
+  { name: "sort_order", sql: "ALTER TABLE work_report_entries ADD COLUMN sort_order REAL" },
+  {
+    name: "planned_start_date",
+    sql: "ALTER TABLE work_report_entries ADD COLUMN planned_start_date TEXT",
+  },
+  { name: "last_updated_at", sql: "ALTER TABLE work_report_entries ADD COLUMN last_updated_at TEXT" },
+  { name: "search_text", sql: "ALTER TABLE work_report_entries ADD COLUMN search_text TEXT" },
+];
+
+const WORK_REPORT_ROW_COLUMN_MIGRATIONS = [
+  { name: "date_value", sql: "ALTER TABLE work_report_rows ADD COLUMN date_value TEXT" },
+  { name: "operator_id", sql: "ALTER TABLE work_report_rows ADD COLUMN operator_id TEXT" },
+  { name: "process_code", sql: "ALTER TABLE work_report_rows ADD COLUMN process_code TEXT" },
+  { name: "machine_id", sql: "ALTER TABLE work_report_rows ADD COLUMN machine_id TEXT" },
+];
+
 export async function initializeReadModelSchema(db: Database): Promise<void> {
   await db.exec(SCHEMA_SQL);
   await ensureWorkReportEntriesColumns(db);
+  await ensureBatchCreateRowKeyColumns(db);
+  await ensureForm16ClientRowKeyColumns(db);
+}
+
+async function ensureTableColumns(
+  db: Database,
+  tableName: string,
+  columns: Array<{ name: string; sql: string }>
+): Promise<Set<string>> {
+  const rows = await db.all<Array<{ name: string }>>(`PRAGMA table_info(${tableName})`);
+  const existingColumns = new Set(rows.map((row) => String(row.name)));
+  for (const column of columns) {
+    if (!existingColumns.has(column.name)) {
+      await db.exec(column.sql);
+      existingColumns.add(column.name);
+    }
+  }
+  return existingColumns;
 }
 
 async function ensureWorkReportEntriesColumns(db: Database): Promise<void> {
   await ensureWorkReportGenerationTables(db);
 
-  const rows = await db.all<Array<{ name: string }>>("PRAGMA table_info(work_report_entries)");
-  const existingColumns = new Set(rows.map((row) => String(row.name)));
-  const missingColumns = [
-    { name: "site_running", sql: "ALTER TABLE work_report_entries ADD COLUMN site_running INTEGER" },
-    { name: "start_schedule", sql: "ALTER TABLE work_report_entries ADD COLUMN start_schedule INTEGER" },
-    { name: "sort_order", sql: "ALTER TABLE work_report_entries ADD COLUMN sort_order REAL" },
-    {
-      name: "filter_machine_code",
-      sql: "ALTER TABLE work_report_entries ADD COLUMN filter_machine_code TEXT",
-    },
-    {
-      name: "planned_start_date",
-      sql: "ALTER TABLE work_report_entries ADD COLUMN planned_start_date TEXT",
-    },
-    { name: "last_updated_at", sql: "ALTER TABLE work_report_entries ADD COLUMN last_updated_at TEXT" },
-    { name: "search_text", sql: "ALTER TABLE work_report_entries ADD COLUMN search_text TEXT" },
-    {
-      name: "ragic_unfinished_status",
-      sql: "ALTER TABLE work_report_entries ADD COLUMN ragic_unfinished_status TEXT",
-    },
-  ].filter((column) => !existingColumns.has(column.name));
-
-  for (const column of missingColumns) {
-    await db.exec(column.sql);
-  }
+  await ensureTableColumns(db, "work_report_entries", WORK_REPORT_ENTRY_COLUMN_MIGRATIONS);
+  await ensureTableColumns(db, "work_report_rows", WORK_REPORT_ROW_COLUMN_MIGRATIONS);
 
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_work_report_entries_form_ragic_unfinished_status
@@ -270,28 +302,11 @@ async function ensureWorkReportGenerationTables(db: Database): Promise<void> {
     return;
   }
   const existingColumns = new Set(rows.map((row) => String(row.name)));
+  await ensureTableColumns(db, "work_report_entries", WORK_REPORT_ENTRY_COLUMN_MIGRATIONS);
+  await ensureTableColumns(db, "work_report_rows", WORK_REPORT_ROW_COLUMN_MIGRATIONS);
   if (existingColumns.has("generation_id")) {
     await ensureWorkReportGenerationIndexes(db);
     return;
-  }
-
-  for (const column of [
-    { name: "site_running", sql: "ALTER TABLE work_report_entries ADD COLUMN site_running INTEGER" },
-    { name: "start_schedule", sql: "ALTER TABLE work_report_entries ADD COLUMN start_schedule INTEGER" },
-    { name: "sort_order", sql: "ALTER TABLE work_report_entries ADD COLUMN sort_order REAL" },
-    { name: "filter_machine_code", sql: "ALTER TABLE work_report_entries ADD COLUMN filter_machine_code TEXT" },
-    { name: "planned_start_date", sql: "ALTER TABLE work_report_entries ADD COLUMN planned_start_date TEXT" },
-    { name: "last_updated_at", sql: "ALTER TABLE work_report_entries ADD COLUMN last_updated_at TEXT" },
-    { name: "search_text", sql: "ALTER TABLE work_report_entries ADD COLUMN search_text TEXT" },
-    {
-      name: "ragic_unfinished_status",
-      sql: "ALTER TABLE work_report_entries ADD COLUMN ragic_unfinished_status TEXT",
-    },
-  ]) {
-    if (!existingColumns.has(column.name)) {
-      await db.exec(column.sql);
-      existingColumns.add(column.name);
-    }
   }
 
   await db.exec("PRAGMA foreign_keys=OFF;");
@@ -475,4 +490,50 @@ async function ensureSyncStateColumns(db: Database): Promise<void> {
         AND snapshot_at IS NOT NULL
     `);
   }
+}
+
+async function ensureBatchCreateRowKeyColumns(db: Database): Promise<void> {
+  const rows = await db.all<Array<{ name: string }>>("PRAGMA table_info(batch_create_row_keys)");
+  const existingColumns = new Set(rows.map((row) => String(row.name)));
+  if (!existingColumns.has("status")) {
+    await db.exec("ALTER TABLE batch_create_row_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'");
+  }
+  if (!existingColumns.has("error_message")) {
+    await db.exec("ALTER TABLE batch_create_row_keys ADD COLUMN error_message TEXT");
+  }
+  if (!existingColumns.has("updated_at")) {
+    await db.exec("ALTER TABLE batch_create_row_keys ADD COLUMN updated_at TEXT");
+    await db.exec(`
+      UPDATE batch_create_row_keys
+      SET updated_at = created_at
+      WHERE updated_at IS NULL
+    `);
+  }
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_batch_create_row_keys_status
+      ON batch_create_row_keys (status, updated_at)
+  `);
+}
+
+async function ensureForm16ClientRowKeyColumns(db: Database): Promise<void> {
+  const rows = await db.all<Array<{ name: string }>>("PRAGMA table_info(form16_client_row_keys)");
+  const existingColumns = new Set(rows.map((row) => String(row.name)));
+  if (!existingColumns.has("status")) {
+    await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed'");
+  }
+  if (!existingColumns.has("error_message")) {
+    await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN error_message TEXT");
+  }
+  if (!existingColumns.has("updated_at")) {
+    await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN updated_at TEXT");
+    await db.exec(`
+      UPDATE form16_client_row_keys
+      SET updated_at = created_at
+      WHERE updated_at IS NULL
+    `);
+  }
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_form16_client_row_keys_status
+      ON form16_client_row_keys (status, updated_at)
+  `);
 }

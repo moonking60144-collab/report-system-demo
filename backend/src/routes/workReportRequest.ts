@@ -4,6 +4,7 @@ import type {
 } from "../types/workReport";
 import { HttpError } from "../utils/httpError";
 import { env } from "../config/env";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 const RAGIC_CALLBACK_ENTRY_ID_KEYS = [
   "entryId",
@@ -352,13 +353,19 @@ function assertRagicCallbackTokenValue(receivedToken: string | undefined): void 
     throw new HttpError(503, "尚未設定 Ragic callback token", "CALLBACK_TOKEN_NOT_CONFIGURED");
   }
   const received = String(receivedToken ?? "").trim();
-  if (!received || received !== expected) {
+  if (!received || !isTimingSafeTokenMatch(received, expected)) {
     throw new HttpError(403, "Ragic callback token 驗證失敗", "CALLBACK_TOKEN_INVALID");
   }
 }
 
 export function assertRagicCallbackToken(reqToken: string | undefined): void {
   assertRagicCallbackTokenValue(reqToken);
+}
+
+function isTimingSafeTokenMatch(received: string, expected: string): boolean {
+  const receivedDigest = createHash("sha256").update(received, "utf8").digest();
+  const expectedDigest = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(receivedDigest, expectedDigest);
 }
 
 function pickFirstCallbackValue(

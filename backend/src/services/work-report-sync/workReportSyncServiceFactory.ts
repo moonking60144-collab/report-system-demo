@@ -261,10 +261,12 @@ export class WorkReportSyncService {
         generationId: snapshotAt,
         processedSeq,
       });
+      const replayUpperSeq = await this.deps.getLatestProjectionSeq(task.formId);
       processedSeq = await this.replayPendingProjectionEntries(
         task.formId,
         processedSeq,
-        snapshotAt
+        snapshotAt,
+        replayUpperSeq
       );
       workReportDebugLog("sync", "replay-completed", {
         taskId,
@@ -273,21 +275,12 @@ export class WorkReportSyncService {
         processedSeq,
       });
 
-      const finalSnapshotAt = new Date().toISOString();
-      const counts = await this.deps.getFormSnapshotCounts(task.formId, {
+      let finalSnapshotAt = new Date().toISOString();
+      let counts = await this.deps.getFormSnapshotCounts(task.formId, {
         generationId: snapshotAt,
       });
       const finishedAt = new Date().toISOString();
 
-      this.patchTask(taskId, {
-        status: "success",
-        syncedEntries: counts.entryCount,
-        syncedRows: counts.rowCount,
-        snapshotAt: finalSnapshotAt,
-        finishedAt,
-        updatedAt: finishedAt,
-        message: "同步完成",
-      });
       await this.deps.upsertSyncState({
         formId: task.formId,
         status: "success",
@@ -305,6 +298,73 @@ export class WorkReportSyncService {
         await this.deps.markProjectionRangeProcessed(task.formId, processedSeq, finishedAt);
         await this.deps.cleanupProcessedProjectionEvents(task.formId, processedSeq);
       }
+
+      try {
+        const postPromoteProcessedSeq = await this.replayPendingProjectionEntriesOnce(
+          task.formId,
+          processedSeq,
+          snapshotAt
+        );
+        if (postPromoteProcessedSeq > processedSeq) {
+          const postPromoteProcessedAt = new Date().toISOString();
+          await this.deps.markProjectionRangeProcessed(
+            task.formId,
+            postPromoteProcessedSeq,
+            postPromoteProcessedAt
+          );
+          await this.deps.cleanupProcessedProjectionEvents(task.formId, postPromoteProcessedSeq);
+          processedSeq = postPromoteProcessedSeq;
+          finalSnapshotAt = postPromoteProcessedAt;
+          counts = await this.deps.getFormSnapshotCounts(task.formId, {
+            generationId: snapshotAt,
+          });
+          await this.deps.upsertSyncState({
+            formId: task.formId,
+            status: "success",
+            taskId,
+            startedAt,
+            finishedAt,
+            snapshotAt: finalSnapshotAt,
+            activeGenerationId: snapshotAt,
+            readModelVersion: READ_MODEL_SCHEMA_VERSION,
+            totalEntries: counts.entryCount,
+            totalRows: counts.rowCount,
+            message: "同步完成",
+          });
+          workReportDebugLog("sync", "post-promote-replay-completed", {
+            taskId,
+            formId: task.formId,
+            generationId: snapshotAt,
+            processedSeq,
+          });
+        }
+      } catch (postPromoteError) {
+        workReportDebugLog(
+          "sync",
+          "post-promote-replay-failed",
+          {
+            taskId,
+            formId: task.formId,
+            generationId: snapshotAt,
+            processedSeq,
+            error:
+              postPromoteError instanceof Error
+                ? postPromoteError.message
+                : String(postPromoteError),
+          },
+          "warn"
+        );
+      }
+
+      this.patchTask(taskId, {
+        status: "success",
+        syncedEntries: counts.entryCount,
+        syncedRows: counts.rowCount,
+        snapshotAt: finalSnapshotAt,
+        finishedAt,
+        updatedAt: finishedAt,
+        message: "同步完成",
+      });
 
       workReportDebugLog("sync", "succeeded", {
         taskId,
@@ -390,28 +450,45 @@ export class WorkReportSyncService {
   private async replayPendingProjectionEntries(
     formId: string,
     initialProcessedSeq: number,
+    generationId: string,
+    upperSeq: number
+  ): Promise<number> {
+    if (upperSeq <= initialProcessedSeq) {
+      return initialProcessedSeq;
+    }
+
+    const pendingEntries = await this.deps.listPendingProjectionEntries(
+      formId,
+      initialProcessedSeq,
+      upperSeq
+    );
+
+    for (const pendingEntry of pendingEntries) {
+      await this.refreshEntrySnapshot(formId, pendingEntry.entryId, generationId);
+    }
+
+    return upperSeq;
+  }
+
+  private async replayPendingProjectionEntriesOnce(
+    formId: string,
+    initialProcessedSeq: number,
     generationId: string
   ): Promise<number> {
-    let processedSeq = initialProcessedSeq;
-
-    while (true) {
-      const upperSeq = await this.deps.getLatestProjectionSeq(formId);
-      if (upperSeq <= processedSeq) {
-        return processedSeq;
-      }
-
-      const pendingEntries = await this.deps.listPendingProjectionEntries(
-        formId,
-        processedSeq,
-        upperSeq
-      );
-
-      for (const pendingEntry of pendingEntries) {
-        await this.refreshEntrySnapshot(formId, pendingEntry.entryId, generationId);
-      }
-
-      processedSeq = upperSeq;
+    const upperSeq = await this.deps.getLatestProjectionSeq(formId);
+    if (upperSeq <= initialProcessedSeq) {
+      return initialProcessedSeq;
     }
+
+    const pendingEntries = await this.deps.listPendingProjectionEntries(
+      formId,
+      initialProcessedSeq,
+      upperSeq
+    );
+    for (const pendingEntry of pendingEntries) {
+      await this.refreshEntrySnapshot(formId, pendingEntry.entryId, generationId);
+    }
+    return upperSeq;
   }
 
   private async refreshEntrySnapshot(

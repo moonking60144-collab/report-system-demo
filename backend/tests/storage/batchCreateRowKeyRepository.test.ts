@@ -30,10 +30,12 @@ test("record 後 lookup 可查到", async () => {
   assert.equal(hit?.formId, "104");
   assert.equal(hit?.entryId, "E-100");
   assert.equal(hit?.ragicRowId, "R-200");
+  assert.equal(hit?.status, "confirmed");
   assert.ok(hit?.createdAt);
+  assert.ok(hit?.updatedAt);
 });
 
-test("相同 key 重複 record 不會 overwrite 原映射（ON CONFLICT DO NOTHING）", async () => {
+test("相同 key 重複 record 不會覆蓋已 confirmed 原映射", async () => {
   const { repo } = await buildRepo();
   await repo.record({
     clientRowKey: "dup-key",
@@ -100,4 +102,98 @@ test("cleanupOlderThan 沒有符合條件時回 0", async () => {
   });
   const deleted = await repo.cleanupOlderThan("2026-01-01T00:00:00.000Z");
   assert.equal(deleted, 0);
+});
+
+test("reservePending 會建立 pending row，confirm 後轉為 confirmed", async () => {
+  const { repo } = await buildRepo();
+  const reserved = await repo.reservePending({
+    clientRowKey: "pending-key",
+    formId: "104",
+    entryId: "E-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  assert.equal(reserved.reserved, true);
+  assert.equal(reserved.record?.status, "pending");
+  assert.equal(reserved.record?.ragicRowId, "");
+
+  await repo.confirm({
+    clientRowKey: "pending-key",
+    formId: "104",
+    entryId: "E-1",
+    ragicRowId: "R-1",
+    updatedAt: "2026-01-01T00:01:00.000Z",
+  });
+
+  const hit = await repo.lookup("pending-key");
+  assert.equal(hit?.status, "confirmed");
+  assert.equal(hit?.ragicRowId, "R-1");
+  assert.equal(hit?.updatedAt, "2026-01-01T00:01:00.000Z");
+});
+
+test("markIndeterminate 會保留 key，releasePending 只刪 pending", async () => {
+  const { repo } = await buildRepo();
+  await repo.reservePending({
+    clientRowKey: "unknown-key",
+    formId: "104",
+    entryId: "E-1",
+  });
+
+  await repo.markIndeterminate({
+    clientRowKey: "unknown-key",
+    formId: "104",
+    entryId: "E-1",
+    errorMessage: "ECONNABORTED",
+    updatedAt: "2026-01-01T00:01:00.000Z",
+  });
+
+  const released = await repo.releasePending({
+    clientRowKey: "unknown-key",
+    formId: "104",
+    entryId: "E-1",
+  });
+  assert.equal(released, 0);
+
+  const hit = await repo.lookup("unknown-key");
+  assert.equal(hit?.status, "indeterminate");
+  assert.equal(hit?.errorMessage, "ECONNABORTED");
+});
+
+test("markStalePendingIndeterminate 只會把過久 pending 轉成 indeterminate", async () => {
+  const { repo } = await buildRepo();
+  await repo.reservePending({
+    clientRowKey: "old-pending",
+    formId: "104",
+    entryId: "E-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  await repo.reservePending({
+    clientRowKey: "fresh-pending",
+    formId: "104",
+    entryId: "E-1",
+    createdAt: "2026-01-01T00:10:00.000Z",
+  });
+  await repo.record({
+    clientRowKey: "confirmed",
+    formId: "104",
+    entryId: "E-1",
+    ragicRowId: "R-1",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const marked = await repo.markStalePendingIndeterminate({
+    thresholdIso: "2026-01-01T00:05:00.000Z",
+    errorMessage: "stale pending",
+    updatedAt: "2026-01-01T00:20:00.000Z",
+  });
+
+  assert.equal(marked, 1);
+  const oldPending = await repo.lookup("old-pending");
+  const freshPending = await repo.lookup("fresh-pending");
+  const confirmed = await repo.lookup("confirmed");
+  assert.equal(oldPending?.status, "indeterminate");
+  assert.equal(oldPending?.errorMessage, "stale pending");
+  assert.equal(oldPending?.updatedAt, "2026-01-01T00:20:00.000Z");
+  assert.equal(freshPending?.status, "pending");
+  assert.equal(confirmed?.status, "confirmed");
 });

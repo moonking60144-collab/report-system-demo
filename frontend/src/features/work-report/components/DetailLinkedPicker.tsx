@@ -4,8 +4,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
+import "../styles/detail-linked-picker.css";
 
 interface DetailLinkedPickerOption {
   value: string;
@@ -91,6 +93,7 @@ interface DetailLinkedPickerModalProps {
   searchValue: string;
   options: DetailLinkedPickerOption[];
   selectedValue: string;
+  initialFocusValue?: string | null;
   onSearchChange: (value: string) => void;
   onSelect: (value: string) => void;
   onClose: () => void;
@@ -137,11 +140,14 @@ export function DetailLinkedPickerModal({
   searchValue,
   options,
   selectedValue,
+  initialFocusValue = null,
   onSearchChange,
   onSelect,
   onClose,
 }: DetailLinkedPickerModalProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const initialFocusAppliedRef = useRef(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const shouldRenderCurrentSelection =
@@ -229,6 +235,16 @@ export function DetailLinkedPickerModal({
       ? pickerVirtualItems[pickerVirtualItems.length - 1].top +
         pickerVirtualItems[pickerVirtualItems.length - 1].height
       : 0;
+  const handleOptionKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    value: string
+  ) => {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    onSelect(value);
+  };
 
   useLayoutEffect(() => {
     if (!shouldVirtualize) {
@@ -269,6 +285,30 @@ export function DetailLinkedPickerModal({
     };
   }, [options, searchValue]);
 
+  useLayoutEffect(() => {
+    if (initialFocusValue === null || initialFocusAppliedRef.current) {
+      return;
+    }
+    const node = listRef.current;
+    if (!node) {
+      return;
+    }
+    const normalizedInitialFocusValue = initialFocusValue.trim();
+    const optionButtons = Array.from(
+      node.querySelectorAll<HTMLButtonElement>(".detail-picker-option[data-option-value]")
+    );
+    const target = optionButtons.find(
+      (button) => String(button.dataset.optionValue ?? "").trim() === normalizedInitialFocusValue
+    );
+    if (!target) {
+      searchInputRef.current?.focus();
+      return;
+    }
+    target.scrollIntoView({ block: "nearest" });
+    target.focus();
+    initialFocusAppliedRef.current = true;
+  }, [initialFocusValue, options]);
+
   const virtualWindow = useMemo(() => {
     if (!shouldVirtualize || viewportHeight <= 0) {
       return pickerVirtualItems;
@@ -305,11 +345,12 @@ export function DetailLinkedPickerModal({
         <label className="detail-picker-search">
           <span>{searchLabel}</span>
           <input
+            ref={searchInputRef}
             type="text"
             value={searchValue}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder={searchPlaceholder}
-            autoFocus
+            autoFocus={initialFocusValue === null}
           />
         </label>
         <div className="detail-picker-list" role="listbox" aria-label={title} ref={listRef}>
@@ -323,6 +364,7 @@ export function DetailLinkedPickerModal({
                 className="detail-picker-option is-selected"
                 data-option-value={currentSelectionOption.value}
                 onClick={() => onSelect(currentSelectionOption.value)}
+                onKeyDown={(event) => handleOptionKeyDown(event, currentSelectionOption.value)}
               >
                 <span className="detail-picker-option-value">{currentSelectionOption.value}</span>
                 {!isDisplayRedundant(currentSelectionOption) ? (
@@ -377,6 +419,7 @@ export function DetailLinkedPickerModal({
                     className={`detail-picker-option ${item.isSelected ? "is-selected" : ""}`}
                     data-option-value={option.value}
                     onClick={() => onSelect(option.value)}
+                    onKeyDown={(event) => handleOptionKeyDown(event, option.value)}
                     style={
                       shouldVirtualize
                         ? {

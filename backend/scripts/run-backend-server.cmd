@@ -8,12 +8,17 @@ REM - Default: production start
 REM - Optional arg: dev
 REM =============================================================================
 
-set "NODE20_HOME=C:\tools\node-v20.20.0-win-x64"
+set "NODE20_HOME=C:\node20"
 set "NODE20_EXE=%NODE20_HOME%\node.exe"
 
 if not exist "%NODE20_EXE%" (
+  set "NODE20_HOME=C:\tools\node-v20.20.0-win-x64"
+  set "NODE20_EXE=%NODE20_HOME%\node.exe"
+)
+
+if not exist "%NODE20_EXE%" (
   echo [ERROR] Node 20 not found: %NODE20_EXE%
-  echo [HINT] Please unzip node-v20.x-win-x64 to C:\tools first.
+  echo [HINT] Install Node 20 to C:\node20 or unzip portable Node to C:\tools\node-v20.20.0-win-x64.
   exit /b 1
 )
 
@@ -45,11 +50,23 @@ if /i "%~1"=="dev" (
   exit /b %errorlevel%
 )
 
-if not exist "dist\server.js" (
-  echo [INFO] dist\server.js not found, running npm run build...
-  call npm run build
-  if errorlevel 1 (
-    echo [ERROR] npm run build failed.
+set "NODE_ENV=production"
+set "RAGIC_WRITE_TARGET=prod"
+set "SERVE_FRONTEND_FROM_BACKEND=true"
+if not defined FRONTEND_STATIC_DIR set "FRONTEND_STATIC_DIR=D:\sites\report"
+if not defined TRUST_PROXY set "TRUST_PROXY=false"
+
+echo [INFO] Production profile: NODE_ENV=%NODE_ENV% RAGIC_WRITE_TARGET=%RAGIC_WRITE_TARGET%
+echo [INFO] Running npm run build before production start...
+call npm run build
+if errorlevel 1 (
+  echo [ERROR] npm run build failed.
+  exit /b 1
+)
+
+if /i "%SERVE_FRONTEND_FROM_BACKEND%"=="true" (
+  if not exist "%FRONTEND_STATIC_DIR%\index.html" (
+    echo [ERROR] FRONTEND_STATIC_DIR missing index.html: %FRONTEND_STATIC_DIR%
     exit /b 1
   )
 )
@@ -57,4 +74,3 @@ if not exist "dist\server.js" (
 echo [INFO] Starting backend in PROD mode...
 call npm run start
 exit /b %errorlevel%
-

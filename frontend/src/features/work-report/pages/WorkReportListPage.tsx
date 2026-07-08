@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import "../../../App.css";
 import { FixedFilterSidebar } from "../components/FixedFilterSidebar";
@@ -7,7 +7,6 @@ import { WorkReportSyncProgressModal } from "../components/WorkReportSyncProgres
 import { WorkReportToolbar } from "../components/WorkReportToolbar";
 import { PendingBatchTasksBadge } from "../components/PendingBatchTasksBadge";
 import { WorkReportStatusArea } from "../components/WorkReportStatusArea";
-import { WorkReportTechnicalInfoPanel } from "../../dev/components/WorkReportTechnicalInfoPanel";
 import { WorkReportTableSection } from "../components/WorkReportTableSection";
 import { ColumnTextFilterDialog } from "../components/ColumnTextFilterDialog";
 import { ColumnAnalysisDrawer } from "../components/ColumnAnalysisDrawer";
@@ -448,7 +447,6 @@ export function WorkReportListPage() {
     handleClearFilters,
     handleSaveLocalSettings,
     handleOpenLandingPage,
-    openTechnicalInfoView,
     openLocalSettingsView,
     openMobileFilters,
     applySidebarPlaceholderView,
@@ -594,7 +592,7 @@ export function WorkReportListPage() {
     enabled: true,
     currentPath: location.pathname + location.search,
   });
-  const { maintenanceMessage } = useWorkReportClientPresence({
+  const { maintenanceMessage, blocked, blockedReason } = useWorkReportClientPresence({
     currentPath: location.pathname + location.search,
     currentFormId,
     currentTopView: activeTopView,
@@ -683,6 +681,41 @@ export function WorkReportListPage() {
             </div>
           </section>
         ) : null}
+        {blocked ? (
+          <div
+            role="alert"
+            aria-live="assertive"
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 3000,
+              background: "rgba(15, 23, 42, 0.72)",
+              backdropFilter: "blur(2px)",
+              display: "grid",
+              placeItems: "center",
+              padding: "1.5rem",
+            }}
+          >
+            <div
+              style={{
+                width: "min(560px, 100%)",
+                padding: "1.4rem 1.5rem",
+                borderRadius: "16px",
+                border: "1px solid rgba(248, 113, 113, 0.5)",
+                background: "#1f1111",
+                boxShadow: "0 18px 40px rgba(0,0,0,0.35)",
+                color: "#fecaca",
+              }}
+            >
+              <div style={{ fontSize: "1.05rem", fontWeight: 700, marginBottom: "0.55rem" }}>
+                此裝置已被管理端停用
+              </div>
+              <div style={{ lineHeight: 1.65, fontSize: "0.96rem" }}>
+                {blockedReason || "此裝置已被管理端暫時停用"}
+              </div>
+            </div>
+          </div>
+        ) : null}
         <WorkReportSyncProgressModal
           open={refreshSyncModalOpen}
           task={refreshSyncTask}
@@ -717,7 +750,7 @@ export function WorkReportListPage() {
             currentPageGroupLabel={currentPageGroupLabel}
             onOpenLandingPage={handleOpenLandingPage}
             onOpenDowntimePage={handleOpenDowntimePage}
-            onOpenTechnicalInfoView={openTechnicalInfoView}
+            onOpenTechnicalInfoView={() => navigate("/dev")}
             onOpenLocalSettingsView={openLocalSettingsView}
             showMobileFilterButton={activeTopView === "report" && isMobileViewport}
             onOpenMobileFilters={openMobileFilters}
@@ -764,7 +797,8 @@ export function WorkReportListPage() {
               onBackToReport={() => setActiveTopView("report")}
             />
           ) : activeTopView === "technical-info" ? (
-            <WorkReportTechnicalInfoPanel />
+            // 開發者模式已搬到獨立路由 /dev；舊 URL（?topView=technical-info）重定向過去
+            <Navigate to="/dev" replace />
           ) : (
             <>
               <PendingBatchTasksBadge />

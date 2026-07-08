@@ -32,6 +32,8 @@ npm run dev
 
 開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看欄位索引、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
 
+本版已同步主系統近期資料流調整：報工新增 / 單筆刪除 / 批次新增 / 批次刪除都會進任務中心追蹤；Form 16 停機新增改成可重送的 queue task；任務 polling 遇到短暫網路錯誤不再由前端自行判定失敗，而是以後端 registry 狀態為準。
+
 ---
 
 ## 系統架構
@@ -93,10 +95,12 @@ sequenceDiagram
 - **Stale-while-revalidate** 模式 + 啟動預熱（demo 下關閉）
 
 ### 寫入一致性
+- **任務化 mutation**：報工新增、單筆刪除、批次新增、批次刪除都走 accepted task + registry；前端任務中心可看 pending/running/success/failed 與重送提示
 - **Idempotency**：`x-client-mutation-id` 透過 `clientRowKey` 對應上游 rowId，重送同 ID 不會重複建立 — 見 [backend/src/services/workReportService.ts](backend/src/services/workReportService.ts)
 - **Form 16 ↔ Form 104/105 子表連動**：報工列建立在 Form 16 (停機紀錄)，由上游 workflow 自動推回工令子表；mock 在 [backend/src/ragic/mockClient.ts](backend/src/ragic/mockClient.ts) 模擬同樣的 propagation 語意
 - **Write verify**：create 完立刻讀回比對，欄位不一致就自動 DELETE 止血（避免 orphan 種子）
 - **Post-create polling**：拿到 form 16 rowId 後輪詢工令子表確認 row 出現再回應
+- **Form 16 停機 queue**：`/downtime` 新增停機採 `16:downtime:create` 串行 queue，成功寫回 entryId，失敗保留本機 payload 可重送
 
 ### 即時推送（[backend/src/events/realtimeEventBus.ts](backend/src/events/realtimeEventBus.ts)）
 - Server-Sent Events 全域 bus，每次 mutation 發布 form / row update 事件
@@ -108,7 +112,8 @@ sequenceDiagram
 - 診斷面板可即時查 hydration source、cache state、SSE 連線、SQLite snapshot age
 
 ### 認證 / 多裝置
-- env-fallback admin + scrypt 密碼雜湊 + 多帳號管理（[backend/src/services/userManagementService.ts](backend/src/services/userManagementService.ts) 等）
+- 系統通知管理端使用 session token、登入限速與 demo 帳密（`demo` / `demo`）
+- Debug clients presence 帶 `clientId` / `tabId` / `clientBootId` 身份驗證；disconnect 不會清掉尚未 ACK 的管理命令，避免重新整理時遺失控制訊號
 
 ### 資料治理
 - **Record audit log**：每筆 update / delete 全量前後快照、操作人、時戳，前端 UI 可看歷史
@@ -125,6 +130,7 @@ sequenceDiagram
 | Token bucket / scheduler | 真正排程 | 仍運作，stats 可從 [debug clients](backend/src/routes/debugClients.ts) 看到 |
 | SSE 推送 | 真實 | 真實 |
 | Idempotency | clientRowKey ↔ 上游 rowId | clientRowKey ↔ mock ID |
+| 任務 registry | SQLite / JSON 持久化 | 同樣持久化到本機 `.cache` / Fly `/data` |
 | Form 16 連動 | 上游 workflow | mockClient.propagateForm16ToParentSubtable |
 | 預熱 / 自動同步 | 啟用 | full-cache prewarm 關閉；104 / 105 SQLite auto-sync 開啟 |
 
@@ -182,9 +188,13 @@ GET    /api/forms/104/reports                  工令列表（preview）
 GET    /api/forms/104/reports/full             全量資料（含子表）
 GET    /api/forms/104/reports/facets           分面分析
 GET    /api/forms/104/reports/:entryId         單筆 + 子表
-POST   /api/forms/104/reports/:entryId         新增報工列
+POST   /api/forms/104/reports/:entryId         新增報工列（accepted task）
 PUT    /api/forms/104/reports/:entryId/:rowId  更新
-DELETE /api/forms/104/reports/:entryId/:rowId  刪除
+DELETE /api/forms/104/reports/:entryId/:rowId  刪除（accepted task）
+POST   /api/forms/104/reports/:entryId/batch-create  批次新增
+POST   /api/forms/104/reports/:entryId/batch-delete   批次刪除
+GET    /api/forms/104/tasks                    任務中心列表
+GET    /api/downtime/tasks                     停機新增任務列表
 POST   /api/forms/104/sync                     觸發 SQLite 同步
 GET    /api/events                             SSE 即時事件流
 GET    /api/health                             健康 + demoMode flag

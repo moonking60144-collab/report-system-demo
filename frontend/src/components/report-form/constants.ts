@@ -61,14 +61,14 @@ export const REASON_MINUTE_FIELD_DEFS = [
 ] as const;
 
 export const REPORT_TYPE_VALUE = {
-  HF_FORGING: "HF-Forge",
-  TI_THREAD_ROLLING: "TI-ProcessA",
-  PROCESSING_LM: "PROC-LM",
-  PROCESSING_EP: "PROC-EP",
-  MANUAL_INSPECTION_A: "CH-ManualInspect",
-  MACHINE_INSPECTION_H: "CH-MachineInspect",
-  PACKAGING: "PA-Pack",
-  STOCK_PREP: "SP-Stock",
+  HF_FORGING: "HF鍛造",
+  TI_THREAD_ROLLING: "TI搓牙",
+  PROCESSING_LM: "3F加工-LM",
+  PROCESSING_EP: "3F加工-EP",
+  MANUAL_INSPECTION_A: "CH人工全檢A",
+  MACHINE_INSPECTION_H: "CH機台全檢H",
+  PACKAGING: "PA包裝",
+  STOCK_PREP: "SP備貨",
 } as const;
 
 export const REPORT_TYPE_VALUES = [

@@ -22,6 +22,8 @@ interface Props {
   overrides: ItDutyOverride[];
   daySwaps: ItDutyDaySwap[];
   weeksPerSlot: number;
+  anchorIsoWeek: string | null;
+  anchorMemberId: number | null;
   searchQuery: string;
   onAssign: (
     isoWeek: string,
@@ -68,6 +70,8 @@ export function ItDutyScheduleTable({
   overrides,
   daySwaps,
   weeksPerSlot,
+  anchorIsoWeek,
+  anchorMemberId,
   searchQuery,
   onAssign,
   onClearOverride,
@@ -85,7 +89,8 @@ export function ItDutyScheduleTable({
       weeks.map((isoWeek) => {
         const range = parseIsoWeek(isoWeek);
         const result = calculateDutyForWeek(isoWeek, members, overrides, {
-          autoAnchorIsoWeek: currentIsoWeek,
+          anchorIsoWeek,
+          anchorMemberId,
           weeksPerSlot,
         });
         const override = overrideMap.get(isoWeek) ?? null;
@@ -113,6 +118,8 @@ export function ItDutyScheduleTable({
       currentIsoWeek,
       weeksPerSlot,
       overrideMap,
+      anchorIsoWeek,
+      anchorMemberId,
     ]
   );
 

@@ -104,6 +104,11 @@ export function ManageUsersModal({
       void message.warning("不能刪除自己");
       return;
     }
+    const target = users.find((u) => u.username === username);
+    if (target?.isProtected) {
+      void message.warning("此帳號為保留 fallback，不可刪除");
+      return;
+    }
     if (users.length <= 1) {
       void message.warning("至少要保留一個管理者");
       return;
@@ -156,7 +161,7 @@ export function ManageUsersModal({
 
           <div className="manage-users__list">
             {loading && users.length === 0 ? (
-              <p className="manage-users__hint">載入中…</p>
+              <p className="manage-users__hint ragic-loading-inline">載入中…</p>
             ) : users.length === 0 ? (
               <p className="manage-users__hint">沒有帳號</p>
             ) : (
@@ -173,7 +178,8 @@ export function ManageUsersModal({
                   {users.map((u) => {
                     const isSelf = u.username === currentUsername;
                     const last = users.length <= 1;
-                    const disabled = isSelf || last || deletingUsername === u.username;
+                    const disabled =
+                      isSelf || last || u.isProtected || deletingUsername === u.username;
                     return (
                       <tr key={u.id}>
                         <td className="manage-users__td-name">
@@ -181,6 +187,9 @@ export function ManageUsersModal({
                             {u.username}
                             {isSelf ? (
                               <span className="manage-users__badge">自己</span>
+                            ) : null}
+                            {u.isProtected ? (
+                              <span className="manage-users__badge">保留</span>
                             ) : null}
                           </span>
                         </td>
@@ -199,9 +208,11 @@ export function ManageUsersModal({
                             title={
                               isSelf
                                 ? "不能刪除自己"
-                                : last
-                                  ? "至少保留一個帳號"
-                                  : "刪除此帳號"
+                                : u.isProtected
+                                  ? "此帳號為保留 fallback，不可刪除"
+                                  : last
+                                    ? "至少保留一個帳號"
+                                    : "刪除此帳號"
                             }
                           >
                             {deletingUsername === u.username ? "刪除中…" : "刪除"}

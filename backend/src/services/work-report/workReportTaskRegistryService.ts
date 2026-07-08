@@ -1,6 +1,10 @@
 import fs from "fs/promises";
 import path from "path";
 import { env } from "../../config/env";
+import {
+  getWorkReportTaskStatusMergeRank,
+  parseWorkReportTaskTimestamp,
+} from "./workReportTaskStatusMerge";
 
 const TASK_REGISTRY_SNAPSHOT_VERSION = "v1";
 
@@ -8,6 +12,7 @@ export type WorkReportQueueTaskType =
   | "create-report"
   | "update-report"
   | "create-report-batch"
+  | "delete-report"
   | "delete-report-batch"
   | "sync"
   | "callback-refresh"
@@ -42,6 +47,7 @@ export interface WorkReportQueueTaskRecord {
   source: string | null;
   batchCreatedRowIds?: string[] | null;
   batchFinalizeFailed?: boolean | null;
+  batchWriteIndeterminate?: boolean | null;
   retriedFromTaskId?: string | null;
 }
 
@@ -68,6 +74,7 @@ interface UpsertWorkReportQueueTaskInput {
   source?: string | null;
   batchCreatedRowIds?: string[] | null;
   batchFinalizeFailed?: boolean | null;
+  batchWriteIndeterminate?: boolean | null;
   retriedFromTaskId?: string | null;
 }
 
@@ -193,16 +200,21 @@ class WorkReportTaskRegistryService {
         typeof input.batchFinalizeFailed === "boolean"
           ? input.batchFinalizeFailed
           : existing?.batchFinalizeFailed ?? null,
+      batchWriteIndeterminate:
+        typeof input.batchWriteIndeterminate === "boolean"
+          ? input.batchWriteIndeterminate
+          : existing?.batchWriteIndeterminate ?? null,
       retriedFromTaskId:
         normalizeOptionalString(input.retriedFromTaskId) ??
         existing?.retriedFromTaskId ??
         null,
     };
 
-    this.tasks.set(next.taskId, next);
+    const merged = this.mergeTaskRecords(existing, next);
+    this.tasks.set(merged.taskId, merged);
     this.pruneHistory();
     this.schedulePersist();
-    return this.copyTask(next);
+    return this.copyTask(merged);
   }
 
   getTask(taskId: string): WorkReportQueueTaskRecord | null {
@@ -267,7 +279,8 @@ class WorkReportTaskRegistryService {
       }
 
       for (const task of parsed.tasks) {
-        this.tasks.set(task.taskId, task);
+        const existing = this.tasks.get(task.taskId);
+        this.tasks.set(task.taskId, this.mergeTaskRecords(existing, task));
       }
 
       this.recoverInterruptedTasks();
@@ -303,6 +316,29 @@ class WorkReportTaskRegistryService {
     }
   }
 
+  private mergeTaskRecords(
+    existing: WorkReportQueueTaskRecord | undefined,
+    next: WorkReportQueueTaskRecord
+  ): WorkReportQueueTaskRecord {
+    if (!existing) {
+      return next;
+    }
+
+    const existingRank = getWorkReportTaskStatusMergeRank(existing.status);
+    const nextRank = getWorkReportTaskStatusMergeRank(next.status);
+    if (existingRank !== nextRank) {
+      return nextRank > existingRank ? next : existing;
+    }
+
+    const existingUpdatedAt = parseWorkReportTaskTimestamp(existing.updatedAt);
+    const nextUpdatedAt = parseWorkReportTaskTimestamp(next.updatedAt);
+    if (existingUpdatedAt > nextUpdatedAt) {
+      return existing;
+    }
+
+    return next;
+  }
+
   private pruneHistory(): void {
     const maxTasks = env.WORK_REPORT_TASK_REGISTRY_HISTORY_LIMIT;
     if (this.tasks.size <= maxTasks) {
@@ -319,6 +355,29 @@ class WorkReportTaskRegistryService {
       }
       this.tasks.delete(task.taskId);
     }
+  }
+
+  // 關機前呼叫：清掉 pending debounce timer，把尚未落盤的 task 狀態立即寫完，
+  // 並等進行中的寫盤鏈結束，避免 graceful shutdown 退出時丟掉最後一批變更。
+  async flush(): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (!env.WORK_REPORT_TASK_REGISTRY_PERSIST_ENABLED || !this.persistDirty) {
+      await this.persistChain.catch(() => {});
+      return;
+    }
+    this.persistDirty = false;
+    this.persistChain = this.persistChain
+      .catch(() => {})
+      .then(() => this.persistToDisk());
+    await this.persistChain.catch((error) => {
+      console.warn("[task-registry][flush-failed]", {
+        filePath: this.resolveStoreFilePath(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   private schedulePersist(): void {
@@ -416,6 +475,9 @@ class WorkReportTaskRegistryService {
       (candidate.batchFinalizeFailed === null ||
         candidate.batchFinalizeFailed === undefined ||
         typeof candidate.batchFinalizeFailed === "boolean") &&
+      (candidate.batchWriteIndeterminate === null ||
+        candidate.batchWriteIndeterminate === undefined ||
+        typeof candidate.batchWriteIndeterminate === "boolean") &&
       (candidate.retriedFromTaskId === null ||
         candidate.retriedFromTaskId === undefined ||
         typeof candidate.retriedFromTaskId === "string") &&

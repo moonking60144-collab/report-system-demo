@@ -4,6 +4,7 @@ import type {
   WorkReportQueueTaskStatus,
   WorkReportQueueTaskType,
 } from "../services/work-report/workReportTaskRegistryService";
+import type { RagicReadPriority } from "../infra/ragicRequestScheduler";
 
 interface SyncTaskResponse {
   taskId?: string;
@@ -62,7 +63,12 @@ export interface WorkReportRouterDeps {
   getReportByEntryId(
     formId: string,
     entryId: string,
-    options: { refresh: boolean }
+    options: {
+      refresh: boolean;
+      allowSqliteFallbackOnRefresh?: boolean;
+      ragicReadMaxRetries?: number;
+      persistRefreshToSqlite?: boolean;
+    }
   ): Promise<unknown>;
   createReport(
     formId: string,
@@ -72,8 +78,11 @@ export interface WorkReportRouterDeps {
       expectedEntryLastUpdatedAt?: string;
       editSessionId?: string;
       editLockVersion?: number;
+      clientMutationId?: string;
+      skipEntryPreflight?: boolean;
     }
   ): Promise<unknown>;
+  assertCreateEntryAcceptsReports(formId: string, entryId: string): Promise<void>;
   enqueueCreateTask(input: {
     taskType: "create-report" | "update-report";
     formId: string;
@@ -87,12 +96,16 @@ export interface WorkReportRouterDeps {
     actorLabel?: string;
     worker: () => Promise<unknown>;
   }): SyncTaskResponse;
+  sleep?(ms: number): Promise<void>;
   getCreateTask(taskId: string): CreateTaskLookupResult | null;
   requestBatchDelete(input: {
+    taskType?: Extract<WorkReportQueueTaskType, "delete-report" | "delete-report-batch">;
     formId: string;
     entryId: string;
     workOrderNo?: string;
     rowIds: string[];
+    expectedEntryLastUpdatedAt?: string;
+    editSessionId?: string;
     actorClientId?: string;
     actorTabId?: string;
     actorIp?: string;
@@ -110,6 +123,9 @@ export interface WorkReportRouterDeps {
     entryId: string;
     workOrderNo?: string;
     rows: Array<{ payload: Record<string, unknown>; clientRowKey?: string }>;
+    expectedEntryLastUpdatedAt?: string;
+    editSessionId?: string;
+    editLockVersion?: number;
     actorClientId?: string;
     actorTabId?: string;
     actorIp?: string;
@@ -178,7 +194,12 @@ export interface WorkReportRouterDeps {
   assertEntryNotModified(
     formId: string,
     entryId: string,
-    expectedEntryLastUpdatedAt?: string
+    expectedEntryLastUpdatedAt?: string,
+    options?: {
+      priority?: RagicReadPriority;
+      timeoutMs?: number;
+      maxRetries?: number;
+    }
   ): Promise<void>;
   assertEntryEditableBySession(input: {
     formId: string;

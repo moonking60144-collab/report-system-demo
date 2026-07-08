@@ -1,21 +1,115 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { message } from "antd";
+import { AxiosError } from "axios";
 import { useTranslation } from "react-i18next";
-import { fetchCreateReportTask, type CreateReportTaskResult } from "../../../api/workReport";
+import {
+  fetchCreateReportTask,
+  fetchWorkReportQueueTask,
+  type CreateReportTaskResult,
+  type WorkReportQueueTask,
+} from "../../../api/workReport";
 import {
   CREATE_TASK_AUTO_CLEAR_MS,
   CREATE_TASK_POLL_INTERVAL_MS,
   CREATE_TASK_POLL_TIMEOUT_MS,
+  CREATE_TASK_STALE_AUTO_CLEAR_MS,
   MAX_CREATE_TASK_MONITORS,
   WORK_REPORT_TASK_MONITOR_STORAGE_KEY,
 } from "../constants";
 import type { CreateTaskMonitor } from "../types";
-import { getErrorMessage } from "../utils";
+import { getErrorMessage, getWorkReportTaskErrorMessage } from "../utils";
 import type { WorkReportMutationTaskKind } from "../types";
 import { deleteRetryableMutationRecord } from "../taskRetryStore";
 
 function isTaskRunning(status: CreateTaskMonitor["status"]): boolean {
   return status === "pending" || status === "running";
+}
+
+function isMonitorRunning(monitor: CreateTaskMonitor): boolean {
+  return isTaskRunning(monitor.status) && monitor.stale !== true;
+}
+
+function isQueueTask(kind: WorkReportMutationTaskKind): boolean {
+  return kind === "delete" || kind === "delete-batch";
+}
+
+function getApiErrorCode(error: unknown): string | null {
+  if (!(error instanceof AxiosError)) {
+    return null;
+  }
+  const code = error.response?.data?.error?.code;
+  return typeof code === "string" ? code : null;
+}
+
+function isTaskNotFoundError(error: unknown): boolean {
+  return getApiErrorCode(error) === "TASK_NOT_FOUND";
+}
+
+function isWorkReportQueueTask(task: CreateReportTaskResult | WorkReportQueueTask): task is WorkReportQueueTask {
+  return "taskType" in task;
+}
+
+function getTaskRowId(task: CreateReportTaskResult | WorkReportQueueTask): string | undefined {
+  return isWorkReportQueueTask(task) ? task.rowId ?? undefined : task.result?.rowId;
+}
+
+function getTaskErrorMessage(task: CreateReportTaskResult | WorkReportQueueTask): string {
+  if (isWorkReportQueueTask(task)) {
+    return getWorkReportTaskErrorMessage(task);
+  }
+  return getWorkReportTaskErrorMessage(task);
+}
+
+function getRunningTaskMessage(
+  kind: WorkReportMutationTaskKind,
+  status: CreateTaskMonitor["status"],
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (kind === "create") {
+    return status === "pending"
+      ? t("workReport:messages.createTaskQueuedContinue")
+      : t("workReport:messages.createTaskBackgroundRunning");
+  }
+  if (kind === "delete" || kind === "delete-batch") {
+    return status === "pending"
+      ? t("workReport:messages.taskQueuedWaitingPrevious")
+      : t("workReport:messages.deleteTaskBackgroundRunning");
+  }
+  return status === "pending"
+    ? t("workReport:messages.taskQueuedWaitingPrevious")
+    : t("workReport:messages.taskBackgroundRecalcRunning");
+}
+
+function getSuccessTaskMessage(
+  kind: WorkReportMutationTaskKind,
+  task: CreateReportTaskResult | WorkReportQueueTask,
+  rowId: string,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if ((kind === "delete" || kind === "delete-batch") && "message" in task && task.message) {
+    return task.message;
+  }
+  if (kind === "update") {
+    return t("workReport:messages.taskBackgroundUpdatedWithRow", { rowId });
+  }
+  return t("workReport:messages.taskBackgroundCompletedWithRow", { rowId });
+}
+
+function getSuccessToastMessage(
+  monitor: CreateTaskMonitor,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (monitor.kind === "delete" || monitor.kind === "delete-batch") {
+    return monitor.message;
+  }
+  if (monitor.kind === "update") {
+    return t("workReport:messages.toastUpdateSuccess", {
+      rowId: monitor.rowId ?? "-",
+    });
+  }
+  return t("workReport:messages.toastCreateSuccess", {
+    rowId: monitor.rowId ?? "-",
+  });
 }
 
 function readStoredTaskMonitors(): CreateTaskMonitor[] {
@@ -50,17 +144,11 @@ function readStoredTaskMonitors(): CreateTaskMonitor[] {
           typeof candidate.updatedAt === "string"
         );
       })
-      .filter((item) => {
-        if (isTaskRunning(item.status)) {
-          return true;
-        }
-        const updatedAt = Date.parse(item.updatedAt);
-        return !Number.isNaN(updatedAt) && now - updatedAt < CREATE_TASK_AUTO_CLEAR_MS;
-      })
       .map((item) => ({
         ...item,
         kind: item.kind ?? "create",
       }))
+      .filter((item) => shouldKeepTaskMonitor(item, now))
       .slice(0, MAX_CREATE_TASK_MONITORS);
   } catch {
     return [];
@@ -84,6 +172,118 @@ function writeStoredTaskMonitors(monitors: CreateTaskMonitor[]): void {
   } catch {
     // NOTE: localStorage 寫入失敗不阻塞主流程
   }
+}
+
+function shouldKeepTaskMonitor(item: CreateTaskMonitor, now: number): boolean {
+  if (item.stale === true) {
+    const updatedAt = Date.parse(item.updatedAt);
+    return !Number.isNaN(updatedAt) && now - updatedAt < CREATE_TASK_STALE_AUTO_CLEAR_MS;
+  }
+  if (isTaskRunning(item.status)) {
+    return true;
+  }
+  const updatedAt = Date.parse(item.updatedAt);
+  return !Number.isNaN(updatedAt) && now - updatedAt < CREATE_TASK_AUTO_CLEAR_MS;
+}
+
+export function pruneExpiredTaskMonitors(
+  monitors: CreateTaskMonitor[],
+  now = Date.now()
+): CreateTaskMonitor[] {
+  const next = monitors.filter((item) => shouldKeepTaskMonitor(item, now));
+  return next.length === monitors.length ? monitors : next;
+}
+
+export function hasTerminalTaskMonitors(monitors: CreateTaskMonitor[]): boolean {
+  return monitors.some((item) => !isTaskRunning(item.status));
+}
+
+export function hasAutoClearableTaskMonitors(monitors: CreateTaskMonitor[]): boolean {
+  return monitors.some((item) => item.stale === true || !isTaskRunning(item.status));
+}
+
+export async function pollCreateTaskMonitor(options: {
+  seedMonitor: CreateTaskMonitor;
+  fetchTask: (monitor: CreateTaskMonitor) => Promise<CreateReportTaskResult | WorkReportQueueTask>;
+  buildMonitorFromTaskResult: (
+    baseMonitor: CreateTaskMonitor,
+    task: CreateReportTaskResult | WorkReportQueueTask
+  ) => CreateTaskMonitor;
+  upsertTaskMonitorState: (monitor: CreateTaskMonitor) => void;
+  onSuccess: (monitor: CreateTaskMonitor) => void;
+  onFailed: (monitor: CreateTaskMonitor) => void;
+  buildPollingRetryMessage: (error: unknown) => string;
+  buildPollingUnavailableMessage: (error: unknown) => string;
+  buildTaskNotFoundMessage: () => string;
+  buildTimedOutMessage: () => string;
+  nowMs?: () => number;
+  nowIso?: () => string;
+  sleepMs?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+  intervalMs?: number;
+}): Promise<void> {
+  const nowMs = options.nowMs ?? Date.now;
+  const nowIso = options.nowIso ?? (() => new Date().toISOString());
+  const sleepMs =
+    options.sleepMs ??
+    ((ms) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, ms);
+      }));
+  const timeoutMs = options.timeoutMs ?? CREATE_TASK_POLL_TIMEOUT_MS;
+  const intervalMs = options.intervalMs ?? CREATE_TASK_POLL_INTERVAL_MS;
+  const startedAt = nowMs();
+  let currentMonitor = options.seedMonitor;
+  let lastPollingError: unknown = null;
+
+  while (nowMs() - startedAt <= timeoutMs) {
+    try {
+      const task = await options.fetchTask(currentMonitor);
+      lastPollingError = null;
+      const nextMonitor = options.buildMonitorFromTaskResult(currentMonitor, task);
+      options.upsertTaskMonitorState(nextMonitor);
+      currentMonitor = nextMonitor;
+
+      if (!isMonitorRunning(nextMonitor)) {
+        if (nextMonitor.status === "success") {
+          options.onSuccess(nextMonitor);
+        } else if (nextMonitor.status === "failed") {
+          options.onFailed(nextMonitor);
+        }
+        return;
+      }
+    } catch (error) {
+      const nextMonitor: CreateTaskMonitor = {
+        ...currentMonitor,
+        kind: currentMonitor.kind ?? "create",
+        status: currentMonitor.status,
+        stale: isTaskNotFoundError(error) ? true : undefined,
+        message: isTaskNotFoundError(error)
+          ? options.buildTaskNotFoundMessage()
+          : options.buildPollingRetryMessage(error),
+        updatedAt: nowIso(),
+      };
+      options.upsertTaskMonitorState(nextMonitor);
+      currentMonitor = nextMonitor;
+      if (nextMonitor.stale === true) {
+        return;
+      }
+      lastPollingError = error;
+    }
+
+    await sleepMs(intervalMs);
+  }
+
+  options.upsertTaskMonitorState({
+    ...currentMonitor,
+    kind: currentMonitor.kind ?? "create",
+    status: currentMonitor.status,
+    stale: true,
+    message: lastPollingError
+      ? options.buildPollingUnavailableMessage(lastPollingError)
+      : options.buildTimedOutMessage(),
+    updatedAt: nowIso(),
+  });
 }
 
 export function useTaskMonitor() {
@@ -110,47 +310,43 @@ export function useTaskMonitor() {
   }, []);
 
   const buildMonitorFromTaskResult = useCallback(
-    (baseMonitor: CreateTaskMonitor, task: CreateReportTaskResult): CreateTaskMonitor => {
+    (
+      baseMonitor: CreateTaskMonitor,
+      task: CreateReportTaskResult | WorkReportQueueTask
+    ): CreateTaskMonitor => {
       const kind: WorkReportMutationTaskKind = baseMonitor.kind ?? "create";
       if (task.status === "pending" || task.status === "running") {
         return {
           ...baseMonitor,
           kind,
           status: task.status,
-          message:
-            kind === "create"
-              ? task.status === "pending"
-                ? t("workReport:messages.createTaskQueuedContinue")
-                : t("workReport:messages.createTaskBackgroundRunning")
-              : task.status === "pending"
-                ? t("workReport:messages.taskQueuedWaitingPrevious")
-                : t("workReport:messages.taskBackgroundRecalcRunning"),
+          stale: undefined,
+          message: getRunningTaskMessage(kind, task.status, t),
           updatedAt: task.updatedAt ?? new Date().toISOString(),
         };
       }
 
       if (task.status === "success") {
-        const rowId = task.result?.rowId ?? baseMonitor.rowId ?? "-";
+        const rowId = getTaskRowId(task) ?? baseMonitor.rowId ?? "-";
         return {
           ...baseMonitor,
           kind,
           status: "success",
+          stale: undefined,
           rowId,
-          message:
-            kind === "update"
-              ? t("workReport:messages.taskBackgroundUpdatedWithRow", { rowId })
-              : t("workReport:messages.taskBackgroundCompletedWithRow", { rowId }),
+          message: getSuccessTaskMessage(kind, task, rowId, t),
           updatedAt: task.updatedAt ?? new Date().toISOString(),
         };
       }
 
       const detail =
-        String(task.error?.message ?? "").trim() ||
+        getTaskErrorMessage(task) ||
         t("workReport:messages.backgroundProcessingFailedDefault");
       return {
         ...baseMonitor,
         kind,
         status: "failed",
+        stale: undefined,
         message: t("workReport:messages.backgroundProcessingFailedWithError", { error: detail }),
         updatedAt: task.updatedAt ?? new Date().toISOString(),
       };
@@ -160,7 +356,7 @@ export function useTaskMonitor() {
 
   const trackCreateTask = useCallback(
     (seedMonitor: CreateTaskMonitor): void => {
-      if (!isTaskRunning(seedMonitor.status)) {
+      if (!isMonitorRunning(seedMonitor)) {
         return;
       }
       if (trackingTaskIdsRef.current.has(seedMonitor.taskId)) {
@@ -170,55 +366,32 @@ export function useTaskMonitor() {
       trackingTaskIdsRef.current.add(seedMonitor.taskId);
 
       const run = async () => {
-        const startedAt = Date.now();
-        let currentMonitor = seedMonitor;
-
         try {
-          while (Date.now() - startedAt <= CREATE_TASK_POLL_TIMEOUT_MS) {
-            const task = await fetchCreateReportTask(currentMonitor.formId, currentMonitor.taskId);
-            const nextMonitor = buildMonitorFromTaskResult(currentMonitor, task);
-            upsertTaskMonitorState(nextMonitor);
-            currentMonitor = nextMonitor;
-
-            if (!isTaskRunning(nextMonitor.status)) {
-              if (nextMonitor.status === "success") {
-                deleteRetryableMutationRecord(nextMonitor.taskId);
-                void message.success(
-                  nextMonitor.kind === "update"
-                    ? t("workReport:messages.toastUpdateSuccess", {
-                        rowId: nextMonitor.rowId ?? "-",
-                      })
-                    : t("workReport:messages.toastCreateSuccess", {
-                        rowId: nextMonitor.rowId ?? "-",
-                      })
-                );
-              } else if (nextMonitor.status === "failed") {
-                void message.error(nextMonitor.message);
-              }
-              return;
-            }
-
-            await new Promise<void>((resolve) => {
-              window.setTimeout(resolve, CREATE_TASK_POLL_INTERVAL_MS);
-            });
-          }
-
-          upsertTaskMonitorState({
-            ...currentMonitor,
-            kind: currentMonitor.kind ?? "create",
-            status: "failed",
-            message: t("workReport:messages.backgroundProcessingTimedOut"),
-            updatedAt: new Date().toISOString(),
-          });
-        } catch (error) {
-          upsertTaskMonitorState({
-            ...currentMonitor,
-            kind: currentMonitor.kind ?? "create",
-            status: "failed",
-            message: t("workReport:messages.backgroundPollingFailed", {
-              error: getErrorMessage(error),
-            }),
-            updatedAt: new Date().toISOString(),
+          await pollCreateTaskMonitor({
+            seedMonitor,
+            fetchTask: (monitor) =>
+              isQueueTask(monitor.kind)
+                ? fetchWorkReportQueueTask(monitor.formId, monitor.taskId)
+                : fetchCreateReportTask(monitor.formId, monitor.taskId),
+            buildMonitorFromTaskResult,
+            upsertTaskMonitorState,
+            onSuccess: (nextMonitor) => {
+              deleteRetryableMutationRecord(nextMonitor.taskId);
+              void message.success(getSuccessToastMessage(nextMonitor, t));
+            },
+            onFailed: (nextMonitor) => {
+              void message.error(nextMonitor.message);
+            },
+            buildPollingRetryMessage: (error) =>
+              t("workReport:messages.backgroundPollingRetrying", {
+                error: getErrorMessage(error),
+              }),
+            buildPollingUnavailableMessage: (error) =>
+              t("workReport:messages.backgroundPollingUnavailable", {
+                error: getErrorMessage(error),
+              }),
+            buildTaskNotFoundMessage: () => t("workReport:messages.backgroundTaskStatusUnknown"),
+            buildTimedOutMessage: () => t("workReport:messages.backgroundProcessingTimedOut"),
           });
         } finally {
           trackingTaskIdsRef.current.delete(seedMonitor.taskId);
@@ -239,34 +412,20 @@ export function useTaskMonitor() {
   );
 
   const clearFinishedTaskMonitors = useCallback((): void => {
-    setCreateTaskMonitors((prev) =>
-      prev.filter((item) => item.status === "pending" || item.status === "running")
-    );
+    setCreateTaskMonitors((prev) => prev.filter((item) => isMonitorRunning(item)));
   }, []);
 
   useEffect(() => {
-    if (createTaskMonitors.length === 0) {
+    if (!hasAutoClearableTaskMonitors(createTaskMonitors)) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      const now = Date.now();
-      setCreateTaskMonitors((prev) =>
-        prev.filter((item) => {
-          if (item.status === "pending" || item.status === "running") {
-            return true;
-          }
-          const updatedAt = Date.parse(item.updatedAt);
-          if (Number.isNaN(updatedAt)) {
-            return false;
-          }
-          return now - updatedAt < CREATE_TASK_AUTO_CLEAR_MS;
-        })
-      );
+    const timer = window.setInterval(() => {
+      setCreateTaskMonitors((prev) => pruneExpiredTaskMonitors(prev));
     }, 1000);
 
     return () => {
-      window.clearTimeout(timer);
+      window.clearInterval(timer);
     };
   }, [createTaskMonitors]);
 
@@ -276,18 +435,21 @@ export function useTaskMonitor() {
 
   useEffect(() => {
     for (const monitor of createTaskMonitors) {
-      if (isTaskRunning(monitor.status)) {
+      if (isMonitorRunning(monitor)) {
         trackCreateTask(monitor);
       }
     }
   }, [createTaskMonitors, trackCreateTask]);
 
   const hasFinishedTaskMonitors = useMemo(
-    () => createTaskMonitors.some((item) => item.status === "success" || item.status === "failed"),
+    () =>
+      createTaskMonitors.some(
+        (item) => item.status === "success" || item.status === "failed" || item.stale === true
+      ),
     [createTaskMonitors]
   );
   const taskRunningCount = useMemo(
-    () => createTaskMonitors.filter((item) => item.status === "pending" || item.status === "running").length,
+    () => createTaskMonitors.filter((item) => isMonitorRunning(item)).length,
     [createTaskMonitors]
   );
   const taskFailedCount = useMemo(
@@ -318,17 +480,31 @@ export function useTaskMonitor() {
     setTaskMonitorExpanded(false);
   }, []);
 
-  return {
-    createTaskMonitors,
-    taskMonitorExpanded: createTaskMonitors.length > 0 && taskMonitorExpanded,
-    setTaskMonitorExpanded,
-    toggleTaskMonitorExpanded,
-    collapseTaskMonitor,
-    upsertCreateTaskMonitor,
-    clearFinishedTaskMonitors,
-    hasFinishedTaskMonitors,
-    taskRunningCount,
-    taskFailedCount,
-    latestTaskMonitor,
-  };
+  return useMemo(
+    () => ({
+      createTaskMonitors,
+      taskMonitorExpanded: createTaskMonitors.length > 0 && taskMonitorExpanded,
+      setTaskMonitorExpanded,
+      toggleTaskMonitorExpanded,
+      collapseTaskMonitor,
+      upsertCreateTaskMonitor,
+      clearFinishedTaskMonitors,
+      hasFinishedTaskMonitors,
+      taskRunningCount,
+      taskFailedCount,
+      latestTaskMonitor,
+    }),
+    [
+      clearFinishedTaskMonitors,
+      collapseTaskMonitor,
+      createTaskMonitors,
+      hasFinishedTaskMonitors,
+      latestTaskMonitor,
+      taskFailedCount,
+      taskMonitorExpanded,
+      taskRunningCount,
+      toggleTaskMonitorExpanded,
+      upsertCreateTaskMonitor,
+    ]
+  );
 }

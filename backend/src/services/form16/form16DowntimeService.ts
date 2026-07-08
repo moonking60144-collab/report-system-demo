@@ -12,13 +12,20 @@ import { workReportReadService } from "../work-report/workReportReadService";
 import { buildBackgroundReadOptions } from "../work-report/shared/refreshEntryOptions";
 import { form16DowntimeSqliteRepository } from "../../storage/sqlite/form16DowntimeSqliteRepository";
 import {
+  form16PlannedIdleSqliteRepository,
+  type PlannedIdleMachineAggregate,
+  type PlannedIdleSqliteRecord,
+} from "../../storage/sqlite/form16PlannedIdleSqliteRepository";
+import {
   FORM16_FIELD_NAME_CANDIDATES,
   FORM16_REQUIRED_FALLBACK_BY_REPORT_TYPE,
+  mapProcessCodeToReportType,
   resolveForm16ReportType,
 } from "../work-report/create/form16ReportTypeRules";
 import { HttpError } from "../../utils/httpError";
 import type { Form16DowntimeRecord } from "../../types/form16Downtime";
 import { checkOrCreateForm16Entry } from "./form16IdempotencyService";
+import { form16WriteReverifyService } from "./form16WriteReverifyService";
 import { assertForm16EntryStored } from "./form16WriteVerifier";
 
 const FORM_16_DEFAULT_INPUT_OPTIONS = "整天";
@@ -121,6 +128,10 @@ export interface UpdateForm16DowntimeInput {
   remark?: string;
 }
 
+export interface Form16DowntimeMutationOptions {
+  expectedSnapshotHash?: string | null;
+}
+
 export interface ListForm16DowntimeOptions {
   refresh?: boolean;
   limit?: number;
@@ -166,12 +177,86 @@ function resolveForm16Path(): string {
   return resolved;
 }
 
+export interface PlannedIdleMachineSummary {
+  machineId: string;
+  prodType: string;
+  totalMinutes: number;
+  totalDays: number;
+  count: number;
+}
+
+export interface PlannedIdleSummaryResult {
+  month: string;
+  machines: PlannedIdleMachineSummary[];
+  // C14：資料來源，前端可據此辨「SQLite 快取」或「即時撈最新」的新鮮度。
+  source: "sqlite" | "ragic-live";
+}
+
+// 解析月份範圍：傳 YYYY/MM（或 YYYY-MM）用該月，沒傳就用「當月」。回 Ragic 日期格式的起訖。
+function resolveMonthRange(input?: string): { ym: string; start: string; end: string } {
+  let year: number;
+  let month: number;
+  const trimmed = String(input ?? "").trim();
+  if (trimmed) {
+    const matched = trimmed.match(/^(\d{4})[/-](\d{1,2})$/);
+    if (!matched) {
+      throw new HttpError(400, "month 參數格式需為 YYYY/MM", "INVALID_MONTH");
+    }
+    year = Number(matched[1]);
+    month = Number(matched[2]);
+    if (month < 1 || month > 12) {
+      throw new HttpError(400, "month 月份需介於 1~12", "INVALID_MONTH");
+    }
+  } else {
+    const now = new Date();
+    year = now.getFullYear();
+    month = now.getMonth() + 1;
+  }
+  const mm = String(month).padStart(2, "0");
+  const lastDay = new Date(year, month, 0).getDate();
+  return {
+    ym: `${year}/${mm}`,
+    start: `${year}/${mm}/01`,
+    end: `${year}/${mm}/${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+// A2：把 Ragic 日期（可能 YYYY/MM/DD 或 YYYY-MM-DD、或無前導零）正規化成 month_key = YYYY/MM。
+// 不能直接 date.slice(0,7) —— dash 格式或無前導零會跟 aggregateByMonth 比對的 YYYY/MM 對不上、SQLite 路徑 silent 漏算。
+function toMonthKey(date: string): string {
+  const matched = String(date).replace(/-/g, "/").match(/^(\d{4})\/(\d{1,2})/);
+  if (!matched) {
+    return "";
+  }
+  return `${matched[1]}/${matched[2].padStart(2, "0")}`;
+}
+
+// 計畫停機 SQLite 同步保留範圍：近 7 個月（含本月、多留 1 個月緩衝）。
+// B5：前端月份下拉給近 6 個月；後端多撈 1 個月，確保跨時區/跨月邊界時下拉最舊月一定落在同步窗內、不會每次 fallback。
+function resolveHalfYearRange(): { start: string; end: string; oldestMonth: string } {
+  const now = new Date();
+  const startDate = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+  const oldestMonth = `${startDate.getFullYear()}/${String(startDate.getMonth() + 1).padStart(2, "0")}`;
+  const start = `${oldestMonth}/01`;
+  const end = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}`;
+  return { start, end, oldestMonth };
+}
+
 export class Form16DowntimeService {
   private refreshSnapshotPromise: Promise<Form16DowntimeRecord[]> | null = null;
+  // 背景重撈某月計畫停機的 in-flight promise（key=ym），防同月併發重複慢撈、也防無界累積。
+  private readonly plannedIdleMonthRefreshing = new Map<string, Promise<void>>();
 
   async getOptions() {
     try {
-      return await workReportReadService.getFormOptions("104", ["machineId", "operatorId", "processCode"]);
+      const options = await workReportReadService.getFormOptions("104", ["machineId", "operatorId", "processCode"]);
+      return {
+        ...options,
+        // 停機的 Type 由製程推導；推不出報工類別的製程直接不給選，避免送出才被 Ragic 擋
+        processCode: (options.processCode ?? []).filter(
+          (option) => mapProcessCodeToReportType(option.value) !== null
+        ),
+      };
     } catch (error) {
       console.warn("[form16-downtime][options-failed]", {
         error: error instanceof Error ? error.message : String(error),
@@ -228,6 +313,7 @@ export class Form16DowntimeService {
         totalCount: 0,
         source: "sqlite",
         refreshed: false,
+        refreshTriggered: true,
       };
     }
 
@@ -421,6 +507,211 @@ export class Form16DowntimeService {
     return mapped;
   }
 
+  // 每機台當月計畫停機彙總（口徑 B：撈當月全部、加總所有 (P)計畫停機分 > 0 的筆，含有工令的部分停機，跟稼動表一致）。
+  // 不走 mapRowToRecord（它會濾掉 flag≠Yes 的部分停機），直接讀 row 的 (P) 欄。
+  async summarizePlannedIdleByMachine(
+    monthInput?: string,
+    refresh = false
+  ): Promise<PlannedIdleSummaryResult> {
+    const { ym, start, end } = resolveMonthRange(monthInput);
+
+    // A1：SQLITE 關閉時直接走即時撈、不碰任何 SQLite（對齊 listRecords 的 fallback，避免 getDb 直接 throw 503）。
+    if (!env.SQLITE_ENABLED) {
+      const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+      return this.toSummaryResult(ym, this.aggregateRecords(records), "ragic-live");
+    }
+
+    // 平常走 SQLite：
+    // B1：用同步 state 判斷「這個月已同步過」→ 即使 0 筆也直接回（代表這月真的沒計畫停機），不必每次回源全表掃。
+    const state = await form16PlannedIdleSqliteRepository.getState();
+    const synced = Boolean(state?.syncedAt && state.oldestMonth && ym >= state.oldestMonth);
+    if (synced) {
+      const stored = await form16PlannedIdleSqliteRepository.aggregateByMonth(ym);
+      // refresh：先回 SQLite 舊值，背景重撈該月寫回，不把 c1/16 全表慢掃（~2-4 分）
+      // 掛在使用者請求上（對齊 listRecords 的背景刷新；同月併發只觸發一次）。
+      if (refresh) {
+        this.refreshPlannedIdleMonthInBackground(ym, start, end);
+      }
+      return this.toSummaryResult(ym, stored, "sqlite");
+    }
+
+    // SQLite 完全沒這月（首次、或 ym 超出同步範圍）：只能即時撈一次填上
+    const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+    // C9：寫快取失敗不該擋掉已撈到的結果，比照同檔其他 SQLite 寫入「失敗只 log」。
+    try {
+      await form16PlannedIdleSqliteRepository.replaceMonth(ym, records, new Date().toISOString());
+    } catch (error) {
+      console.warn("[planned-idle][replace-month-failed]", {
+        ym,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return this.toSummaryResult(ym, this.aggregateRecords(records), "ragic-live");
+  }
+
+  // 背景重撈某月計畫停機寫回 SQLite，不阻塞使用者；同月併發只跑一個、跑完即釋放。
+  private refreshPlannedIdleMonthInBackground(ym: string, start: string, end: string): void {
+    if (this.plannedIdleMonthRefreshing.has(ym)) {
+      return;
+    }
+    const run = (async () => {
+      const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+      await form16PlannedIdleSqliteRepository.replaceMonth(ym, records, new Date().toISOString());
+    })()
+      .catch((error) => {
+        console.warn("[planned-idle][background-refresh-failed]", {
+          ym,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        this.plannedIdleMonthRefreshing.delete(ym);
+      });
+    this.plannedIdleMonthRefreshing.set(ym, run);
+  }
+
+  // 背景定時同步：撈近半年所有 (P)計畫停機分 > 0 的筆，全量替換 SQLite（順便清掉半年外的）。
+  async syncPlannedIdleHalfYear(): Promise<{ total: number }> {
+    const { start, end, oldestMonth } = resolveHalfYearRange();
+    const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+    await form16PlannedIdleSqliteRepository.replaceAll(
+      records,
+      oldestMonth,
+      new Date().toISOString()
+    );
+    return { total: records.length };
+  }
+
+  // 撈 c1/16 指定日期範圍、挑出 (P)計畫停機分 > 0 的筆（口徑 B：含有工令的部分停機）。
+  private async fetchPlannedIdleRowsFromRagic(
+    start: string,
+    end: string
+  ): Promise<PlannedIdleSqliteRecord[]> {
+    const form16Path = resolveForm16Path();
+    const where = [`1002190,gte,${start}`, `1002190,lte,${end}`];
+    const records: PlannedIdleSqliteRecord[] = [];
+    let offset = 0;
+    const pageSize = 1000;
+    while (true) {
+      const page = await ragicClient.getFormPage(
+        form16Path,
+        { limit: pageSize, offset, where },
+        false,
+        { timeoutMs: env.RAGIC_SYNC_READ_TIMEOUT_MS, priority: "sync" }
+      );
+      const rows = normalizeRows(page);
+      for (const row of rows) {
+        const plannedMin = parseNumericValue(
+          getFirstFieldValue(row.data, [...FORM_16_FIELD_CANDIDATES.plannedIdleMinutes])
+        );
+        if (plannedMin === null || plannedMin <= 0) {
+          continue;
+        }
+        const machineId = String(
+          getFirstFieldValue(row.data, [...FORM_16_FIELD_CANDIDATES.machineId]) ?? ""
+        ).trim();
+        if (!machineId) {
+          continue;
+        }
+        const date = String(
+          getFirstFieldValue(row.data, [...FORM_16_FIELD_CANDIDATES.date]) ?? ""
+        ).trim();
+        const monthKey = toMonthKey(date);
+        // C8：date 空 / 無法解析月份 → 跳過，避免存進 month_key='' 的孤兒列（不被任何月份統計到）。
+        if (!monthKey) {
+          continue;
+        }
+        const prodType = String(
+          getFirstFieldValue(row.data, [
+            env.RAGIC_FORM_16_PROD_TYPE_FIELD_ID,
+            ...FORM16_FIELD_NAME_CANDIDATES.prodType,
+          ]) ?? ""
+        ).trim();
+        records.push({
+          entryId: row.entryId,
+          date,
+          monthKey,
+          machineId,
+          prodType,
+          // C5：(P)計畫停機分以整數存（欄位 INTEGER）；理論上為整數，Math.round 防個位小數誤差。
+          plannedMinutes: Math.round(plannedMin),
+        });
+      }
+      if (rows.length < pageSize) {
+        break;
+      }
+      offset += pageSize;
+    }
+    return records;
+  }
+
+  private aggregateRecords(records: PlannedIdleSqliteRecord[]): PlannedIdleMachineAggregate[] {
+    // A3：先依 entry_id 升冪排序，prodType 才會取到「該機台最小 entry_id 的非空值」，
+    // 跟 repository.aggregateByMonth 的 SQL 子查詢同一基準，確保即時撈 vs SQLite 兩路徑分類一致。
+    const sorted = [...records].sort((left, right) => Number(left.entryId) - Number(right.entryId));
+    const machines = new Map<string, PlannedIdleMachineAggregate>();
+    for (const record of sorted) {
+      const entry =
+        machines.get(record.machineId) ?? {
+          machineId: record.machineId,
+          prodType: "",
+          totalMinutes: 0,
+          count: 0,
+        };
+      entry.totalMinutes += record.plannedMinutes;
+      entry.count += 1;
+      if (!entry.prodType && record.prodType) {
+        entry.prodType = record.prodType;
+      }
+      machines.set(record.machineId, entry);
+    }
+    return [...machines.values()];
+  }
+
+  private toSummaryResult(
+    ym: string,
+    aggregates: PlannedIdleMachineAggregate[],
+    source: "sqlite" | "ragic-live"
+  ): PlannedIdleSummaryResult {
+    const machines = aggregates
+      .map((entry) => ({
+        machineId: entry.machineId,
+        prodType: entry.prodType,
+        totalMinutes: entry.totalMinutes,
+        totalDays: Math.round((entry.totalMinutes / 480) * 100) / 100,
+        count: entry.count,
+      }))
+      .sort((left, right) => right.totalMinutes - left.totalMinutes);
+    return { month: ym, machines, source };
+  }
+
+  // 同日同機台已有計畫停機就擋掉，避免像 5/11 那樣重複建一筆、把稼動表的計劃停機天數灌爆。
+  private async assertNoDuplicatePlannedIdle(
+    form16Path: string,
+    date: string,
+    machineId: string
+  ): Promise<void> {
+    const ragicDate = date.replace(/-/g, "/");
+    // 只用「日期 + 計畫停機=Yes」查（機台是 linked 欄、where 不穩），撈回來本地比對機台
+    const page = await ragicClient.getFormPage(
+      form16Path,
+      { limit: 1000, offset: 0, where: [`1002190,eq,${ragicDate}`, `1012814,eq,Yes`] },
+      false,
+      { timeoutMs: env.RAGIC_READ_TIMEOUT_MS, priority: "user" }
+    );
+    const duplicate = normalizeRows(page).some((row) => {
+      const record = this.mapRowToRecord(row.entryId, row.data);
+      return Boolean(record && String(record.machineId ?? "").trim() === machineId);
+    });
+    if (duplicate) {
+      throw new HttpError(
+        409,
+        `${ragicDate} 機台 ${machineId} 已有計畫停機紀錄，請勿重複建立。`,
+        "DUPLICATE_PLANNED_IDLE"
+      );
+    }
+  }
+
   async createRecord(input: CreateForm16DowntimeInput): Promise<{ created: true; entryId: string }> {
     const form16Path = resolveForm16Path();
     const date = String(input.date ?? "").trim();
@@ -438,6 +729,9 @@ export class Form16DowntimeService {
     if (!processCode) {
       throw new HttpError(400, "缺少必要欄位：processCode", "INVALID_PAYLOAD");
     }
+
+    // 同日同機台重複防呆：稼動表會把每筆計畫停機當一天扣，重複建就灌爆運轉率（如 5/11 建兩筆）
+    await this.assertNoDuplicatePlannedIdle(form16Path, date, machineId);
 
     const plannedIdleMinutes =
       typeof input.plannedIdleMinutes === "number" && Number.isFinite(input.plannedIdleMinutes)
@@ -476,6 +770,8 @@ export class Form16DowntimeService {
         plannedIdleMinutes,
       [env.RAGIC_FORM_16_REMARK_FIELD_ID]: remark || undefined,
       [env.RAGIC_FORM_16_WORK_ORDER_FIELD_ID]: "",
+      // [16] 的 Type 雖然後續可由公式維護，但 API create 的必填驗證跑在公式之前；
+      // create payload 必須先帶入，否則會被 Ragic 以「Field Type報工類別 contains empty value (code: 202)」拒絕。
       [env.RAGIC_FORM_16_TYPE_FIELD_ID]: resolvedReportType.type,
       [env.RAGIC_FORM_16_DEP_FIELD_ID]: resolvedRequiredFields.depUnit,
       [env.RAGIC_FORM_16_PROD_TYPE_FIELD_ID]: resolvedRequiredFields.prodType,
@@ -525,10 +821,26 @@ export class Form16DowntimeService {
         // 對不起來會直接 DELETE 這筆 + throw，阻止 idempotency 記 mapping、讓上層收到錯誤。
         // 只驗 workOrderNo（downtime 要空）跟 type；depUnit/prodType 是 Ragic 推算欄位、
         // 會被 workflow 轉換，不適合嚴格比對（會誤殺合法 entry）
-        await assertForm16EntryStored(form16Path, localEntryId, {
-          workOrderNo: "",
-          type: resolvedReportType.type,
-        });
+        await assertForm16EntryStored(
+          form16Path,
+          localEntryId,
+          {
+            workOrderNo: "",
+            type: resolvedReportType.type,
+          },
+          {
+            readPriority: "background",
+            timeoutMs: env.FORM16_WRITE_VERIFY_TIMEOUT_MS,
+            maxRetries: env.FORM16_WRITE_VERIFY_MAX_RETRIES,
+            continueOnReadError: true,
+            onReadIndeterminate: async (payload) => {
+              await form16WriteReverifyService.enqueue({
+                ...payload,
+                source: "downtime",
+              });
+            },
+          }
+        );
 
         // 同步 await — 呼叫端（route task worker）已經是背景，不需再開一層
         // Action button 48 是把 entry 從「剛建」變成「可用的計畫停機紀錄」的關鍵步驟，
@@ -555,6 +867,11 @@ export class Form16DowntimeService {
                 entryId: localEntryId,
                 error: deleteError instanceof Error ? deleteError.message : String(deleteError),
               });
+              throw new HttpError(
+                502,
+                `Form 16 action button 48 失敗，且 rollback delete 未確認（entry ${localEntryId} 可能已建立）：${errMsg}`,
+                "RAGIC_ACTION_BUTTON_INDETERMINATE"
+              );
             }
             throw new HttpError(
               502,
@@ -603,13 +920,15 @@ export class Form16DowntimeService {
 
   async updateRecord(
     entryId: string,
-    patch: UpdateForm16DowntimeInput
+    patch: UpdateForm16DowntimeInput,
+    options: Form16DowntimeMutationOptions = {}
   ): Promise<{ id: string }> {
     const normalizedEntryId = String(entryId ?? "").trim();
     if (!/^\d+$/.test(normalizedEntryId)) {
       throw new HttpError(400, `非法的 entryId：${entryId}`, "INVALID_ENTRY_ID");
     }
     const form16Path = resolveForm16Path();
+    await this.assertRecordSnapshotUnchanged(normalizedEntryId, options.expectedSnapshotHash);
 
     const payload: RagicRecord = {};
     const writeFields = FORM_104_CONFIG.writeConfig.subtableWriteFields;
@@ -660,7 +979,8 @@ export class Form16DowntimeService {
       }
     }
 
-    // processCode 變更時同步補齊衍生欄位（reportType + dep + prodType）
+    // processCode 變更時同步補齊 Type + lookup 欄位；[16] Type 雖有公式/defaultFormula，
+    // 但 API update 不會可靠重算，必須送目前推導值，避免製程與 Type 留在舊狀態。
     if (processCodeChanged) {
       const resolvedReportType = resolveForm16ReportType("", nextProcessCode, "");
       const resolvedRequiredFields = await this.resolveForm16RequiredFields(
@@ -697,12 +1017,16 @@ export class Form16DowntimeService {
     return { id: normalizedEntryId };
   }
 
-  async deleteRecord(entryId: string): Promise<{ deleted: true }> {
+  async deleteRecord(
+    entryId: string,
+    options: Form16DowntimeMutationOptions = {}
+  ): Promise<{ deleted: true }> {
     const normalizedEntryId = String(entryId ?? "").trim();
     if (!/^\d+$/.test(normalizedEntryId)) {
       throw new HttpError(400, `非法的 entryId：${entryId}`, "INVALID_ENTRY_ID");
     }
     const form16Path = resolveForm16Path();
+    await this.assertRecordSnapshotUnchanged(normalizedEntryId, options.expectedSnapshotHash);
     await ragicClient.deleteEntry(form16Path, normalizedEntryId);
     // 同步從本地 SQLite 刪掉（Ragic 端沒有 webhook 會幫忙通知）
     if (env.SQLITE_ENABLED) {
@@ -729,6 +1053,7 @@ export class Form16DowntimeService {
 
     return {
       id: entryId,
+      snapshotHash: null,
       date: pickNullableText(row, FORM_16_FIELD_CANDIDATES.date),
       machineId: pickNullableText(row, FORM_16_FIELD_CANDIDATES.machineId),
       processCode: pickNullableText(row, FORM_16_FIELD_CANDIDATES.processCode),
@@ -744,6 +1069,29 @@ export class Form16DowntimeService {
       remark: pickNullableText(row, FORM_16_FIELD_CANDIDATES.remark),
       workOrderNo,
     };
+  }
+
+  async assertRecordSnapshotUnchanged(
+    entryId: string,
+    expectedSnapshotHash?: string | null
+  ): Promise<void> {
+    const expected = String(expectedSnapshotHash ?? "").trim();
+    if (!expected || !env.SQLITE_ENABLED) return;
+    const current = await form16DowntimeSqliteRepository.getRecordSnapshotHash(entryId);
+    if (!current) {
+      throw new HttpError(
+        409,
+        "停機紀錄已不存在或尚未同步，請重新整理後再操作",
+        "DOWNTIME_RECORD_STALE"
+      );
+    }
+    if (current !== expected) {
+      throw new HttpError(
+        409,
+        "停機紀錄已被其他操作更新，請重新整理後再操作",
+        "DOWNTIME_RECORD_STALE"
+      );
+    }
   }
 
   private async resolveOperatorName(operatorId: string): Promise<string> {

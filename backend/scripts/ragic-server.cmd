@@ -1,179 +1,214 @@
 @echo off
-chcp 65001 >nul 2>&1
-setlocal enableextensions
-
+title Report
 REM ============================================================
-REM Ragic Report Backend simple control panel
-REM   1. Start
-REM   2. Full update        (npm ci + build + start)
-REM   3. Pull + Full update  (git pull + ci + build + start)
+REM Ragic Report Backend control panel
+REM   1. Start only
+REM   2. Build + Start (no git pull)
+REM   3. Pull + Build + Start
 REM   4. Exit
 REM ============================================================
 
-REM ====== Edit these if your paths differ ======
-set "BACKEND_DIR=C:\path\to\ragic-report\backend"
-set "NODE_DIR=C:\tools\node-v20.20.0-win-x64"
-REM Leave GIT_DIR empty to auto-detect common install paths
-set "GIT_DIR="
-REM ============================================
-
-set "NODE_EXE=%NODE_DIR%\node.exe"
-set "API_BASE=http://127.0.0.1:3000"
-
-REM --- Auto-detect Git if GIT_DIR is not set ---
-if not defined GIT_DIR (
-  if exist "C:\Program Files\Git\cmd\git.exe" set "GIT_DIR=C:\Program Files\Git\cmd"
-)
-if not defined GIT_DIR (
-  if exist "C:\Program Files (x86)\Git\cmd\git.exe" set "GIT_DIR=C:\Program Files (x86)\Git\cmd"
-)
-if not defined GIT_DIR (
-  if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" set "GIT_DIR=%LOCALAPPDATA%\Programs\Git\cmd"
-)
-
-if not exist "%NODE_EXE%" (
-  echo.
-  echo [ERROR] Node.exe not found at: %NODE_EXE%
-  echo         Set NODE_DIR env var or edit this bat.
-  echo.
-  pause
-  exit /b 1
-)
-
-if not exist "%BACKEND_DIR%\package.json" (
-  echo.
-  echo [ERROR] Backend package.json not found: %BACKEND_DIR%\package.json
-  echo         Run this bat from backend\scripts\.
-  echo.
-  pause
-  exit /b 1
-)
+set "BACKEND_DIR=C:\Users\user\Desktop\ragic-report\backend"
+set "FRONTEND_DIR=C:\Users\user\Desktop\ragic-report\frontend"
+set "FRONTEND_DEPLOY=D:\sites\report"
+set "NODE_DIR=C:\node20"
+set "UV_THREADPOOL_SIZE=16"
+set "NODE_ENV=production"
+set "RAGIC_WRITE_TARGET=prod"
+set "SERVE_FRONTEND_FROM_BACKEND=true"
+set "FRONTEND_STATIC_DIR=%FRONTEND_DEPLOY%"
+if not defined TRUST_PROXY set "TRUST_PROXY=false"
+set "REPO_DIR=%BACKEND_DIR%\.."
+set "BUILD_SCOPE_CMD=%TEMP%\ragic-report-build-scope.cmd"
+set "RUN_BACKEND_INSTALL=1"
+set "RUN_BACKEND_BUILD=1"
+set "RUN_FRONTEND_INSTALL=1"
+set "RUN_FRONTEND_BUILD=1"
+set "RUN_FRONTEND_SYNC=1"
 
 set "PATH=%NODE_DIR%;%PATH%"
-if defined GIT_DIR set "PATH=%GIT_DIR%;%PATH%"
 cd /d "%BACKEND_DIR%"
 
-:menu
-cls
-echo ==========================================
+echo ============================================================
 echo  Ragic Report Backend
-echo ==========================================
-echo  Dir : %BACKEND_DIR%
-echo  Node:
+echo ============================================================
+echo  Backend  : %BACKEND_DIR%
+echo  Frontend : %FRONTEND_DIR%
+echo  Dist to  : %FRONTEND_DEPLOY%
+echo  Node     :
 node -v
+echo  Threadpool : UV_THREADPOOL_SIZE=%UV_THREADPOOL_SIZE%
+echo  Profile    : NODE_ENV=%NODE_ENV% RAGIC_WRITE_TARGET=%RAGIC_WRITE_TARGET%
+echo  Frontend   : SERVE_FRONTEND_FROM_BACKEND=%SERVE_FRONTEND_FROM_BACKEND% FRONTEND_STATIC_DIR=%FRONTEND_STATIC_DIR%
+echo ============================================================
 echo.
-echo  1. Start
-echo  2. Full update        (ci + build + start)
-echo  3. Pull + Full update  (git pull + ci + build + start)
+echo  1. Start only
+echo  2. Build + Start (no git pull)
+echo  3. Pull + Build + Start
 echo  4. Exit
-echo ==========================================
-choice /c 1234 /n /m "Select (1/2/3/4): "
-if errorlevel 4 goto quit
-if errorlevel 3 goto pull_update
-if errorlevel 2 goto full_update
-if errorlevel 1 goto start_only
-goto menu
+choice /c 1234 /n /m "Select: "
+if errorlevel 4 exit /b 0
+if errorlevel 3 goto pullupdate
+if errorlevel 2 goto update
+if errorlevel 1 goto start
 
-:quit
-endlocal
-exit /b 0
+:pullupdate
+echo.
+echo [pre] discard package-lock churn left by previous npm install
+for %%P in (frontend/package-lock.json backend/package-lock.json) do (
+  git -C "%REPO_DIR%" ls-files --error-unmatch %%P >nul 2>nul
+  if not errorlevel 1 git -C "%REPO_DIR%" checkout -- %%P
+)
 
-:start_only
-echo.
-echo [Starting]
-call npm run start
-echo.
-echo [Server stopped, returning to menu]
-pause
-goto menu
+for /f "delims=" %%H in ('git -C "%REPO_DIR%" rev-parse HEAD') do set "BEFORE_SYNC=%%H"
 
-:full_update
-echo.
-echo [1/3] npm ci
-call npm ci
-if errorlevel 1 (
-  echo [ERROR] npm ci failed.
-  pause
-  goto menu
+echo [1/6] smart git update (safe fast-forward preferred)
+call powershell -NoProfile -Command ^
+"$branch = (git rev-parse --abbrev-ref HEAD).Trim(); ^
+if ($branch -eq 'HEAD') { Write-Host '[ERROR] detached HEAD, cannot run safe pull. Please checkout a branch first.'; exit 2 }; ^
+$remote = 'origin/' + $branch; ^
+git fetch --prune; ^
+git show-ref --verify --quiet ('refs/remotes/' + $remote); ^
+if ($LASTEXITCODE -ne 0) { Write-Host ('[ERROR] remote branch not found: ' + $remote); exit 2 }; ^
+$ahead = [int](git rev-list --count (($remote + '..HEAD'))); ^
+$behind = [int](git rev-list --count (('HEAD..' + $remote))); ^
+if ($ahead -eq 0 -and $behind -eq 0) { ^
+  Write-Host ('[INFO] ' + $branch + ' up to date with ' + $remote); ^
+  exit 0; ^
+}; ^
+if ($ahead -gt 0 -and $behind -gt 0) { ^
+  Write-Host ('[ERROR] branch diverged: ahead=' + $ahead + ', behind=' + $behind); ^
+  Write-Host '[ACTION] If this is a definitions baseline commit, open /dev/definitions and click sync then push main, then run option 3 again.'; ^
+  Write-Host '[ACTION] If this is not a baseline commit, inspect manually before merge/rebase/reset.'; ^
+  exit 2; ^
+}; ^
+if ($ahead -gt 0) { ^
+  Write-Host ('[WARN] local is ahead of ' + $remote + ', skip pull to keep local commits: +' + $ahead); ^
+  exit 0; ^
+}; ^
+if ($behind -gt 0) { git merge --ff-only $remote; exit $LASTEXITCODE }; ^
+Write-Host '[ERROR] unexpected git state'; exit 2;"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] git sync failed ^(exit %RC%^).
+  goto end
 )
 
 echo.
-echo [2/3] npm run build
+echo [scope] resolve smart build scope
+call powershell -NoProfile -ExecutionPolicy Bypass -File "%BACKEND_DIR%\scripts\resolve-ragic-server-build-scope.ps1" -RepoDir "%REPO_DIR%" -BackendDir "%BACKEND_DIR%" -FrontendDir "%FRONTEND_DIR%" -FrontendDeployDir "%FRONTEND_DEPLOY%" -BeforeCommit "%BEFORE_SYNC%" -OutputCmd "%BUILD_SCOPE_CMD%"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] build scope detection failed ^(exit %RC%^).
+  goto end
+)
+call "%BUILD_SCOPE_CMD%"
+
+:update
+echo.
+echo [2/6] backend: kill stale node + smart install/build
+cd /d "%BACKEND_DIR%"
+
+REM Kill port 3000 listener (= old backend) to release sqlite3 native binding
+REM lock. Use Get-NetTCPConnection to target the listener PIDs, so we
+REM do not nuke other node services running on this box (e.g. Ragic platform).
+powershell -NoProfile -Command "$pids = (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | Where-Object { $_ -ne $null -and $_ -ne 0 }); if ($pids) { $pids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue; Write-Host '[INFO] stopped backend PID' $_ } }"
+
+REM Use npm install, not npm ci. ci force-wipes node_modules; on Windows the
+REM sqlite3 native binding is often held by antivirus / stale node process,
+REM causing EPERM unlink. install is incremental, near-noop when lock unchanged,
+REM and never wipes existing node_modules. --no-audit/--no-fund silences noise.
+if not "%RUN_BACKEND_INSTALL%"=="1" (
+  echo [skip] backend npm install
+  goto backend_build
+)
+call npm install --no-audit --no-fund
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] backend npm install failed ^(exit %RC%^).
+  goto end
+)
+
+:backend_build
+echo.
+echo [3/6] backend npm run build
+if not "%RUN_BACKEND_BUILD%"=="1" (
+  echo [skip] backend npm run build
+  goto frontend_install
+)
 call npm run build
-if errorlevel 1 (
-  echo [ERROR] npm run build failed.
-  pause
-  goto menu
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] backend npm run build failed ^(exit %RC%^).
+  goto end
 )
 
+:frontend_install
 echo.
-choice /c YN /n /m "[3/3] Run 104/105 SQLite sync after start? (Y/N): "
-if errorlevel 2 goto start_foreground
-if errorlevel 1 goto start_with_sync
-goto menu
-
-:pull_update
-echo.
-if not defined GIT_DIR (
-  echo [ERROR] Git not found. Install Git for Windows or set GIT_DIR at top of this bat.
-  pause
-  goto menu
+echo [4/6] frontend smart install/build
+cd /d "%FRONTEND_DIR%"
+if not "%RUN_FRONTEND_INSTALL%"=="1" (
+  echo [skip] frontend npm install
+  goto frontend_build
 )
-echo [1/4] git pull
-git pull
-if errorlevel 1 (
-  echo [ERROR] git pull failed.
-  pause
-  goto menu
+call npm install --no-audit --no-fund
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] frontend npm install failed ^(exit %RC%^).
+  goto end
 )
 
+:frontend_build
 echo.
-echo [2/4] npm ci
-call npm ci
-if errorlevel 1 (
-  echo [ERROR] npm ci failed.
-  pause
-  goto menu
+echo [5/6] frontend npm run build
+if not "%RUN_FRONTEND_BUILD%"=="1" (
+  echo [skip] frontend npm run build
+  goto frontend_sync
 )
-
-echo.
-echo [3/4] npm run build
 call npm run build
-if errorlevel 1 (
-  echo [ERROR] npm run build failed.
-  pause
-  goto menu
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] frontend npm run build failed ^(exit %RC%^).
+  goto end
 )
 
+:frontend_sync
 echo.
-choice /c YN /n /m "[4/4] Run 104/105 SQLite sync after start? (Y/N): "
-if errorlevel 2 goto start_foreground
-if errorlevel 1 goto start_with_sync
+echo [sync] dist -^> %FRONTEND_DEPLOY%
+if not "%RUN_FRONTEND_SYNC%"=="1" (
+  echo [skip] frontend dist sync
+  goto after_frontend_sync
+)
+robocopy "%FRONTEND_DIR%\dist" "%FRONTEND_DEPLOY%" /E /PURGE
+set "RC=%ERRORLEVEL%"
+REM robocopy: exit 0-7 = success (purge / extras / etc), 8+ = failure
+if %RC% geq 8 (
+  echo [ERROR] robocopy failed syncing dist ^(exit %RC%^).
+  goto end
+)
+if defined FRONTEND_ENV_FINGERPRINT (
+  > "%FRONTEND_DEPLOY%\.ragic-report-frontend-env.sha256" echo %FRONTEND_ENV_FINGERPRINT%
+)
 
-:start_foreground
+:after_frontend_sync
+cd /d "%BACKEND_DIR%"
+
+:start
+title Report
 echo.
-echo [Starting foreground]
-call npm run start
+echo [6/6] npm start
+echo [INFO] UV_THREADPOOL_SIZE=%UV_THREADPOOL_SIZE%
+echo [INFO] NODE_ENV=%NODE_ENV% RAGIC_WRITE_TARGET=%RAGIC_WRITE_TARGET%
+if /i "%SERVE_FRONTEND_FROM_BACKEND%"=="true" (
+  if not exist "%FRONTEND_STATIC_DIR%\index.html" (
+    echo [ERROR] FRONTEND_STATIC_DIR missing index.html: %FRONTEND_STATIC_DIR%
+    echo [ACTION] Run option 2 or 3 to build and sync frontend before starting.
+    goto end
+  )
+)
+cd /d "%BACKEND_DIR%"
+call npm start
+
+:end
 echo.
-echo [Server stopped, returning to menu]
 pause
-goto menu
-
-:start_with_sync
-echo.
-echo [Starting server in new window, will trigger sync after 10s...]
-start "RagicReportBackend" cmd /k "cd /d ""%BACKEND_DIR%"" && set ""PATH=%NODE_DIR%;%%PATH%%"" && npm run start"
-timeout /t 10 /nobreak >nul
-
-echo.
-echo [sync 104]
-powershell -NoProfile -Command "try { Invoke-RestMethod -Method Post -Uri '%API_BASE%/api/forms/104/sync?async=1' | ConvertTo-Json -Depth 10 } catch { $_ | Out-String }"
-
-echo.
-echo [sync 105]
-powershell -NoProfile -Command "try { Invoke-RestMethod -Method Post -Uri '%API_BASE%/api/forms/105/sync?async=1' | ConvertTo-Json -Depth 10 } catch { $_ | Out-String }"
-
-echo.
-echo [OK] Sync dispatched (async task). Server runs in the other window.
-pause
-goto menu

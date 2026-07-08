@@ -11,6 +11,7 @@ primary_region = "nrt"
   DEMO_MODE = "true"
   NODE_ENV = "production"
   PORT = "3000"
+  TRUST_PROXY = "1"
   SERVE_FRONTEND_FROM_BACKEND = "true"
   FRONTEND_STATIC_DIR = "/app/frontend/dist"
 

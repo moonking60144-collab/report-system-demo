@@ -1,7 +1,10 @@
 export type CreateTimingStage =
+  | "preflight"
   | "normalize"
   | "beforeRead"
+  | "contextRead"
   | "write"
+  | "verifyWrite"
   | "polling"
   | "patch"
   | "actionButton"

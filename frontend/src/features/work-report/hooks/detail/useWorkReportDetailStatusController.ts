@@ -10,7 +10,7 @@ import type { LoadEntryOptions } from "./types";
 import { saveRetryableMutationRecord } from "../../taskRetryStore";
 
 interface PendingMutationReplay {
-  kind: WorkReportMutationTaskKind;
+  kind: Extract<WorkReportMutationTaskKind, "create" | "update">;
   formId: WorkReportFormId;
   entryId: string;
   rowId?: string;
@@ -23,7 +23,7 @@ interface PendingMutationReplay {
   createdAt: string;
 }
 
-interface DetailNoticeState {
+export interface DetailNoticeState {
   type: "success" | "error" | "info";
   message: string;
 }
@@ -39,12 +39,69 @@ export interface SystemStatusState {
   actionDisabled?: boolean;
 }
 
+interface TerminalMutationTaskResolution {
+  notice: DetailNoticeState;
+  highlightRowId?: string;
+  releaseRowId?: string;
+  loadEntryOptions?: LoadEntryOptions;
+}
+
+export function resolveTerminalMutationTask(
+  task: CreateTaskMonitor,
+  t: (key: string, options?: Record<string, unknown>) => string
+): TerminalMutationTaskResolution {
+  if (task.status !== "success") {
+    return {
+      notice: {
+        type: "error",
+        message: task.message,
+      },
+    };
+  }
+
+  if (task.kind === "delete" || task.kind === "delete-batch") {
+    return {
+      notice: {
+        type: "success",
+        message:
+          task.message ||
+          t(
+            task.kind === "delete"
+              ? "workReport:messages.detailDeletedQueuedCompleted"
+              : "workReport:messages.batchDeleteCompleted"
+          ),
+      },
+      loadEntryOptions: {
+        mode: "refreshing",
+        forceRefresh: true,
+      },
+    };
+  }
+
+  const rowId = task.rowId ?? "-";
+  return {
+    notice: {
+      type: "success",
+      message:
+        task.kind === "create"
+          ? t("workReport:messages.detailCreatedWithRow", { rowId })
+          : t("workReport:messages.detailUpdatedWithRow", { rowId }),
+    },
+    highlightRowId: rowId,
+    releaseRowId: task.kind === "update" && task.rowId ? task.rowId : undefined,
+    loadEntryOptions: {
+      mode: "background",
+      forceRefresh: false,
+    },
+  };
+}
+
 function readPendingMutationReplay(storageKey: string): PendingMutationReplay | null {
   if (typeof window === "undefined") {
     return null;
   }
   try {
-    const raw = window.localStorage.getItem(storageKey);
+    const raw = window.sessionStorage.getItem(storageKey);
     if (!raw) {
       return null;
     }
@@ -62,14 +119,14 @@ function writePendingMutationReplay(storageKey: string, pending: PendingMutation
   if (typeof window === "undefined") {
     return;
   }
-  window.localStorage.setItem(storageKey, JSON.stringify(pending));
+  window.sessionStorage.setItem(storageKey, JSON.stringify(pending));
 }
 
 function clearPendingMutationReplay(storageKey: string): void {
   if (typeof window === "undefined") {
     return;
   }
-  window.localStorage.removeItem(storageKey);
+  window.sessionStorage.removeItem(storageKey);
 }
 
 export function useWorkReportDetailStatusController({
@@ -257,12 +314,18 @@ export function useWorkReportDetailStatusController({
           ? activeMutationTask.status === "pending"
             ? t("workReport:messages.createTaskQueuedContinue")
             : t("workReport:messages.createTaskBackgroundRunning")
+          : activeMutationTask.kind === "delete" || activeMutationTask.kind === "delete-batch"
+            ? activeMutationTask.status === "pending"
+              ? t("workReport:messages.taskQueuedWaitingPrevious")
+              : t("workReport:messages.deleteTaskBackgroundRunning")
           : activeMutationTask.status === "pending"
             ? t("workReport:messages.taskQueuedWaitingPrevious")
             : t("workReport:messages.taskBackgroundRecalcRunning");
       const acceptedTaskMessage = t(
         activeMutationTask.kind === "create"
           ? "workReport:messages.createAcceptedTaskProcessing"
+          : activeMutationTask.kind === "delete" || activeMutationTask.kind === "delete-batch"
+            ? "workReport:messages.deleteAcceptedTaskProcessing"
           : "workReport:messages.updateAcceptedTaskProcessing",
         {
           taskShortId: activeMutationTask.taskId.slice(0, 8),
@@ -354,36 +417,26 @@ export function useWorkReportDetailStatusController({
       return;
     }
 
-    let shouldReloadEntry = false;
+    let loadEntryOptions: LoadEntryOptions | null = null;
     for (const task of unhandledTerminalTasks) {
       handledCreateTaskTerminalIdsRef.current.add(task.taskId);
-      const terminalRowId = task.rowId ?? null;
-      if (task.kind === "update" && terminalRowId) {
-        void releaseRowEditLock(terminalRowId);
+      const resolution = resolveTerminalMutationTask(task, t);
+      if (resolution.releaseRowId) {
+        void releaseRowEditLock(resolution.releaseRowId);
       }
-
-      if (task.status === "success") {
-        const rowId = terminalRowId ?? "-";
-        setHighlightedDetailRowId(rowId);
-        setNotice({
-          type: "success",
-          message:
-            task.kind === "create"
-              ? t("workReport:messages.detailCreatedWithRow", { rowId })
-              : t("workReport:messages.detailUpdatedWithRow", { rowId }),
-        });
-        shouldReloadEntry = true;
-        continue;
+      if (resolution.highlightRowId !== undefined) {
+        setHighlightedDetailRowId(resolution.highlightRowId);
       }
-
-      setNotice({
-        type: "error",
-        message: task.message,
-      });
+      if (resolution.loadEntryOptions) {
+        loadEntryOptions = resolution.loadEntryOptions.forceRefresh
+          ? resolution.loadEntryOptions
+          : loadEntryOptions ?? resolution.loadEntryOptions;
+      }
+      setNotice(resolution.notice);
     }
 
-    if (shouldReloadEntry) {
-      void loadEntry({ silent: true, forceRefresh: false });
+    if (loadEntryOptions) {
+      void loadEntry(loadEntryOptions);
     }
   }, [currentEntryTaskMonitors, loadEntry, releaseRowEditLock, setHighlightedDetailRowId, setNotice, t]);
 

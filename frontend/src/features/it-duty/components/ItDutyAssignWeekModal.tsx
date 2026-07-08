@@ -30,15 +30,15 @@ export function ItDutyAssignWeekModal({
   const { t } = useTranslation("itDuty");
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null);
   const [note, setNote] = useState("");
-  const [propagateForward, setPropagateForward] = useState(true);
+  const [propagateForward, setPropagateForward] = useState(false);
   const [working, setWorking] = useState(false);
 
   useEffect(() => {
     if (open) {
       setSelectedMemberId(currentOverride?.memberId ?? defaultMemberId ?? null);
       setNote(currentOverride?.note ?? "");
-      // 既有 override 維持原值；新建 override 預設 propagate=true
-      setPropagateForward(currentOverride?.propagateForward ?? true);
+      // 既有 override 維持原值；新建 override 預設只改這週、不往後延
+      setPropagateForward(currentOverride?.propagateForward ?? false);
     }
   }, [open, currentOverride, defaultMemberId]);
 

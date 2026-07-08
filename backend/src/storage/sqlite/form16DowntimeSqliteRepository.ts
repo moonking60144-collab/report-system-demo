@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import type { Database } from "sqlite";
-import { sqliteClient } from "./sqliteClient";
+import { env } from "../../config/env";
+import { sqliteClient, withWriteTransaction } from "./sqliteClient";
+import {
+  buildSqliteMultiRowPlaceholders,
+  resolveSqliteInsertChunkSize,
+} from "./sqliteBulkInsert";
 import type { Form16DowntimeRecord } from "../../types/form16Downtime";
 
 interface Form16DowntimeStateRow {
@@ -14,28 +20,55 @@ export interface StoredForm16DowntimeState {
   updatedAt: string;
 }
 
+const DOWNTIME_RECORD_COLUMN_COUNT = 15;
+
+export function buildForm16DowntimeSnapshotHash(rawJson: string | null | undefined): string | null {
+  if (!rawJson) return null;
+  return createHash("sha256").update(rawJson).digest("hex");
+}
+
+function serializeForm16DowntimeRecord(record: Form16DowntimeRecord): string {
+  const stored = {
+    id: record.id,
+    date: record.date,
+    machineId: record.machineId,
+    processCode: record.processCode,
+    operatorId: record.operatorId,
+    operatorName: record.operatorName,
+    reportType: record.reportType,
+    startTime: record.startTime,
+    endTime: record.endTime,
+    breakTime: record.breakTime,
+    plannedIdleMinutes: record.plannedIdleMinutes,
+    remark: record.remark,
+    workOrderNo: record.workOrderNo,
+  };
+  return JSON.stringify(stored);
+}
+
+function toDowntimeInsertParams(record: Form16DowntimeRecord, syncedAt: string): unknown[] {
+  return [
+    record.id,
+    record.date,
+    record.machineId,
+    record.processCode,
+    record.operatorId,
+    record.operatorName,
+    record.reportType,
+    record.startTime,
+    record.endTime,
+    record.breakTime,
+    record.plannedIdleMinutes,
+    record.remark,
+    record.workOrderNo,
+    serializeForm16DowntimeRecord(record),
+    syncedAt,
+  ];
+}
+
 class Form16DowntimeSqliteRepository {
-  private writeChain: Promise<void> = Promise.resolve();
-
-  private async runSerializedWrite<T>(
-    operation: (db: Database) => Promise<T>
-  ): Promise<T> {
-    const scheduled = this.writeChain
-      .catch(() => {
-        // NOTE: 避免前一次失敗讓後續 SQLite 寫入鏈卡死。
-      })
-      .then(async () => operation(await sqliteClient.getDb()));
-
-    this.writeChain = scheduled.then(
-      () => undefined,
-      () => undefined
-    );
-
-    return scheduled;
-  }
-
   async listRecords(options: { limit?: number; offset?: number } = {}): Promise<Form16DowntimeRecord[]> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     const normalizedLimit =
       typeof options.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
         ? Math.trunc(options.limit)
@@ -58,7 +91,8 @@ class Form16DowntimeSqliteRepository {
         break_time,
         planned_idle_minutes,
         remark,
-        work_order_no
+        work_order_no,
+        raw_json
       FROM form16_downtime_records
       ORDER BY CAST(entry_id AS INTEGER) DESC, entry_id DESC
     `;
@@ -78,6 +112,7 @@ class Form16DowntimeSqliteRepository {
         planned_idle_minutes: number | null;
         remark: string | null;
         work_order_no: string | null;
+        raw_json: string | null;
       }>
       >(`${baseSql}\nLIMIT ? OFFSET ?`, normalizedLimit, normalizedOffset)
       : await db.all<
@@ -95,11 +130,13 @@ class Form16DowntimeSqliteRepository {
         planned_idle_minutes: number | null;
         remark: string | null;
         work_order_no: string | null;
+        raw_json: string | null;
       }>
       >(baseSql);
 
     return rows.map((row) => ({
       id: row.entry_id,
+      snapshotHash: buildForm16DowntimeSnapshotHash(row.raw_json),
       date: row.date_value,
       machineId: row.machine_id,
       processCode: row.process_code,
@@ -119,70 +156,24 @@ class Form16DowntimeSqliteRepository {
   }
 
   async replaceSnapshot(records: Form16DowntimeRecord[], syncedAt: string): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
-      await db.exec("BEGIN IMMEDIATE TRANSACTION");
-      try {
-        await db.exec("DELETE FROM form16_downtime_records");
+    await withWriteTransaction(async (db) => {
+      await db.exec("DELETE FROM form16_downtime_records");
+      await this.upsertRecordsWithDb(db, records, syncedAt);
 
-        for (const record of records) {
-          await db.run(
-            `
-            INSERT INTO form16_downtime_records (
-              entry_id,
-              date_value,
-              machine_id,
-              process_code,
-              operator_id,
-              operator_name,
-              report_type,
-              start_time,
-              end_time,
-              break_time,
-              planned_idle_minutes,
-              remark,
-              work_order_no,
-              raw_json,
-              synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            record.id,
-            record.date,
-            record.machineId,
-            record.processCode,
-            record.operatorId,
-            record.operatorName,
-            record.reportType,
-            record.startTime,
-            record.endTime,
-            record.breakTime,
-            record.plannedIdleMinutes,
-            record.remark,
-            record.workOrderNo,
-            JSON.stringify(record),
-            syncedAt
-          );
-        }
-
-        await db.run(
-          `
-          INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
-          VALUES (1, ?, ?, ?)
-          ON CONFLICT(id)
-          DO UPDATE SET
-            snapshot_at = excluded.snapshot_at,
-            total_records = excluded.total_records,
-            updated_at = excluded.updated_at
-          `,
-          syncedAt,
-          records.length,
-          new Date().toISOString()
-        );
-
-        await db.exec("COMMIT");
-      } catch (error) {
-        await db.exec("ROLLBACK");
-        throw error;
-      }
+      await db.run(
+        `
+        INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id)
+        DO UPDATE SET
+          snapshot_at = excluded.snapshot_at,
+          total_records = excluded.total_records,
+          updated_at = excluded.updated_at
+        `,
+        syncedAt,
+        records.length,
+        new Date().toISOString()
+      );
     });
   }
 
@@ -205,7 +196,7 @@ class Form16DowntimeSqliteRepository {
    * 停機紀錄需要直接查 Ragic。
    */
   async syncSnapshot(records: Form16DowntimeRecord[], syncedAt: string): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
+    await withWriteTransaction(async (db) => {
       const existingRows = await db.all<Array<{ entry_id: string }>>(
         "SELECT entry_id FROM form16_downtime_records"
       );
@@ -213,66 +204,43 @@ class Form16DowntimeSqliteRepository {
       const incomingIds = new Set(records.map((r) => r.id));
       const toDelete = [...existingIds].filter((id) => !incomingIds.has(id));
 
-      await db.exec("BEGIN IMMEDIATE TRANSACTION");
-      try {
-        for (const entryId of toDelete) {
-          await db.run("DELETE FROM form16_downtime_records WHERE entry_id = ?", entryId);
-        }
-        for (const record of records) {
-          await this.upsertRecordWithDb(db, record, syncedAt);
-        }
-        await db.run(
-          `
-          INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
-          VALUES (1, ?, ?, ?)
-          ON CONFLICT(id)
-          DO UPDATE SET
-            snapshot_at = excluded.snapshot_at,
-            total_records = excluded.total_records,
-            updated_at = excluded.updated_at
-          `,
-          syncedAt,
-          records.length,
-          new Date().toISOString()
-        );
-        await db.exec("COMMIT");
-      } catch (error) {
-        await db.exec("ROLLBACK");
-        throw error;
+      for (const entryId of toDelete) {
+        await db.run("DELETE FROM form16_downtime_records WHERE entry_id = ?", entryId);
       }
+      await this.upsertRecordsWithDb(db, records, syncedAt);
+      await db.run(
+        `
+        INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id)
+        DO UPDATE SET
+          snapshot_at = excluded.snapshot_at,
+          total_records = excluded.total_records,
+          updated_at = excluded.updated_at
+        `,
+        syncedAt,
+        records.length,
+        new Date().toISOString()
+      );
     });
   }
 
   async upsertRecord(record: Form16DowntimeRecord, syncedAt: string): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
-      await db.exec("BEGIN IMMEDIATE TRANSACTION");
-      try {
-        await this.upsertRecordWithDb(db, record, syncedAt);
-        await this.updateSnapshotStateWithDb(db, syncedAt);
-        await db.exec("COMMIT");
-      } catch (error) {
-        await db.exec("ROLLBACK");
-        throw error;
-      }
+    await withWriteTransaction(async (db) => {
+      await this.upsertRecordWithDb(db, record, syncedAt);
+      await this.updateSnapshotStateWithDb(db, syncedAt);
     });
   }
 
   async deleteRecord(entryId: string, syncedAt: string): Promise<void> {
-    await this.runSerializedWrite(async (db) => {
-      await db.exec("BEGIN IMMEDIATE TRANSACTION");
-      try {
-        await db.run("DELETE FROM form16_downtime_records WHERE entry_id = ?", entryId);
-        await this.updateSnapshotStateWithDb(db, syncedAt);
-        await db.exec("COMMIT");
-      } catch (error) {
-        await db.exec("ROLLBACK");
-        throw error;
-      }
+    await withWriteTransaction(async (db) => {
+      await db.run("DELETE FROM form16_downtime_records WHERE entry_id = ?", entryId);
+      await this.updateSnapshotStateWithDb(db, syncedAt);
     });
   }
 
   async getSnapshotState(): Promise<StoredForm16DowntimeState | null> {
-    const db = await sqliteClient.getDb();
+    const db = await sqliteClient.getReadDb();
     const row = await db.get<Form16DowntimeStateRow>(
       `
       SELECT snapshot_at, total_records, updated_at
@@ -293,63 +261,78 @@ class Form16DowntimeSqliteRepository {
     };
   }
 
+  async getRecordSnapshotHash(entryId: string): Promise<string | null> {
+    const db = await sqliteClient.getReadDb();
+    const row = await db.get<{ raw_json: string | null }>(
+      "SELECT raw_json FROM form16_downtime_records WHERE entry_id = ?",
+      entryId
+    );
+    return buildForm16DowntimeSnapshotHash(row?.raw_json);
+  }
+
   private async upsertRecordWithDb(
     db: Database,
     record: Form16DowntimeRecord,
     syncedAt: string
   ): Promise<void> {
-    await db.run(
-      `
-      INSERT INTO form16_downtime_records (
-        entry_id,
-        date_value,
-        machine_id,
-        process_code,
-        operator_id,
-        operator_name,
-        report_type,
-        start_time,
-        end_time,
-        break_time,
-        planned_idle_minutes,
-        remark,
-        work_order_no,
-        raw_json,
-        synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(entry_id)
-      DO UPDATE SET
-        date_value = excluded.date_value,
-        machine_id = excluded.machine_id,
-        process_code = excluded.process_code,
-        operator_id = excluded.operator_id,
-        operator_name = excluded.operator_name,
-        report_type = excluded.report_type,
-        start_time = excluded.start_time,
-        end_time = excluded.end_time,
-        break_time = excluded.break_time,
-        planned_idle_minutes = excluded.planned_idle_minutes,
-        remark = excluded.remark,
-        work_order_no = excluded.work_order_no,
-        raw_json = excluded.raw_json,
-        synced_at = excluded.synced_at
-      `,
-      record.id,
-      record.date,
-      record.machineId,
-      record.processCode,
-      record.operatorId,
-      record.operatorName,
-      record.reportType,
-      record.startTime,
-      record.endTime,
-      record.breakTime,
-      record.plannedIdleMinutes,
-      record.remark,
-      record.workOrderNo,
-      JSON.stringify(record),
-      syncedAt
+    await this.upsertRecordsWithDb(db, [record], syncedAt);
+  }
+
+  private async upsertRecordsWithDb(
+    db: Database,
+    records: Form16DowntimeRecord[],
+    syncedAt: string
+  ): Promise<void> {
+    const chunkSize = resolveSqliteInsertChunkSize(
+      env.SQLITE_SYNC_BATCH_SIZE,
+      DOWNTIME_RECORD_COLUMN_COUNT
     );
+    for (let index = 0; index < records.length; index += chunkSize) {
+      const chunk = records.slice(index, index + chunkSize);
+      const params = chunk.flatMap((record) => toDowntimeInsertParams(record, syncedAt));
+      if (params.length === 0) {
+        continue;
+      }
+
+      await db.run(
+        `
+        INSERT INTO form16_downtime_records (
+          entry_id,
+          date_value,
+          machine_id,
+          process_code,
+          operator_id,
+          operator_name,
+          report_type,
+          start_time,
+          end_time,
+          break_time,
+          planned_idle_minutes,
+          remark,
+          work_order_no,
+          raw_json,
+          synced_at
+        ) VALUES ${buildSqliteMultiRowPlaceholders(chunk.length, DOWNTIME_RECORD_COLUMN_COUNT)}
+        ON CONFLICT(entry_id)
+        DO UPDATE SET
+          date_value = excluded.date_value,
+          machine_id = excluded.machine_id,
+          process_code = excluded.process_code,
+          operator_id = excluded.operator_id,
+          operator_name = excluded.operator_name,
+          report_type = excluded.report_type,
+          start_time = excluded.start_time,
+          end_time = excluded.end_time,
+          break_time = excluded.break_time,
+          planned_idle_minutes = excluded.planned_idle_minutes,
+          remark = excluded.remark,
+          work_order_no = excluded.work_order_no,
+          raw_json = excluded.raw_json,
+          synced_at = excluded.synced_at
+        `,
+        ...params
+      );
+    }
   }
 
   private async updateSnapshotStateWithDb(db: Database, snapshotAt: string): Promise<void> {

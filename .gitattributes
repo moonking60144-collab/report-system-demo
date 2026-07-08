@@ -1,0 +1,7 @@
+# Windows batch / shell scripts must use CRLF or cmd.exe will mis-parse them.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Unix shell 一定要 LF，否則 bash 看到 \r 會炸 (e.g. "$'\r': command not found")
+*.sh text eol=lf

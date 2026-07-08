@@ -4,6 +4,7 @@ import type { WorkReportRecord } from "../../types/workReport";
 import { HttpError } from "../../utils/httpError";
 
 export type ProjectionReason = "create" | "update" | "delete";
+export type ProjectionApplyResult = "applied" | "deleted" | "skipped";
 
 export interface MutationProjectionSyncState {
   status: string;
@@ -48,26 +49,45 @@ interface WorkReportMutationProjectionServiceDeps {
 export class WorkReportMutationProjectionService {
   constructor(private readonly deps: WorkReportMutationProjectionServiceDeps) {}
 
+  async enqueueEntryAfterMutation(
+    formId: string,
+    entryId: string,
+    reason: ProjectionReason
+  ): Promise<number> {
+    if (!this.deps.shouldProject(formId)) {
+      return 0;
+    }
+
+    const enqueuedSeq = await this.deps.enqueueProjectionEvent(formId, entryId, reason);
+    if (enqueuedSeq > 0) {
+      workReportDebugLog("projection", "enqueued", {
+        formId,
+        entryId,
+        reason,
+        seq: enqueuedSeq,
+      });
+    }
+    return enqueuedSeq;
+  }
+
   async projectEntryAfterMutation(
     formId: string,
     entryId: string,
     reason: ProjectionReason
   ): Promise<void> {
-    if (!this.deps.shouldProject(formId)) {
-      return;
-    }
-
-    const enqueuedSeq = await this.deps.enqueueProjectionEvent(formId, entryId, reason);
+    const enqueuedSeq = await this.enqueueEntryAfterMutation(formId, entryId, reason);
     if (enqueuedSeq <= 0) {
       return;
     }
-    workReportDebugLog("projection", "enqueued", {
-      formId,
-      entryId,
-      reason,
-      seq: enqueuedSeq,
-    });
+    await this.applyQueuedProjectionAfterMutation(formId, entryId, reason, enqueuedSeq);
+  }
 
+  async applyQueuedProjectionAfterMutation(
+    formId: string,
+    entryId: string,
+    reason: ProjectionReason,
+    enqueuedSeq: number
+  ): Promise<ProjectionApplyResult> {
     const syncState = await this.deps.getSyncState(formId);
     if (syncState?.status === "running") {
       workReportDebugLog("projection", "skipped-during-sync", {
@@ -76,7 +96,7 @@ export class WorkReportMutationProjectionService {
         reason,
         seq: enqueuedSeq,
       });
-      return;
+      return "skipped";
     }
     if (!syncState?.snapshotAt || !isSqliteReadModelVersionCurrent(syncState)) {
       workReportDebugLog("projection", "skipped-no-readable-snapshot", {
@@ -85,7 +105,7 @@ export class WorkReportMutationProjectionService {
         reason,
         seq: enqueuedSeq,
       });
-      return;
+      return "skipped";
     }
 
     try {
@@ -108,6 +128,7 @@ export class WorkReportMutationProjectionService {
         rowCount: result.rowCount,
         snapshotAt,
       });
+      return "applied";
     } catch (error) {
       if (error instanceof HttpError && error.code === "REPORT_NOT_FOUND") {
         const snapshotAt = new Date().toISOString();
@@ -132,7 +153,7 @@ export class WorkReportMutationProjectionService {
           },
           "warn"
         );
-        return;
+        return "deleted";
       }
 
       throw error;

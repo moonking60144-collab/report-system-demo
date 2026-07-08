@@ -3,15 +3,21 @@
   "version": "1.0.0",
   "main": "dist/server.js",
   "scripts": {
-    "test": "node -e \"require('fs').rmSync('.tmp-test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && cross-env DEMO_MODE=true node --test .tmp-test-dist/tests/**/*.test.js",
-    "dev": "node --watch --import tsx src/server.ts",
+    "test": "node -e \"require('fs').rmSync('.tmp-test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && cross-env DEMO_MODE=true node scripts/run-tests.mjs",
+    "dev": "node scripts/start-backend.js dev",
     "demo": "cross-env DEMO_MODE=true node --watch --import tsx src/server.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/server.js",
+    "start": "node scripts/start-backend.js",
     "typecheck": "tsc --noEmit",
     "audit:views": "node scripts/audit-work-report-views.js",
     "audit:form16-orphans": "tsx scripts/audit-form16-orphans.ts",
-    "backup:sqlite": "node scripts/backup-sqlite.js"
+    "backup:sqlite": "node scripts/backup-sqlite.js",
+    "export:schema": "tsx scripts/export-ragic-schema.ts .cache/work-report-read-model.v1.sqlite3 ./.cache/ragic-schema-export",
+    "export:definitions": "tsx scripts/export-ragic-definitions.ts",
+    "dump:workflows": "tsx scripts/dump-ragic-workflows.ts",
+    "analyze:workflows": "tsx scripts/analyze-ragic-workflows.ts",
+    "review:dev-ai-official-knowledge": "tsx scripts/review-dev-ai-official-knowledge.ts",
+    "refresh:workflows": "tsx scripts/dump-ragic-workflows.ts && tsx scripts/analyze-ragic-workflows.ts"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -22,15 +28,21 @@
   "description": "Ragic report backend",
   "dependencies": {
     "axios": "1.14.0",
+    "cheerio": "1.2.0",
+    "compression": "1.8.1",
     "cors": "^2.8.6",
+    "domhandler": "5.0.3",
     "dotenv": "^17.2.3",
     "express": "^4.22.1",
+    "iconv-lite": "^0.6.3",
+    "jszip": "3.10.1",
     "node-cache": "^5.1.2",
     "pino": "^10.3.1",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {
+    "@types/compression": "1.8.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.25",
     "@types/node": "^25.2.0",

@@ -30,6 +30,7 @@ export class CircuitBreaker {
   private state: CircuitState = "closed";
   private consecutiveFailures = 0;
   private openedAt = 0;
+  private halfOpenProbeInFlight = false;
 
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
@@ -46,7 +47,24 @@ export class CircuitBreaker {
     this.onStateChange = options.onStateChange;
   }
 
+  checkBeforeQueue(): void {
+    this.transitionOpenIfCooldownElapsed();
+    if (this.state === "half-open" && this.halfOpenProbeInFlight) {
+      throw new CircuitBreakerOpenError(this.name, this.cooldownMs);
+    }
+  }
+
   checkBeforeRun(): void {
+    this.transitionOpenIfCooldownElapsed();
+    if (this.state === "half-open") {
+      if (this.halfOpenProbeInFlight) {
+        throw new CircuitBreakerOpenError(this.name, this.cooldownMs);
+      }
+      this.halfOpenProbeInFlight = true;
+    }
+  }
+
+  private transitionOpenIfCooldownElapsed(): void {
     if (this.state === "open") {
       const elapsed = this.now() - this.openedAt;
       if (elapsed < this.cooldownMs) {
@@ -57,6 +75,7 @@ export class CircuitBreaker {
   }
 
   recordSuccess(): void {
+    this.halfOpenProbeInFlight = false;
     this.consecutiveFailures = 0;
     if (this.state !== "closed") {
       this.transition("closed");
@@ -64,6 +83,7 @@ export class CircuitBreaker {
   }
 
   recordFailure(): void {
+    this.halfOpenProbeInFlight = false;
     this.consecutiveFailures += 1;
     if (this.state === "half-open") {
       this.openedAt = this.now();
@@ -80,6 +100,12 @@ export class CircuitBreaker {
     return this.state;
   }
 
+  releaseHalfOpenProbe(): void {
+    if (this.state === "half-open") {
+      this.halfOpenProbeInFlight = false;
+    }
+  }
+
   /** 內部狀態轉換 + 觸發 listener */
   private transition(next: CircuitState): void {
     const prev = this.state;
@@ -87,6 +113,9 @@ export class CircuitBreaker {
       return;
     }
     this.state = next;
+    if (next !== "half-open") {
+      this.halfOpenProbeInFlight = false;
+    }
     if (this.onStateChange) {
       this.onStateChange({
         name: this.name,

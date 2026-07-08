@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getErrorMessage } from "../utils/errorUtils";
 import { pollDowntimeTaskUntilDone } from "./useDowntimeCreateTask";
 
 export type DowntimeMutationStatus = "idle" | "submitting" | "success" | "failed";
@@ -24,7 +25,7 @@ export function useDowntimeMutationTask(
 ): {
   status: DowntimeMutationStatus;
   run: (
-    accept: () => Promise<{ taskId: string }>
+    accept: () => Promise<{ taskId: string; status?: string }>
   ) => Promise<DowntimeMutationResult>;
 } {
   const pollIntervalMs = options.pollIntervalMs ?? 2000;
@@ -43,11 +44,15 @@ export function useDowntimeMutationTask(
 
   const run = useCallback(
     async (
-      accept: () => Promise<{ taskId: string }>
+      accept: () => Promise<{ taskId: string; status?: string }>
     ): Promise<DowntimeMutationResult> => {
       setStatus("submitting");
       try {
         const accepted = await accept();
+        if (accepted.status === "success") {
+          setStatus("success");
+          return { ok: true };
+        }
         const result = await pollDowntimeTaskUntilDone(accepted.taskId, {
           pollIntervalMs,
           maxPollAttempts,
@@ -59,7 +64,9 @@ export function useDowntimeMutationTask(
         setStatus("failed");
         return {
           ok: false,
-          errorMessage: error instanceof Error ? error.message : String(error),
+          // 用 backend HttpError 的訊息（含 Ragic 拒絕原因），不要 axios 的
+          // 「Request failed with status code 502」通用字串
+          errorMessage: getErrorMessage(error),
         };
       }
     },

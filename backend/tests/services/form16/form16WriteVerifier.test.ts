@@ -30,20 +30,50 @@ function buildEntryWith({
 
 test("verify 全部欄位都吻合 → 靜默成功，不呼叫 deleteEntry", async (t) => {
   const getEntryMock = t.mock.method(ragicClient, "getEntry", async () =>
-    buildEntryWith({ workOrderNo: "WO-100", type: "TI-ProcessA" })
+    buildEntryWith({ workOrderNo: "WO-100", type: "TI搓牙" })
   );
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
 
   await assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
     workOrderNo: "WO-100",
-    type: "TI-ProcessA",
+    type: "TI搓牙",
   });
 
   assert.equal(getEntryMock.mock.callCount(), 1);
   assert.equal(deleteEntryMock.mock.callCount(), 0);
 });
 
-test("verify entry 不存在（getEntry 回 null）→ throw RAGIC_WRITE_FAILED，不 delete", async (t) => {
+test("verify 可由 caller 指定讀取 lane、timeout 與 retry", async (t) => {
+  const getEntryMock = t.mock.method(ragicClient, "getEntry", async () =>
+    buildEntryWith({ workOrderNo: "WO-100", type: "TI搓牙" })
+  );
+  const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
+
+  await assertForm16EntryStored(
+    FORM_PATH,
+    ENTRY_ID,
+    {
+      workOrderNo: "WO-100",
+      type: "TI搓牙",
+    },
+    {
+      readPriority: "user",
+      timeoutMs: 4321,
+      maxRetries: 0,
+    }
+  );
+
+  assert.equal(getEntryMock.mock.callCount(), 1);
+  assert.deepEqual(getEntryMock.mock.calls[0]?.arguments, [
+    FORM_PATH,
+    ENTRY_ID,
+    false,
+    { timeoutMs: 4321, priority: "user", maxRetries: 0 },
+  ]);
+  assert.equal(deleteEntryMock.mock.callCount(), 0);
+});
+
+test("verify entry 不存在（getEntry 回 null）→ throw RAGIC_WRITE_GONE，不 delete", async (t) => {
   const getEntryMock = t.mock.method(ragicClient, "getEntry", async () => null);
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
 
@@ -51,7 +81,7 @@ test("verify entry 不存在（getEntry 回 null）→ throw RAGIC_WRITE_FAILED�
     () => assertForm16EntryStored(FORM_PATH, ENTRY_ID, { workOrderNo: "WO-100" }),
     (err: unknown) => {
       assert.ok(err instanceof HttpError);
-      assert.equal(err.code, "RAGIC_WRITE_FAILED");
+      assert.equal(err.code, "RAGIC_WRITE_GONE");
       assert.equal(err.statusCode, 502);
       return true;
     }
@@ -61,9 +91,59 @@ test("verify entry 不存在（getEntry 回 null）→ throw RAGIC_WRITE_FAILED�
   assert.equal(deleteEntryMock.mock.callCount(), 0);
 });
 
+test("verify 讀取錯誤預設仍會往外 throw，不 delete", async (t) => {
+  const getEntryMock = t.mock.method(ragicClient, "getEntry", async () => {
+    throw new Error("ECONNABORTED");
+  });
+  const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
+
+  await assert.rejects(
+    () => assertForm16EntryStored(FORM_PATH, ENTRY_ID, { workOrderNo: "WO-100" }),
+    /ECONNABORTED/
+  );
+  assert.equal(getEntryMock.mock.callCount(), 1);
+  assert.equal(deleteEntryMock.mock.callCount(), 0);
+});
+
+test("verify 讀取錯誤可標記為狀態未知後放行，避免慢但已寫入被當失敗", async (t) => {
+  const getEntryMock = t.mock.method(ragicClient, "getEntry", async () => {
+    throw new Error("ECONNABORTED");
+  });
+  const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
+  const indeterminatePayloads: unknown[] = [];
+
+  await assertForm16EntryStored(
+    FORM_PATH,
+    ENTRY_ID,
+    { workOrderNo: "WO-100" },
+    {
+      continueOnReadError: true,
+      onReadIndeterminate: (payload) => {
+        indeterminatePayloads.push(payload);
+      },
+    }
+  );
+
+  assert.equal(getEntryMock.mock.callCount(), 1);
+  assert.equal(deleteEntryMock.mock.callCount(), 0);
+  assert.equal(indeterminatePayloads.length, 1);
+  assert.deepEqual(
+    {
+      form16Path: (indeterminatePayloads[0] as { form16Path: string }).form16Path,
+      entryId: (indeterminatePayloads[0] as { entryId: string }).entryId,
+      errorMessage: (indeterminatePayloads[0] as { errorMessage: string }).errorMessage,
+    },
+    {
+      form16Path: FORM_PATH,
+      entryId: ENTRY_ID,
+      errorMessage: "ECONNABORTED",
+    }
+  );
+});
+
 test("verify workOrderNo mismatch → DELETE 該 entry + throw", async (t) => {
   t.mock.method(ragicClient, "getEntry", async () =>
-    buildEntryWith({ workOrderNo: "", type: "TI-ProcessA" })
+    buildEntryWith({ workOrderNo: "", type: "TI搓牙" })
   );
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
 
@@ -74,7 +154,7 @@ test("verify workOrderNo mismatch → DELETE 該 entry + throw", async (t) => {
       }),
     (err: unknown) => {
       assert.ok(err instanceof HttpError);
-      assert.equal(err.code, "RAGIC_WRITE_FAILED");
+      assert.equal(err.code, "RAGIC_WRITE_ROLLBACK_DELETED");
       assert.match(err.message, /workOrderNo/);
       assert.match(err.message, /已回滾刪除/);
       return true;
@@ -94,7 +174,7 @@ test("verify type mismatch → DELETE + throw", async (t) => {
     () =>
       assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
         workOrderNo: "WO-100",
-        type: "TI-ProcessA",
+        type: "TI搓牙",
       }),
     (err: unknown) => {
       assert.ok(err instanceof HttpError);
@@ -115,7 +195,7 @@ test("verify 兩個欄位都 mismatch → 一次列出兩個 + DELETE", async (t
     () =>
       assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
         workOrderNo: "WO-100",
-        type: "TI-ProcessA",
+        type: "TI搓牙",
       }),
     (err: unknown) => {
       assert.ok(err instanceof HttpError);
@@ -129,7 +209,7 @@ test("verify 兩個欄位都 mismatch → 一次列出兩個 + DELETE", async (t
 
 test("verify mismatch 且 DELETE 也失敗 → 仍 throw 原 mismatch error（不掩蓋）", async (t) => {
   t.mock.method(ragicClient, "getEntry", async () =>
-    buildEntryWith({ workOrderNo: "wrong", type: "TI-ProcessA" })
+    buildEntryWith({ workOrderNo: "wrong", type: "TI搓牙" })
   );
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => {
     throw new Error("ragic-delete-failed");
@@ -139,12 +219,12 @@ test("verify mismatch 且 DELETE 也失敗 → 仍 throw 原 mismatch error（�
     () =>
       assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
         workOrderNo: "WO-100",
-        type: "TI-ProcessA",
+        type: "TI搓牙",
       }),
     (err: unknown) => {
       // 仍丟原本的 verify-failed，不該變成 delete error
       assert.ok(err instanceof HttpError);
-      assert.equal(err.code, "RAGIC_WRITE_FAILED");
+      assert.equal(err.code, "RAGIC_WRITE_ROLLBACK_UNCONFIRMED");
       assert.match(err.message, /workOrderNo/);
       // delete error 訊息不該 leak 出來
       assert.doesNotMatch(err.message, /ragic-delete-failed/);

@@ -5,6 +5,7 @@ import { env } from "../config/env";
 import { workReportDebugLog } from "../observability/workReportDebugLog";
 import type { WorkReportRecord } from "../types/workReport";
 import { HttpError } from "../utils/httpError";
+import { createKeyedSerialQueue } from "../utils/keyedSerialQueue";
 import { workReportTaskRegistryService } from "./work-report/workReportTaskRegistryService";
 
 export type RagicCallbackEventType =
@@ -29,11 +30,24 @@ export interface CallbackTask {
   status: CallbackTaskStatus;
   createdAt: string;
   updatedAt: string;
+  latestCallbackAt?: string;
+  latestCallbackSeq?: number;
+  coalescedCount?: number;
   finishedAt?: string;
   error?: {
     code?: string;
     message: string;
   };
+}
+
+export interface RagicCallbackRefreshStats {
+  total: number;
+  pending: number;
+  running: number;
+  success: number;
+  failed: number;
+  activeCoalescingKeys: number;
+  coalescedCallbacks: number;
 }
 
 interface CallbackTaskSnapshotPayload {
@@ -76,11 +90,14 @@ export interface RagicCallbackRefreshServiceDeps {
   deleteEntrySnapshot(formId: string, entryId: string): Promise<void>;
   publishWorkReportUpdated(formId: string, entryId: string): void;
   publishWorkReportFormUpdated(formId: string): void;
+  getEntrySnapshot?(formId: string, entryId: string): Promise<WorkReportRecord | null>;
   getRecentMutationProjection(
     formId: string,
     entryId: string,
     windowMs: number
   ): { projectedAt: string; reason: CallbackProjectionReason } | null;
+  taskPersistEnabled?: boolean;
+  taskStoreFile?: string;
 }
 
 function mapEventTypeToProjectionReason(eventType: RagicCallbackEventType): CallbackProjectionReason {
@@ -93,18 +110,42 @@ function mapEventTypeToProjectionReason(eventType: RagicCallbackEventType): Call
   return "update";
 }
 
+function areWorkReportRecordsEquivalent(left: WorkReportRecord, right: WorkReportRecord): boolean {
+  return stableStringify(left) === stableStringify(right);
+}
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) {
+    return "null";
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+  return `{${entries
+    .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`)
+    .join(",")}}`;
+}
+
 export class RagicCallbackRefreshService {
   private readonly tasks = new Map<string, CallbackTask>();
-  private readonly queueChainByEntryKey = new Map<string, Promise<void>>();
+  private readonly activeTaskIdByCoalesceKey = new Map<string, string>();
+  private readonly queueChainByEntryKey = createKeyedSerialQueue();
+  private callbackSeq = 0;
   private persistChain: Promise<void> = Promise.resolve();
   private initializedPromise: Promise<void> | null = null;
 
-  constructor(private readonly deps: RagicCallbackRefreshServiceDeps) {
-    void this.initialize();
-  }
+  constructor(private readonly deps: RagicCallbackRefreshServiceDeps) {}
 
   async initialize(): Promise<void> {
-    if (!env.RAGIC_CALLBACK_TASK_PERSIST_ENABLED) {
+    if (!this.isTaskPersistEnabled()) {
       return;
     }
     if (this.initializedPromise) {
@@ -115,9 +156,41 @@ export class RagicCallbackRefreshService {
     await this.initializedPromise;
   }
 
+  async flush(): Promise<void> {
+    await this.initialize();
+    await this.persistChain.catch(() => undefined);
+  }
+
   enqueue(input: EnqueueRagicCallbackInput): CallbackTask {
-    const taskId = randomUUID();
     const createdAt = new Date().toISOString();
+    const callbackSeq = ++this.callbackSeq;
+    const coalesceKey = this.buildCoalesceKey(input.formId, input.entryId, input.eventType);
+    const activeTask = this.getActiveCoalescedTask(coalesceKey);
+    if (activeTask) {
+      const nextTask: CallbackTask = {
+        ...activeTask,
+        ...(input.rowId ? { rowId: input.rowId } : {}),
+        ...(input.source ? { source: input.source } : {}),
+        updatedAt: createdAt,
+        latestCallbackAt: createdAt,
+        latestCallbackSeq: callbackSeq,
+        coalescedCount: (activeTask.coalescedCount ?? 0) + 1,
+      };
+      this.tasks.set(nextTask.taskId, nextTask);
+      this.syncTaskToRegistry(nextTask, input);
+      this.schedulePersist();
+      workReportDebugLog("callback", "coalesced", {
+        taskId: nextTask.taskId,
+        formId: input.formId,
+        entryId: input.entryId,
+        eventType: input.eventType,
+        coalescedCount: nextTask.coalescedCount ?? 0,
+        source: input.source ?? "ragic",
+      });
+      return { ...nextTask };
+    }
+
+    const taskId = randomUUID();
     const task: CallbackTask = {
       taskId,
       formId: input.formId,
@@ -128,28 +201,18 @@ export class RagicCallbackRefreshService {
       status: "pending",
       createdAt,
       updatedAt: createdAt,
+      latestCallbackAt: createdAt,
+      latestCallbackSeq: callbackSeq,
+      coalescedCount: 0,
     };
     this.tasks.set(taskId, task);
+    this.activeTaskIdByCoalesceKey.set(coalesceKey, taskId);
     this.syncTaskToRegistry(task, input);
     this.pruneHistory();
     this.schedulePersist();
 
     const queueKey = `${input.formId}:${input.entryId}`;
-    const currentChain = this.queueChainByEntryKey.get(queueKey) ?? Promise.resolve();
-    const nextChain = currentChain
-      .catch(() => {
-        // NOTE: 保持 queue 可持續接受後續 callback。
-      })
-      .then(async () => {
-        await this.runTask(taskId);
-      });
-
-    this.queueChainByEntryKey.set(queueKey, nextChain);
-    void nextChain.finally(() => {
-      if (this.queueChainByEntryKey.get(queueKey) === nextChain) {
-        this.queueChainByEntryKey.delete(queueKey);
-      }
-    });
+    void this.queueChainByEntryKey.enqueue(queueKey, () => this.runTask(taskId));
 
     workReportDebugLog("callback", "accepted", {
       taskId,
@@ -166,6 +229,25 @@ export class RagicCallbackRefreshService {
   getTask(taskId: string): CallbackTask | null {
     const task = this.tasks.get(taskId);
     return task ? { ...task } : null;
+  }
+
+  getStats(): RagicCallbackRefreshStats {
+    const stats: RagicCallbackRefreshStats = {
+      total: this.tasks.size,
+      pending: 0,
+      running: 0,
+      success: 0,
+      failed: 0,
+      activeCoalescingKeys: this.activeTaskIdByCoalesceKey.size,
+      coalescedCallbacks: 0,
+    };
+
+    for (const task of this.tasks.values()) {
+      stats[task.status] += 1;
+      stats.coalescedCallbacks += task.coalescedCount ?? 0;
+    }
+
+    return stats;
   }
 
   private async runTask(taskId: string): Promise<void> {
@@ -190,61 +272,27 @@ export class RagicCallbackRefreshService {
         });
       }
 
-      const projectionReason = mapEventTypeToProjectionReason(task.eventType);
-      const sqliteEnabled = this.deps.shouldUseSqliteReadForForm(task.formId);
-
-      // 預設要通知 client；若這筆 callback 被 dedupe（近期 projection 已覆蓋），連 SSE 都不發，
-      // 不然前端會被多餘通知連續觸發 refresh（batch create 20 筆會連閃）。
-      // SQLite 沒啟用時沒 dedupe 機制，維持原行為照發。
-      let notifyClients = true;
-
-      if (sqliteEnabled) {
-        const syncState = await this.deps.getSyncState(task.formId);
-        if (syncState?.status === "running") {
-          await this.deps.projectEntryAfterMutation(task.formId, task.entryId, projectionReason);
+      let notifyClients = false;
+      while (true) {
+        const currentTask = this.tasks.get(taskId);
+        if (!currentTask) {
+          return;
         }
-        const snapshotAt = new Date().toISOString();
-        const recentProjection = this.deps.getRecentMutationProjection(
-          task.formId,
-          task.entryId,
-          this.deps.dedupeWindowMs
-        );
-
-        if (recentProjection) {
-          await this.deps.touchSyncStateSnapshot(
-            task.formId,
-            snapshotAt,
-            `ragic-callback:${task.eventType}:${task.entryId}:deduped`
-          );
-          notifyClients = false;
-          workReportDebugLog("callback", "refresh-skipped-recent-projection", {
-            taskId,
-            formId: task.formId,
-            entryId: task.entryId,
-            eventType: task.eventType,
-            projectionReason: recentProjection.reason,
-            projectedAt: recentProjection.projectedAt,
-            dedupeWindowMs: this.deps.dedupeWindowMs,
-            queuedForReplay: syncState?.status === "running",
-          });
-        } else {
-          const record = await this.deps.refreshEntry(task.formId, task.entryId);
-          const result = await this.deps.upsertEntrySnapshot(task.formId, record, snapshotAt);
-          await this.deps.touchSyncStateSnapshot(
-            task.formId,
-            snapshotAt,
-            `ragic-callback:${task.eventType}:${task.entryId}`
-          );
-          workReportDebugLog("callback", "refresh-succeeded", {
-            taskId,
-            formId: task.formId,
-            entryId: task.entryId,
-            eventType: task.eventType,
-            rowCount: result.rowCount,
-            snapshotAt,
-            queuedForReplay: syncState?.status === "running",
-          });
+        const coveredCallbackSeq = currentTask.latestCallbackSeq ?? 0;
+        notifyClients = (await this.runRefreshPass(currentTask)) || notifyClients;
+        const latestTask = this.tasks.get(taskId);
+        if (!latestTask || (latestTask.latestCallbackSeq ?? 0) <= coveredCallbackSeq) {
+          break;
         }
+        workReportDebugLog("callback", "refresh-rerun-requested", {
+          taskId,
+          formId: latestTask.formId,
+          entryId: latestTask.entryId,
+          eventType: latestTask.eventType,
+          latestCallbackAt: latestTask.latestCallbackAt ?? null,
+          latestCallbackSeq: latestTask.latestCallbackSeq ?? null,
+          coveredCallbackSeq,
+        });
       }
 
       if (notifyClients) {
@@ -260,6 +308,7 @@ export class RagicCallbackRefreshService {
         finishedAt,
       });
       this.syncTaskToRegistry(this.tasks.get(taskId)!, task);
+      this.clearActiveCoalescingKey(task);
       this.schedulePersist();
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -279,11 +328,11 @@ export class RagicCallbackRefreshService {
             "callback",
             "refresh-report-not-found",
             {
-            taskId,
-            formId: task.formId,
-            entryId: task.entryId,
-            eventType: task.eventType,
-            handledAsDelete: true,
+              taskId,
+              formId: task.formId,
+              entryId: task.entryId,
+              eventType: task.eventType,
+              handledAsDelete: true,
             },
             "warn"
           );
@@ -294,6 +343,7 @@ export class RagicCallbackRefreshService {
             finishedAt,
           });
           this.syncTaskToRegistry(this.tasks.get(taskId)!, task);
+          this.clearActiveCoalescingKey(task);
           this.schedulePersist();
           return;
         }
@@ -308,17 +358,17 @@ export class RagicCallbackRefreshService {
         "callback",
         "refresh-failed",
         {
-        taskId,
-        formId: task.formId,
-        entryId: task.entryId,
-        eventType: task.eventType,
-        rowId: task.rowId ?? null,
-        error: message,
-        code: code ?? null,
+          taskId,
+          formId: task.formId,
+          entryId: task.entryId,
+          eventType: task.eventType,
+          rowId: task.rowId ?? null,
+          error: message,
+          code: code ?? null,
         },
         "warn"
       );
-      this.tasks.set(taskId, {
+      const failedTask: CallbackTask = {
         ...this.tasks.get(taskId)!,
         status: "failed",
         updatedAt: finishedAt,
@@ -327,14 +377,85 @@ export class RagicCallbackRefreshService {
           ...(code ? { code } : {}),
           message,
         },
-      });
-      this.syncTaskToRegistry(this.tasks.get(taskId)!, task);
+      };
+      this.tasks.set(taskId, failedTask);
+      this.syncTaskToRegistry(failedTask, task);
+      this.clearActiveCoalescingKey(failedTask);
       this.schedulePersist();
+      this.enqueueFollowUpAfterCoalescedFailure(failedTask);
     }
   }
 
+  private async runRefreshPass(task: CallbackTask): Promise<boolean> {
+    const projectionReason = mapEventTypeToProjectionReason(task.eventType);
+    const sqliteEnabled = this.deps.shouldUseSqliteReadForForm(task.formId);
+
+    // 預設要通知 client；若近期 projection 已覆蓋同一筆 internal mutation，仍要讀 Ragic
+    // 以免外部 Ragic callback 被整筆吞掉，但內容相同時可抑制 SSE 避免前端連閃。
+    // SQLite 沒啟用時沒 dedupe 機制，維持原行為照發。
+    let notifyClients = true;
+
+    if (sqliteEnabled) {
+      const syncState = await this.deps.getSyncState(task.formId);
+      if (syncState?.status === "running") {
+        await this.deps.projectEntryAfterMutation(task.formId, task.entryId, projectionReason);
+      }
+      const snapshotAt = new Date().toISOString();
+      const recentProjection = this.deps.getRecentMutationProjection(
+        task.formId,
+        task.entryId,
+        this.deps.dedupeWindowMs
+      );
+      const dedupeProjection =
+        recentProjection && recentProjection.reason === projectionReason ? recentProjection : null;
+
+      const beforeSnapshot = dedupeProjection
+        ? (await this.deps.getEntrySnapshot?.(task.formId, task.entryId)) ?? null
+        : null;
+      const record = await this.deps.refreshEntry(task.formId, task.entryId);
+      const result = await this.deps.upsertEntrySnapshot(task.formId, record, snapshotAt);
+      await this.deps.touchSyncStateSnapshot(
+        task.formId,
+        snapshotAt,
+        dedupeProjection
+          ? `ragic-callback:${task.eventType}:${task.entryId}:deduped`
+          : `ragic-callback:${task.eventType}:${task.entryId}`
+      );
+
+      if (dedupeProjection) {
+        notifyClients =
+          beforeSnapshot === null || !areWorkReportRecordsEquivalent(beforeSnapshot, record);
+        workReportDebugLog("callback", "refresh-succeeded-recent-projection", {
+          taskId: task.taskId,
+          formId: task.formId,
+          entryId: task.entryId,
+          eventType: task.eventType,
+          projectionReason: dedupeProjection.reason,
+          projectedAt: dedupeProjection.projectedAt,
+          dedupeWindowMs: this.deps.dedupeWindowMs,
+          rowCount: result.rowCount,
+          snapshotAt,
+          notifyClients,
+          queuedForReplay: syncState?.status === "running",
+        });
+      } else {
+        workReportDebugLog("callback", "refresh-succeeded", {
+          taskId: task.taskId,
+          formId: task.formId,
+          entryId: task.entryId,
+          eventType: task.eventType,
+          rowCount: result.rowCount,
+          snapshotAt,
+          queuedForReplay: syncState?.status === "running",
+        });
+      }
+    }
+
+    return notifyClients;
+  }
+
   private async loadFromDisk(): Promise<void> {
-    if (!env.RAGIC_CALLBACK_TASK_PERSIST_ENABLED) {
+    if (!this.isTaskPersistEnabled()) {
       return;
     }
 
@@ -351,14 +472,15 @@ export class RagicCallbackRefreshService {
         this.tasks.set(task.taskId, task);
       }
 
-      const recoveredCount = this.recoverInterruptedTasks();
+      const recoveredTasks = this.recoverInterruptedTasks();
       this.syncAllTasksToRegistry();
       this.pruneHistory();
       this.schedulePersist();
+      this.enqueueRecoveredTasks(recoveredTasks);
       workReportDebugLog("callback-persist", "snapshot-loaded", {
         filePath,
         count: parsed.tasks.length,
-        recoveredCount,
+        recoveredCount: recoveredTasks.length,
       });
     } catch (error) {
       const errnoError = error as NodeJS.ErrnoException;
@@ -377,33 +499,36 @@ export class RagicCallbackRefreshService {
     }
   }
 
-  private recoverInterruptedTasks(): number {
+  private recoverInterruptedTasks(): CallbackTask[] {
     const recoveredAt = new Date().toISOString();
-    let recoveredCount = 0;
+    const recoveredTasks: CallbackTask[] = [];
 
     for (const [taskId, task] of this.tasks.entries()) {
       if (task.status !== "pending" && task.status !== "running") {
         continue;
       }
 
-      recoveredCount += 1;
-      this.tasks.set(taskId, {
+      const recoveredTask: CallbackTask = {
         ...task,
-        status: "failed",
+        status: "pending",
         updatedAt: recoveredAt,
-        finishedAt: recoveredAt,
-        error: {
-          code: "CALLBACK_TASK_RECOVERED_AFTER_RESTART",
-          message: "服務重啟，原 callback 任務已標記為失敗",
-        },
-      });
+      };
+      delete recoveredTask.finishedAt;
+      delete recoveredTask.error;
+      this.tasks.set(taskId, recoveredTask);
+      recoveredTasks.push(recoveredTask);
     }
 
-    if (recoveredCount > 0) {
-      workReportDebugLog("callback-persist", "recovered-interrupted", { recoveredCount }, "warn");
+    if (recoveredTasks.length > 0) {
+      workReportDebugLog(
+        "callback-persist",
+        "recovered-interrupted",
+        { recoveredCount: recoveredTasks.length },
+        "warn"
+      );
     }
 
-    return recoveredCount;
+    return recoveredTasks;
   }
 
   private pruneHistory(): void {
@@ -425,7 +550,7 @@ export class RagicCallbackRefreshService {
   }
 
   private schedulePersist(): void {
-    if (!env.RAGIC_CALLBACK_TASK_PERSIST_ENABLED) {
+    if (!this.isTaskPersistEnabled()) {
       return;
     }
 
@@ -466,7 +591,7 @@ export class RagicCallbackRefreshService {
   }
 
   private resolveStoreFilePath(): string {
-    return path.resolve(env.RAGIC_CALLBACK_TASK_STORE_FILE);
+    return path.resolve(this.deps.taskStoreFile ?? env.RAGIC_CALLBACK_TASK_STORE_FILE);
   }
 
   private syncTaskToRegistry(
@@ -474,13 +599,17 @@ export class RagicCallbackRefreshService {
     input?: Pick<EnqueueRagicCallbackInput, "actorIp" | "actorLabel" | "source">
   ): void {
     const eventLabel = input?.source ?? task.source ?? "ragic-callback";
+    const coalescedSuffix =
+      task.coalescedCount && task.coalescedCount > 0
+        ? `，已合併 ${task.coalescedCount} 筆`
+        : "";
     const message =
       task.status === "pending"
-        ? `Callback 任務排隊中（${task.eventType}）`
+        ? `Callback 任務排隊中（${task.eventType}${coalescedSuffix}）`
         : task.status === "running"
-          ? `Callback 任務處理中（${task.eventType}）`
+          ? `Callback 任務處理中（${task.eventType}${coalescedSuffix}）`
           : task.status === "success"
-            ? `Callback 任務完成（${task.eventType}）`
+            ? `Callback 任務完成（${task.eventType}${coalescedSuffix}）`
             : task.error?.message ?? `Callback 任務失敗（${task.eventType}）`;
 
     workReportTaskRegistryService.upsertTask({
@@ -501,7 +630,8 @@ export class RagicCallbackRefreshService {
       actorClientId: null,
       actorTabId: null,
       actorIp: input?.actorIp ?? null,
-      actorLabel: input?.actorLabel ?? eventLabel,
+      actorLabel: input?.actorLabel ?? null,
+      source: eventLabel,
     });
   }
 
@@ -509,6 +639,43 @@ export class RagicCallbackRefreshService {
     for (const task of this.tasks.values()) {
       this.syncTaskToRegistry(task);
     }
+  }
+
+  private enqueueFollowUpAfterCoalescedFailure(task: CallbackTask): void {
+    if ((task.coalescedCount ?? 0) <= 0) {
+      return;
+    }
+
+    const followUpTask = this.enqueue({
+      formId: task.formId,
+      entryId: task.entryId,
+      eventType: task.eventType,
+      ...(task.rowId ? { rowId: task.rowId } : {}),
+      ...(task.source ? { source: task.source } : {}),
+    });
+    workReportDebugLog("callback", "follow-up-enqueued-after-coalesced-failure", {
+      failedTaskId: task.taskId,
+      followUpTaskId: followUpTask.taskId,
+      formId: task.formId,
+      entryId: task.entryId,
+      eventType: task.eventType,
+      coalescedCount: task.coalescedCount ?? 0,
+    });
+  }
+
+  private enqueueRecoveredTasks(tasks: CallbackTask[]): void {
+    for (const task of tasks) {
+      const coalesceKey = this.buildCoalesceKey(task.formId, task.entryId, task.eventType);
+      if (!this.activeTaskIdByCoalesceKey.has(coalesceKey)) {
+        this.activeTaskIdByCoalesceKey.set(coalesceKey, task.taskId);
+      }
+      const queueKey = `${task.formId}:${task.entryId}`;
+      void this.queueChainByEntryKey.enqueue(queueKey, () => this.runTask(task.taskId));
+    }
+  }
+
+  private isTaskPersistEnabled(): boolean {
+    return this.deps.taskPersistEnabled ?? env.RAGIC_CALLBACK_TASK_PERSIST_ENABLED;
   }
 
   private isValidSnapshotPayload(payload: unknown): payload is CallbackTaskSnapshotPayload {
@@ -539,5 +706,33 @@ export class RagicCallbackRefreshService {
       typeof t.createdAt === "string" &&
       typeof t.updatedAt === "string"
     );
+  }
+
+  private getActiveCoalescedTask(coalesceKey: string): CallbackTask | null {
+    const taskId = this.activeTaskIdByCoalesceKey.get(coalesceKey);
+    if (!taskId) {
+      return null;
+    }
+    const task = this.tasks.get(taskId);
+    if (!task || (task.status !== "pending" && task.status !== "running")) {
+      this.activeTaskIdByCoalesceKey.delete(coalesceKey);
+      return null;
+    }
+    return task;
+  }
+
+  private clearActiveCoalescingKey(task: CallbackTask): void {
+    const coalesceKey = this.buildCoalesceKey(task.formId, task.entryId, task.eventType);
+    if (this.activeTaskIdByCoalesceKey.get(coalesceKey) === task.taskId) {
+      this.activeTaskIdByCoalesceKey.delete(coalesceKey);
+    }
+  }
+
+  private buildCoalesceKey(
+    formId: string,
+    entryId: string,
+    eventType: RagicCallbackEventType
+  ): string {
+    return `${formId}:${entryId}:${eventType}`;
   }
 }
