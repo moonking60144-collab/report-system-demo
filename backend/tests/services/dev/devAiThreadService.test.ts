@@ -108,7 +108,10 @@ test("Dev AI thread service 會保存 chat 對話與 artifact，並隔離 actor"
   });
 
   const thread = await service.createThread("alice", { title: "問答" });
-  const result = await service.sendMessage("alice", thread.id, { message: "Funda 是什麼？" });
+  const result = await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-001",
+    message: "Funda 是什麼？",
+  });
 
   assert.equal(result.intent, "general");
   assert.equal(result.chat?.answer, "Funda 是內部系統");
@@ -121,6 +124,35 @@ test("Dev AI thread service 會保存 chat 對話與 artifact，並隔離 actor"
     () => service.getThreadDetail("bob", thread.id),
     (error) => error instanceof HttpError && error.code === "DEV_AI_THREAD_NOT_FOUND"
   );
+  await repo.close();
+});
+
+test("Dev AI thread 會把目前 formPath 與 fieldId 傳給 definitions retrieval", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  const chatService: DevAiChatService = {
+    async ask(request) {
+      assert.equal(request.mode, "definitions");
+      assert.equal(request.formPath, "default/devtest/7");
+      assert.equal(request.fieldId, "1040347");
+      return chatResult({ mode: "definitions" });
+    },
+  };
+  const service = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService,
+  });
+  const thread = await service.createThread("alice", {
+    mode: "definitions",
+    context: { formPath: "default/devtest/7", fieldId: "1040347" },
+  });
+
+  const result = await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-002",
+    message: "這個 Name 欄位來源是什麼？",
+  });
+
+  assert.equal(result.intent, "definitions");
   await repo.close();
 });
 
@@ -155,6 +187,7 @@ test("Dev AI thread service auto intent 命中公式時只走 suggestion/dry-run
     context: { formPath: "default/devtest/51", fieldId: "1036621", formulaKind: "formula" },
   });
   const result = await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-003",
     message: "幫我把公式改成空值回傳 0",
   });
 
@@ -189,7 +222,11 @@ test("Dev AI thread service 公式缺 context 時不寫入失敗 user message", 
   const thread = await service.createThread("alice", { mode: "formula" });
 
   await assert.rejects(
-    () => service.sendMessage("alice", thread.id, { message: "幫我改公式" }),
+    () =>
+      service.sendMessage("alice", thread.id, {
+        clientMessageId: "message-004",
+        message: "幫我改公式",
+      }),
     (error) => error instanceof HttpError && error.code === "DEV_AI_FORMULA_CONTEXT_REQUIRED"
   );
 
@@ -212,7 +249,11 @@ test("Dev AI thread service 下游 chat 失敗時不留下 completed user messag
   const thread = await service.createThread("alice", { title: "失敗測試" });
 
   await assert.rejects(
-    () => service.sendMessage("alice", thread.id, { message: "這句會失敗" }),
+    () =>
+      service.sendMessage("alice", thread.id, {
+        clientMessageId: "message-005",
+        message: "這句會失敗",
+      }),
     (error) => error instanceof HttpError && error.code === "DEV_AI_PROVIDER_RATE_LIMITED"
   );
 
@@ -255,7 +296,10 @@ test("Dev AI thread service 不把 failed message 帶進 thread memory", async (
     now: "2026-07-03T00:00:02.000Z",
   });
 
-  await service.sendMessage("alice", thread.id, { message: "下一題" });
+  await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-006",
+    message: "下一題",
+  });
   await repo.close();
 });
 
@@ -270,8 +314,14 @@ test("Dev AI thread service summary 只更新 thread-local summary", async () =>
   });
   const thread = await service.createThread("alice", { title: "長對話" });
 
-  await service.sendMessage("alice", thread.id, { message: "第一句" });
-  const final = await service.sendMessage("alice", thread.id, { message: "第二句" });
+  await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-007",
+    message: "第一句",
+  });
+  const final = await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-008",
+    message: "第二句",
+  });
 
   assert.ok(final.thread.summary?.includes("第一句"));
   assert.equal(final.summaryUsed, false);
@@ -291,7 +341,10 @@ test("Dev AI thread service 預設一問一答後會建立 thread summary", asyn
   });
   const thread = await service.createThread("alice", { title: "summary" });
 
-  const result = await service.sendMessage("alice", thread.id, { message: "請整理 Dev AI 流程" });
+  const result = await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-009",
+    message: "請整理 Dev AI 流程",
+  });
 
   assert.match(result.thread.summary ?? "", /請整理 Dev AI 流程/);
   assert.match(result.thread.summary ?? "", /這是可整理的回答/);
@@ -314,8 +367,14 @@ test("Dev AI thread service 寫入後會裁剪 thread messages 與 artifacts", a
   });
   const thread = await service.createThread("alice", { title: "retention" });
 
-  await service.sendMessage("alice", thread.id, { message: "第一句" });
-  await service.sendMessage("alice", thread.id, { message: "第二句" });
+  await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-010",
+    message: "第一句",
+  });
+  await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-011",
+    message: "第二句",
+  });
 
   const detail = await service.getThreadDetail("alice", thread.id);
   assert.deepEqual(
@@ -323,5 +382,180 @@ test("Dev AI thread service 寫入後會裁剪 thread messages 與 artifacts", a
     ["這是回答", "第二句", "這是回答"]
   );
   assert.equal(detail.artifacts.length, 2);
+  await repo.close();
+});
+
+test("Dev AI thread service 同 clientMessageId 的併發請求只呼叫 provider 一次", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let askCalls = 0;
+  let release!: () => void;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const service = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        askCalls += 1;
+        markStarted();
+        await gate;
+        return chatResult({ answer: "只產生一次" });
+      },
+    },
+  });
+  const thread = await service.createThread("alice", { title: "dedupe" });
+  const request = {
+    clientMessageId: "message-dedupe-001",
+    message: "同一題",
+  };
+
+  const first = service.sendMessage("alice", thread.id, request);
+  await started;
+  const second = service.sendMessage("alice", thread.id, request);
+  release();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(askCalls, 1);
+  assert.equal(firstResult.userMessage.id, secondResult.userMessage.id);
+  assert.equal(firstResult.assistantMessage.id, secondResult.assistantMessage.id);
+  assert.equal((await repo.listMessages("alice", thread.id)).length, 2);
+  await repo.close();
+});
+
+test("Dev AI thread service 相同 clientMessageId 搭配不同 payload 會回 409", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let askCalls = 0;
+  const service = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        askCalls += 1;
+        return chatResult();
+      },
+    },
+  });
+  const thread = await service.createThread("alice", { title: "conflict" });
+
+  await service.sendMessage("alice", thread.id, {
+    clientMessageId: "message-conflict-001",
+    message: "第一題",
+  });
+  await assert.rejects(
+    () =>
+      service.sendMessage("alice", thread.id, {
+        clientMessageId: "message-conflict-001",
+        message: "不同題",
+      }),
+    (error) =>
+      error instanceof HttpError && error.code === "DEV_AI_CLIENT_MESSAGE_ID_CONFLICT"
+  );
+
+  assert.equal(askCalls, 1);
+  await repo.close();
+});
+
+test("Dev AI thread service provider 失敗後可用原 clientMessageId 重試", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let askCalls = 0;
+  const service = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        askCalls += 1;
+        if (askCalls === 1) {
+          throw new HttpError(502, "暫時失敗", "DEV_AI_PROVIDER_FAILED");
+        }
+        return chatResult({ answer: "重試成功" });
+      },
+    },
+  });
+  const thread = await service.createThread("alice", { title: "retry" });
+  const request = {
+    clientMessageId: "message-retry-001",
+    message: "請重試",
+  };
+
+  await assert.rejects(
+    () => service.sendMessage("alice", thread.id, request),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_PROVIDER_FAILED"
+  );
+  const result = await service.sendMessage("alice", thread.id, request);
+
+  assert.equal(result.assistantMessage.content, "重試成功");
+  assert.equal(askCalls, 2);
+  assert.equal((await repo.listMessages("alice", thread.id)).length, 2);
+  await repo.close();
+});
+
+test("Dev AI thread service 不同 clientMessageId 在同一 thread 仍會串行", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let active = 0;
+  let maxActive = 0;
+  const service = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return chatResult();
+      },
+    },
+  });
+  const thread = await service.createThread("alice", { title: "serial" });
+
+  await Promise.all([
+    service.sendMessage("alice", thread.id, {
+      clientMessageId: "message-serial-001",
+      message: "第一題",
+    }),
+    service.sendMessage("alice", thread.id, {
+      clientMessageId: "message-serial-002",
+      message: "第二題",
+    }),
+  ]);
+
+  assert.equal(maxActive, 1);
+  await repo.close();
+});
+
+test("Dev AI thread service 新 instance 會重放 SQLite 已完成結果", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let askCalls = 0;
+  const firstService = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        askCalls += 1;
+        return chatResult({ answer: "持久結果" });
+      },
+    },
+  });
+  const thread = await firstService.createThread("alice", { title: "replay" });
+  const request = {
+    clientMessageId: "message-replay-001",
+    message: "同一題",
+  };
+  const first = await firstService.sendMessage("alice", thread.id, request);
+
+  const secondService = createDevAiThreadService({
+    enabled: true,
+    repository: repo,
+    chatService: {
+      async ask() {
+        throw new Error("completed request must not call provider again");
+      },
+    },
+  });
+  const replayed = await secondService.sendMessage("alice", thread.id, request);
+
+  assert.equal(askCalls, 1);
+  assert.equal(replayed.assistantMessage.id, first.assistantMessage.id);
   await repo.close();
 });

@@ -5,8 +5,9 @@ import {
   createDevAiChatService,
   type DevAiChatRuntimeConfig,
 } from "../../../src/services/dev/ai/devAiChatService";
-import type { GoogleGeminiClient } from "../../../src/services/dev/ai/googleGeminiClient";
+import type { DevAiJsonProvider } from "../../../src/services/dev/ai/devAiJsonProvider";
 import type { DevAiKnowledgeBaseService } from "../../../src/services/dev/ai/devAiKnowledgeBaseService";
+import type { RagicDefinitionsReadService } from "../../../src/services/dev/ragicDefinitionsReadService";
 import type { RagicDefinitionSearchItem } from "@shared-types/ragicDefinitions";
 
 const enabledConfig: DevAiChatRuntimeConfig = {
@@ -14,7 +15,9 @@ const enabledConfig: DevAiChatRuntimeConfig = {
   provider: "google",
   model: "gemini-balanced",
   fastModel: "gemini-fast",
-  thinkingLevel: "minimal",
+  fastEffort: "minimal",
+  balancedEffort: "minimal",
+  deepEffort: "high",
   maxContextChars: 12_000,
   maxOutputTokens: 1_024,
   maxConcurrentRequests: 2,
@@ -34,8 +37,29 @@ function emptySearchResult() {
       fieldId: "",
       formPath: "",
       type: "all" as const,
+      revision: null,
     },
   };
+}
+
+function createDefinitionsSearchChatService(search: RagicDefinitionsReadService["search"]) {
+  return createDevAiChatService({
+    config: enabledConfig,
+    providerClient: {
+      name: "google",
+      model: "gemini-balanced",
+      async generateJsonText() {
+        return JSON.stringify({
+          answer: "目前沒有找到來源。",
+          assumptions: [],
+          followUps: [],
+          sourceIds: [],
+        });
+      },
+    },
+    knowledgeService: { invalidateCache() {}, async search() { return []; } },
+    definitionsService: { search },
+  });
 }
 
 test("Dev AI chat 會組 RAG context 並用 fast model / minimal thinking", async () => {
@@ -54,11 +78,12 @@ test("Dev AI chat 會組 RAG context 並用 fast model / minimal thinking", asyn
       ];
     },
   };
-  const googleClient: GoogleGeminiClient = {
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
     model: "gemini-balanced",
     async generateJsonText(request) {
       assert.equal(request.model, "gemini-fast");
-      assert.equal(request.thinkingLevel, "minimal");
+      assert.equal(request.effort, "minimal");
       assert.equal(request.maxOutputTokens, 768);
       assert.equal(request.storeInteraction, false);
       assert.match(request.prompt, /curated:funda/);
@@ -73,12 +98,9 @@ test("Dev AI chat 會組 RAG context 並用 fast model / minimal thinking", asyn
   };
   const service = createDevAiChatService({
     config: enabledConfig,
-    googleClient,
+    providerClient: googleClient,
     knowledgeService,
     definitionsService: {
-      async readForm() {
-        throw new Error("should not read form");
-      },
       async search() {
         throw new Error("should not search definitions");
       },
@@ -90,6 +112,7 @@ test("Dev AI chat 會組 RAG context 並用 fast model / minimal thinking", asyn
   const result = await service.ask({ question: "Funda 是什麼？", speedMode: "fast" });
 
   assert.equal(result.chatId, "chat-1");
+  assert.equal(result.provider, "google");
   assert.equal(result.model, "gemini-fast");
   assert.equal(result.speedMode, "fast");
   assert.equal(result.sources.length, 1);
@@ -97,78 +120,268 @@ test("Dev AI chat 會組 RAG context 並用 fast model / minimal thinking", asyn
   assert.equal(result.contextPreview.knowledgeItems, 1);
 });
 
-test("Dev AI chat definitions mode 會帶 definitions source", async () => {
-  const googleClient: GoogleGeminiClient = {
+test("Dev AI chat 可由相同契約切換 MiniMax 並映射 speed effort", async () => {
+  const providerClient: DevAiJsonProvider = {
+    name: "minimax",
+    model: "MiniMax-M3",
+    async generateJsonText(request) {
+      assert.equal(request.model, "MiniMax-M3");
+      assert.equal(request.effort, "low");
+      return JSON.stringify({
+        answer: "MiniMax 已依據相同 Dev AI schema 回答。",
+        assumptions: [],
+        followUps: [],
+        sourceIds: [],
+      });
+    },
+  };
+  const service = createDevAiChatService({
+    config: {
+      ...enabledConfig,
+      provider: "minimax",
+      model: "MiniMax-M3",
+      fastModel: "MiniMax-M3",
+      fastEffort: "low",
+      balancedEffort: "medium",
+      deepEffort: "high",
+    },
+    providerClient,
+    knowledgeService: { invalidateCache() {}, async search() { return []; } },
+    definitionsService: {
+      async search() { return emptySearchResult(); },
+    },
+  });
+
+  const result = await service.ask({ question: "說明這張表", speedMode: "fast" });
+
+  assert.equal(result.provider, "minimax");
+  assert.equal(result.model, "MiniMax-M3");
+  assert.match(result.answer, /MiniMax/);
+});
+
+test("Dev AI chat 對 provider schema 型別錯誤會 fail-closed", async () => {
+  const service = createDevAiChatService({
+    config: enabledConfig,
+    providerClient: {
+      name: "minimax",
+      model: "MiniMax-M3",
+      async generateJsonText() {
+        return JSON.stringify({
+          answer: { text: "不應被轉成字串" },
+          assumptions: [],
+          followUps: [],
+          sourceIds: [],
+        });
+      },
+    },
+    knowledgeService: { invalidateCache() {}, async search() { return []; } },
+    definitionsService: {
+      async search() { return emptySearchResult(); },
+    },
+  });
+
+  await assert.rejects(
+    () => service.ask({ question: "說明這張表" }),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_BAD_JSON"
+  );
+});
+
+test("Dev AI chat 以目前欄位精確檢索並攜帶 revision、欄位設定與 workflow 證據", async () => {
+  const revision = `sha256:${"a".repeat(64)}`;
+  const fieldSourceId = "definitions:default/devtest/51:field:1036641:G6";
+  const workflowSourceId = "definitions:default/devtest/51:workflow:1036641:G6:post.js";
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
     model: "gemini-balanced",
     async generateJsonText(request) {
       assert.equal(request.model, "gemini-balanced");
-      assert.equal(request.thinkingLevel, "high");
-      assert.match(request.prompt, /definitions:default\/devtest\/51/);
+      assert.equal(request.effort, "high");
+      assert.match(request.prompt, new RegExp(fieldSourceId));
+      assert.match(request.prompt, /\\\"l\\\":\\\"1036600\\\"/);
+      assert.match(request.prompt, /post\.js/);
+      assert.match(request.prompt, new RegExp(revision));
       return JSON.stringify({
-        answer: "這張表有 2 個欄位。",
+        answer: "欄位 1036641 由 linked field 1036600 帶入，post workflow 也有引用。",
         assumptions: [],
         followUps: [],
-        sourceIds: ["definitions:default/devtest/51"],
+        sourceIds: [fieldSourceId, workflowSourceId],
       });
     },
   };
   const service = createDevAiChatService({
     config: enabledConfig,
-    googleClient,
+    providerClient: googleClient,
     knowledgeService: { invalidateCache() {}, async search() { return []; } },
     definitionsService: {
-      async readForm() {
+      async search(params) {
+        assert.equal(params.formPath, "default/devtest/51");
+        assert.equal(params.fieldId, "1036641");
         return {
-          form: {
-            schemaVersion: 1,
-            formPath: "default/devtest/51",
-            formName: "luo test",
-            nuiFile: "51.nui",
-            sourceEncoding: "utf-8",
-            sourceRelativePath: "default/devtest/51.nui",
-            counts: { fields: 2, formulas: 1, workflows: 0 },
-          },
-          fields: [
-            { fieldId: "1", fieldName: "規格", kind: "D", position: "A6", sourceLine: 1, attrs: {} },
-            { fieldId: "2", fieldName: "數量", kind: "D", position: "B6", sourceLine: 2, attrs: {} },
-          ],
-          formulas: [
+          data: [
             {
-              fieldId: "2",
-              fieldName: "數量",
-              position: "B6",
-              formulaKind: "formula",
-              nuiFormula: "A6+1",
-              displayFormula: "A6+1",
+              type: "field" as const,
+              formPath: "default/devtest/51",
+              formName: "luo test",
+              sourceRelativePath: "default/devtest/51.nui",
+              fieldId: "1036641",
+              fieldName: "測試",
+              kind: "D",
+              position: "G6",
+              sourceLine: 24,
+              attrs: { l: "1036600", vd: "1016317" },
+              fieldReferences: [
+                {
+                  attribute: "l" as const,
+                  fieldId: "1036600",
+                  formPath: "default/devtest/51",
+                  fieldName: "來源選擇",
+                  kind: "L",
+                  position: "F6",
+                },
+              ],
+              formulaKind: null,
+              nuiFormula: null,
+              displayFormula: null,
+              workflowScope: null,
+              workflowFileName: null,
+              workflowExcerpt: null,
+            },
+            {
+              type: "workflow" as const,
+              formPath: "default/devtest/51",
+              formName: "luo test",
+              sourceRelativePath: "forms/default/devtest/51/workflows/post.js",
+              fieldId: "1036641",
+              fieldName: "測試",
+              kind: null,
+              position: "G6",
               sourceLine: 2,
+              attrs: null,
+              fieldReferences: [],
+              formulaKind: null,
+              nuiFormula: null,
+              displayFormula: null,
+              workflowScope: "post",
+              workflowFileName: "post.js",
+              workflowExcerpt: "entry.setValue(1036641, value);",
             },
           ],
-          workflows: [],
+          meta: {
+            count: 2,
+            limit: 8,
+            truncated: false,
+            q: "",
+            fieldId: "1036641",
+            formPath: "default/devtest/51",
+            type: "all" as const,
+            revision,
+          },
         };
-      },
-      async search() {
-        return emptySearchResult();
       },
     },
   });
 
   const result = await service.ask({
-    question: "這張表有哪些欄位？",
+    question: "這個欄位來源是什麼？",
     mode: "definitions",
     speedMode: "deep",
     formPath: "default/devtest/51",
+    fieldId: "1036641",
   });
 
   assert.equal(result.mode, "definitions");
-  assert.equal(result.sources[0].kind, "definitions");
-  assert.equal(result.contextPreview.definitionItems, 1);
+  assert.equal(result.sources.length, 2);
+  assert.equal(result.sources[0].revision, revision);
+  assert.equal(result.sources[0].fieldId, "1036641");
+  assert.equal(result.contextPreview.definitionItems, 2);
+});
+
+test("Dev AI chat 只在自由提問明確標記 Field ID 時做精確檢索", async () => {
+  const searchCalls: Array<Parameters<RagicDefinitionsReadService["search"]>[0]> = [];
+  const service = createDefinitionsSearchChatService(async (params) => {
+    searchCalls.push(params);
+    return emptySearchResult();
+  });
+
+  await service.ask({
+    question: "請查 Field ID 1040347 這個 Name 欄位的來源",
+    mode: "definitions",
+  });
+
+  assert.equal(searchCalls[0]?.fieldId, "1040347");
+  assert.equal(searchCalls[0]?.q, undefined);
+});
+
+test("Dev AI chat 不會把工單編號誤判為 Ragic Field ID", async () => {
+  const searchCalls: Array<Parameters<RagicDefinitionsReadService["search"]>[0]> = [];
+  const service = createDefinitionsSearchChatService(async (params) => {
+    searchCalls.push(params);
+    return emptySearchResult();
+  });
+  const question = "請查工單 WO-25040537 在這個表單的欄位資料";
+
+  await service.ask({
+    question,
+    mode: "definitions",
+    formPath: "default/devtest/51",
+  });
+
+  assert.equal(searchCalls[0]?.q, question);
+  assert.equal(searchCalls[0]?.fieldId, undefined);
+  assert.equal(searchCalls.every((params) => params.fieldId === undefined), true);
+});
+
+test("Dev AI chat 以前端明確傳入的 fieldId 優先於提問內容", async () => {
+  const searchCalls: Array<Parameters<RagicDefinitionsReadService["search"]>[0]> = [];
+  const service = createDefinitionsSearchChatService(async (params) => {
+    searchCalls.push(params);
+    return emptySearchResult();
+  });
+
+  await service.ask({
+    question: "請查 Field ID 1040347 的來源",
+    mode: "definitions",
+    fieldId: "1036641",
+  });
+
+  assert.equal(searchCalls[0]?.fieldId, "1036641");
+});
+
+test("Dev AI chat 的 Field ID 精確檢索無結果時依序退回全文與表單檢索", async () => {
+  const searchCalls: Array<Parameters<RagicDefinitionsReadService["search"]>[0]> = [];
+  const service = createDefinitionsSearchChatService(async (params) => {
+    searchCalls.push(params);
+    return emptySearchResult();
+  });
+  const question = "請查欄位編號 1040347 的來源";
+  const formPath = "default/devtest/51";
+
+  await service.ask({
+    question,
+    mode: "definitions",
+    formPath,
+  });
+
+  assert.deepEqual(
+    searchCalls.map((params) => ({
+      q: params.q,
+      fieldId: params.fieldId,
+      formPath: params.formPath,
+    })),
+    [
+      { q: undefined, fieldId: "1040347", formPath },
+      { q: question, fieldId: undefined, formPath },
+      { q: undefined, fieldId: undefined, formPath },
+    ]
+  );
 });
 
 test("Dev AI chat disabled 時不呼叫 Google", async () => {
   let googleCalled = false;
   const service = createDevAiChatService({
     config: { ...enabledConfig, enabled: false },
-    googleClient: {
+    providerClient: {
+      name: "google",
       model: "gemini-balanced",
       async generateJsonText() {
         googleCalled = true;
@@ -177,7 +390,6 @@ test("Dev AI chat disabled 時不呼叫 Google", async () => {
     },
     knowledgeService: { invalidateCache() {}, async search() { return []; } },
     definitionsService: {
-      async readForm() { throw new Error("unused"); },
       async search() { return emptySearchResult(); },
     },
   });
@@ -193,7 +405,8 @@ test("Dev AI chat knowledge search 失敗時降級成空 knowledge context", asy
   let googleCalled = false;
   const service = createDevAiChatService({
     config: enabledConfig,
-    googleClient: {
+    providerClient: {
+      name: "google",
       model: "gemini-balanced",
       async generateJsonText(request) {
         googleCalled = true;
@@ -213,7 +426,6 @@ test("Dev AI chat knowledge search 失敗時降級成空 knowledge context", asy
       },
     },
     definitionsService: {
-      async readForm() { throw new Error("unused"); },
       async search() { return emptySearchResult(); },
     },
   });

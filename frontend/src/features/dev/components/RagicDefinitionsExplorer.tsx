@@ -192,6 +192,10 @@ function formatReExportNoticeMessage(
     `${result.summary.forms.toLocaleString()} 表單`,
     `${result.summary.fields.toLocaleString()} 欄`,
     `${result.summary.formulas.toLocaleString()} 公式`,
+    `快照 ${result.summary.revision.slice("sha256:".length, "sha256:".length + 10)}`,
+    ...(result.summary.warnings.length > 0
+      ? [`警告 ${result.summary.warnings.length} 筆`]
+      : []),
     diffText,
   ].join(" · ");
 }
@@ -1463,12 +1467,20 @@ export function RagicDefinitionsExplorer({ token, username, onAuthFailure }: Pro
       setVersionActionResult({ type: "refresh", result });
       showOperationNotice({
         key: "version-refresh",
-        tone: result.versionStatus.definitionsEntries.length > 0 ? "warning" : "success",
+        tone:
+          result.versionStatus.definitionsEntries.length > 0 ||
+          result.summary.warnings.length > 0
+            ? "warning"
+            : "success",
         title:
-          result.versionStatus.definitionsEntries.length > 0
+          result.summary.warnings.length > 0
+            ? "重新匯入完成，但快照有警告"
+            : result.versionStatus.definitionsEntries.length > 0
             ? "重新匯入完成，baseline 有差異"
             : "重新匯入完成",
-        message: formatReExportNoticeMessage(result),
+        message:
+          result.summary.warnings[0] ??
+          formatReExportNoticeMessage(result),
       });
       clearCachedFormulaSiblings();
 

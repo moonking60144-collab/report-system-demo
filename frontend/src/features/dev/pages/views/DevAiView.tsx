@@ -16,10 +16,23 @@ import {
   type DevAiThread,
   type DevAiThreadDetail,
 } from "../../../../api/devRagicDefinitions";
-import type { DevAiSpeedMode, DevAiThreadArtifact } from "@shared-types/ragicDefinitions";
+import { extractErrorMessage, isUnauthorized } from "../../../../api/apiErrors";
+import type {
+  DevAiSendMessageRequest,
+  DevAiSpeedMode,
+  DevAiThreadArtifact,
+} from "@shared-types/ragicDefinitions";
 import { useDevContext } from "../../layout/devContext";
-import { devAiContextStatusLabel } from "../../components/RagicDefinitionsAiAssistantUtils";
+import {
+  devAiContextStatusLabel,
+  devAiKnowledgeSourceLabel,
+  devAiKnowledgeSourcesFromUnknown,
+} from "../../components/RagicDefinitionsAiAssistantUtils";
 import { shouldApplyDevAiThreadDetailSnapshot } from "./devAiViewUtils";
+import {
+  resolveDevAiMessageSubmission,
+  type DevAiMessageSubmission,
+} from "../../utils/devAiClientMessageId";
 
 export function DevAiView() {
   const { token, onAuthFailure } = useDevContext();
@@ -35,6 +48,8 @@ export function DevAiView() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const detailRevisionRef = useRef(0);
+  const sendInFlightRef = useRef(false);
+  const messageSubmissionRef = useRef<DevAiMessageSubmission | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,8 +61,8 @@ export function DevAiView() {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "讀取 Dev AI threads 失敗");
-          if (String(err).includes("401")) onAuthFailure("登入已過期，請重新登入");
+          setError(extractErrorMessage(err, "讀取 Dev AI threads 失敗"));
+          if (isUnauthorized(err)) onAuthFailure("登入已過期，請重新登入");
         }
       })
       .finally(() => {
@@ -78,7 +93,10 @@ export function DevAiView() {
         }
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "讀取對話失敗");
+        if (!cancelled) {
+          setError(extractErrorMessage(err, "讀取對話失敗"));
+          if (isUnauthorized(err)) onAuthFailure("登入已過期，請重新登入");
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -86,7 +104,7 @@ export function DevAiView() {
     return () => {
       cancelled = true;
     };
-  }, [threadId, token]);
+  }, [onAuthFailure, threadId, token]);
 
   const activeThread = useMemo(
     () => detail?.thread ?? threads.find((thread) => thread.id === threadId) ?? null,
@@ -109,7 +127,7 @@ export function DevAiView() {
       setDetail({ thread: created, messages: [], artifacts: [] });
       navigate(`/dev/ai/threads/${created.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "新增對話失敗");
+      setError(extractErrorMessage(err, "新增對話失敗"));
     }
   }
 
@@ -127,19 +145,31 @@ export function DevAiView() {
   }
 
   async function handleSend() {
-    if (!draft.trim() || sending) return;
+    if (!draft.trim() || sending || sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
     const message = draft.trim();
     setSending(true);
     setError(null);
     try {
       const targetThread = await ensureThreadForSend(message);
-      const next = await sendDevAiThreadMessage(token, targetThread.id, {
+      const payload: Omit<DevAiSendMessageRequest, "clientMessageId"> = {
         message,
         mode: "auto",
         speedMode,
         includeKnowledge,
         includeDefinitions,
+      };
+      const submission = resolveDevAiMessageSubmission(
+        messageSubmissionRef.current,
+        targetThread.id,
+        payload
+      );
+      messageSubmissionRef.current = submission;
+      const next = await sendDevAiThreadMessage(token, targetThread.id, {
+        ...payload,
+        clientMessageId: submission.clientMessageId,
       });
+      messageSubmissionRef.current = null;
       detailRevisionRef.current += 1;
       setDetail((current) => ({
         thread: next.thread,
@@ -150,8 +180,9 @@ export function DevAiView() {
       setThreads((current) => [next.thread, ...current.filter((thread) => thread.id !== next.thread.id)]);
       setDraft("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "送出失敗");
+      setError(extractErrorMessage(err, "送出失敗"));
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   }
@@ -166,7 +197,7 @@ export function DevAiView() {
       setDetail(null);
       navigate("/dev/ai");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "封存失敗");
+      setError(extractErrorMessage(err, "封存失敗"));
     }
   }
 
@@ -431,6 +462,7 @@ function ArtifactCard({ artifact }: { artifact: DevAiThreadArtifact }) {
   const dryRun = objectValue(payload.dryRun);
   const allowed = booleanValue(payload.allowed) ?? booleanValue(dryRun.allowed);
   const sources = Array.isArray(payload.sources) ? payload.sources.length : null;
+  const sourceItems = devAiKnowledgeSourcesFromUnknown(payload.sources);
   return (
     <div className="dev-ai-workspace__artifact">
       <div>
@@ -453,6 +485,10 @@ function ArtifactCard({ artifact }: { artifact: DevAiThreadArtifact }) {
         </strong>
       ) : null}
       {sources !== null ? <small>{sources} 個來源</small> : null}
+      {sourceItems.slice(0, 3).map((source) => (
+        <small key={source.sourceId}>{devAiKnowledgeSourceLabel(source)}</small>
+      ))}
+      {sourceItems.length > 3 ? <small>另有 {sourceItems.length - 3} 個來源</small> : null}
     </div>
   );
 }

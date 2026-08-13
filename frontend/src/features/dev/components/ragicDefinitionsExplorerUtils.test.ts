@@ -45,7 +45,7 @@ function status(
 describe("ragicDefinitionsExplorerUtils", () => {
   it("可從 Ragic URL 解析表單路徑", () => {
     expect(
-      extractRagicFormPath("https://fdtw.app/default/forms8/92/1?PAGEID=abc")
+      extractRagicFormPath("https://demo.local/default/forms8/92/1?PAGEID=abc")
     ).toBe("default/forms8/92");
     expect(extractRagicFormPath("/default/devtest/51/1")).toBe(
       "default/devtest/51"

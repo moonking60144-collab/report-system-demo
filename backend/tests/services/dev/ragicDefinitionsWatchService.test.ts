@@ -47,6 +47,11 @@ function buildFixture(options: {
             fields: 2,
             formulas: 3,
             workflows: 4,
+            revision:
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifactCount: 4,
+            compressedBytes: 1024,
+            warnings: [],
             namespaces: "default",
             outDir: "/tmp/ragic-definitions",
           },
@@ -54,6 +59,7 @@ function buildFixture(options: {
             definitionsRoot: "/tmp/ragic-definitions",
             exists: true,
             manifest: null,
+            snapshot: null,
             gitStatus: { available: true, clean: false, entries: [], error: null },
           },
           versionStatus: {

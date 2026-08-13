@@ -8,10 +8,17 @@ import {
   maskSecrets,
 } from "../ragicFormulaPatchDryRunService";
 import { tokenizeFormula } from "../ragicFormulaPositionTranslator";
+import type { DevAiEffort, DevAiJsonProvider } from "./devAiJsonProvider";
 import {
-  createGoogleGeminiClient,
-  type GoogleGeminiClient,
-} from "./googleGeminiClient";
+  createDevAiJsonProvider,
+  getDevAiProviderProfile,
+  normalizeDevAiProviderName,
+} from "./devAiProviderFactory";
+import {
+  parseDevAiJsonObject,
+  requireDevAiString,
+  requireDevAiStringArray,
+} from "./devAiJsonValidation";
 import {
   createRagicFormulaAiContextBuilder,
   type RagicFormulaAiContextBuilder,
@@ -30,7 +37,7 @@ export interface RagicFormulaAiRuntimeConfig {
   enabled: boolean;
   provider: string;
   model: string;
-  thinkingLevel: string;
+  effort: DevAiEffort;
   maxOutputTokens: number;
   maxConcurrentRequests: number;
   suggestRateLimitPerMinute: number;
@@ -40,7 +47,7 @@ export interface RagicFormulaAiRuntimeConfig {
 
 export interface RagicFormulaAiSuggestionServiceDeps {
   config?: Partial<RagicFormulaAiRuntimeConfig>;
-  googleClient?: GoogleGeminiClient;
+  providerClient?: DevAiJsonProvider;
   contextBuilder?: RagicFormulaAiContextBuilder;
   dryRunService?: RagicFormulaPatchDryRunService;
   suggestionIdFactory?: () => string;
@@ -105,76 +112,68 @@ const FORMULA_SUGGESTION_SCHEMA = {
 function runtimeConfig(
   override: Partial<RagicFormulaAiRuntimeConfig> = {}
 ): RagicFormulaAiRuntimeConfig {
+  const provider = override.provider ?? env.DEV_AI_PROVIDER;
+  const profile = getDevAiProviderProfile(provider);
   return {
     enabled: env.DEV_AI_ENABLED,
-    provider: env.DEV_AI_PROVIDER,
-    model: env.GOOGLE_GEMINI_MODEL,
-    thinkingLevel: env.GOOGLE_GEMINI_THINKING_LEVEL,
-    maxOutputTokens: env.DEV_AI_MAX_OUTPUT_TOKENS,
+    provider,
+    model: profile.model,
+    effort: profile.deepEffort,
+    maxOutputTokens: profile.maxOutputTokens,
     maxConcurrentRequests: env.DEV_AI_MAX_CONCURRENT_REQUESTS,
     suggestRateLimitPerMinute: env.DEV_AI_SUGGEST_RATE_LIMIT_PER_MINUTE,
-    storeInteractions: env.GOOGLE_GEMINI_STORE_INTERACTIONS,
+    storeInteractions: profile.storeInteractions,
     storeRawOutput: env.DEV_AI_STORE_RAW_OUTPUT,
     ...override,
   };
 }
 
-function parseModelJson(raw: string): unknown {
-  const trimmed = raw.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return JSON.parse(fenced ? fenced[1] : trimmed);
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
-    : [];
-}
-
 function normalizeModelOutput(raw: string): AiFormulaModelOutput {
-  let parsed: unknown;
-  try {
-    parsed = parseModelJson(raw);
-  } catch {
+  const object = parseDevAiJsonObject(raw);
+  const proposedFormula = requireDevAiString(object, "proposedFormula");
+  if (!proposedFormula) {
+    throw new HttpError(502, "AI provider 沒有回傳 proposedFormula", "DEV_AI_MISSING_FORMULA");
+  }
+  if (
+    object.confidence !== "low" &&
+    object.confidence !== "medium" &&
+    object.confidence !== "high"
+  ) {
+    throw new HttpError(502, "AI provider 回傳欄位 confidence 無效", "DEV_AI_BAD_JSON");
+  }
+  if (!Array.isArray(object.referencedFields)) {
     throw new HttpError(
       502,
-      "Google API 回傳不是可解析的 JSON",
-      "DEV_AI_GOOGLE_MALFORMED_JSON"
+      "AI provider 回傳欄位 referencedFields 不是陣列",
+      "DEV_AI_BAD_JSON"
     );
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new HttpError(502, "Google API 回傳格式不是物件", "DEV_AI_GOOGLE_BAD_JSON");
-  }
-  const object = parsed as Record<string, unknown>;
-  const proposedFormula = String(object.proposedFormula ?? "").trim();
-  if (!proposedFormula) {
-    throw new HttpError(502, "Google API 沒有回傳 proposedFormula", "DEV_AI_MISSING_FORMULA");
-  }
-  const confidence =
-    object.confidence === "low" ||
-    object.confidence === "medium" ||
-    object.confidence === "high"
-      ? object.confidence
-      : "low";
-  const referencedFields = Array.isArray(object.referencedFields)
-    ? object.referencedFields.flatMap((item): RagicFormulaAiReferencedField[] => {
-        if (typeof item !== "object" || item === null) return [];
-        const entry = item as Record<string, unknown>;
-        return [{
-          fieldId: String(entry.fieldId ?? "").trim(),
-          position: String(entry.position ?? "").trim(),
-          name: String(entry.name ?? "").trim(),
-          reason: String(entry.reason ?? "").trim(),
-        }].filter((field) => field.fieldId || field.position || field.name);
-      })
-    : [];
+  const referencedFields = object.referencedFields.flatMap(
+    (item): RagicFormulaAiReferencedField[] => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new HttpError(
+          502,
+          "AI provider 回傳 referencedFields 項目不是物件",
+          "DEV_AI_BAD_JSON"
+        );
+      }
+      const entry = item as Record<string, unknown>;
+      const field = {
+        fieldId: requireDevAiString(entry, "fieldId"),
+        position: requireDevAiString(entry, "position"),
+        name: requireDevAiString(entry, "name"),
+        reason: requireDevAiString(entry, "reason"),
+      };
+      return field.fieldId || field.position || field.name ? [field] : [];
+    }
+  );
   return {
     proposedFormula,
-    explanation: String(object.explanation ?? "").trim(),
-    assumptions: stringArray(object.assumptions),
+    explanation: requireDevAiString(object, "explanation"),
+    assumptions: requireDevAiStringArray(object, "assumptions"),
     referencedFields,
-    risks: stringArray(object.risks),
-    confidence,
+    risks: requireDevAiStringArray(object, "risks"),
+    confidence: object.confidence,
   };
 }
 
@@ -257,7 +256,7 @@ export function createRagicFormulaAiSuggestionService(
   deps: RagicFormulaAiSuggestionServiceDeps = {}
 ): RagicFormulaAiSuggestionService {
   const config = runtimeConfig(deps.config);
-  const googleClient = deps.googleClient ?? createGoogleGeminiClient();
+  let providerClient = deps.providerClient;
   const contextBuilder = deps.contextBuilder ?? createRagicFormulaAiContextBuilder();
   const dryRunService = deps.dryRunService ?? createRagicFormulaPatchDryRunService();
   const suggestionIdFactory = deps.suggestionIdFactory ?? randomUUID;
@@ -269,9 +268,14 @@ export function createRagicFormulaAiSuggestionService(
     if (!config.enabled) {
       throw new HttpError(403, "Dev AI 未啟用", "DEV_AI_DISABLED");
     }
-    if (config.provider !== "google") {
-      throw new HttpError(400, "目前 Dev AI 只支援 google provider", "DEV_AI_BAD_PROVIDER");
+    if (!normalizeDevAiProviderName(config.provider)) {
+      throw new HttpError(400, "不支援的 Dev AI provider", "DEV_AI_BAD_PROVIDER");
     }
+  }
+
+  function getProviderClient(): DevAiJsonProvider {
+    providerClient ??= createDevAiJsonProvider(config.provider);
+    return providerClient;
   }
 
   function claimRequestSlot(): () => void {
@@ -306,11 +310,12 @@ export function createRagicFormulaAiSuggestionService(
           promptContext: context.promptContext,
           maxOutputTokens: config.maxOutputTokens,
         });
-        const raw = await googleClient.generateJsonText({
+        const client = getProviderClient();
+        const raw = await client.generateJsonText({
           prompt,
           schema: FORMULA_SUGGESTION_SCHEMA,
           model: config.model,
-          thinkingLevel: config.thinkingLevel,
+          effort: config.effort,
           maxOutputTokens: config.maxOutputTokens,
           storeInteraction: config.storeInteractions,
           signal: options.signal,
@@ -339,8 +344,8 @@ export function createRagicFormulaAiSuggestionService(
         const finalDryRun = withAiValidationBlockers(dryRun, aiBlockers);
         const result: RagicFormulaAiSuggestResult = {
           suggestionId,
-          provider: "google",
-          model: googleClient.model,
+          provider: client.name,
+          model: config.model,
           formPath: request.formPath,
           fieldId: request.fieldId,
           formulaKind: request.formulaKind,
@@ -368,7 +373,8 @@ export function createRagicFormulaAiSuggestionService(
           formPath: request.formPath,
           fieldId: request.fieldId,
           formulaKind: request.formulaKind,
-          model: googleClient.model,
+          provider: client.name,
+          model: config.model,
           contextPreview: context.preview,
           dryRunAllowed: finalDryRun.allowed,
           blockers: finalDryRun.blockers.length,

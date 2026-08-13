@@ -72,7 +72,7 @@ const PROCESS_TABLE = [
   { code: "SP01", subCode: "SP01-C", name: "內孔磨", category: "磨削" },
 ] as const;
 
-const STATUS_POOL = ["進行中", "待開始", "已結案", "停工"] as const;
+const STATUS_POOL = ["未結案", "未結案", "未結案", "已結案"] as const;
 const URGENT_POOL = ["Y", "", ""] as const;
 // 對齊 payloadValueRules.ts 的 SHIFT_TYPE_ALLOWED_VALUES
 const SHIFT_POOL = ["正常班Reg", "加班OT"] as const;
@@ -85,14 +85,20 @@ function buildMachines(): Record<string, RagicRecord> {
   let idCounter = 51_000;
   for (const group of MACHINE_GROUPS) {
     for (let i = 1; i <= group.count; i++) {
-      const code = `M-${group.prefix}${pad(i)}`;
+      const code = `${group.prefix}${pad(i)}`;
       const id = String(idCounter++);
       records[id] = {
         _ragicId: id,
         機台代碼: code,
         機台簡稱: `${group.processName}機 #${group.prefix}${pad(i)}`,
         製程簡稱: group.processName,
+        製程類別代碼: group.prefix,
+        子製程代碼:
+          group.prefix === "A" ? "TI01-A" : group.prefix === "B" ? "LM01-B" : "CH01-C",
+        主要操作者工號: "E001",
+        主要操作者姓名: OPERATOR_NAMES[0],
         所屬區域: group.prefix === "A" ? "一廠" : group.prefix === "B" ? "二廠" : "三廠",
+        狀態: "使用中",
       };
     }
   }
@@ -110,6 +116,7 @@ function buildOperators(): Record<string, RagicRecord> {
       工號: empNo,
       姓名: OPERATOR_NAMES[i] ?? `員工 ${i + 1}`,
       部門: i % 3 === 0 ? "生產一課" : i % 3 === 1 ? "生產二課" : "技術課",
+      宏得部門: i < 10 ? "C02搓牙組" : i < 20 ? "C01鍛造組" : "A管理課",
     };
   }
   return records;
@@ -151,10 +158,14 @@ function buildWorkOrders(opts: WorkOrderBuildOptions): Record<string, RagicRecor
   for (let i = 0; i < opts.count; i++) {
     const id = String(baseId + i);
     const proc = pick(opts.rng, opts.processes);
-    const machineCode = pick(opts.rng, opts.machineCodes);
+    const machinePrefix = proc.category === "車削" ? "A" : proc.category === "銑削" ? "B" : "C";
+    const compatibleMachineCodes = opts.machineCodes.filter((code) => code.startsWith(machinePrefix));
+    const machineCode = i === 0
+      ? (compatibleMachineCodes[0] ?? pick(opts.rng, opts.machineCodes))
+      : pick(opts.rng, compatibleMachineCodes.length > 0 ? compatibleMachineCodes : opts.machineCodes);
     const workOrderNo = `WO-${opts.formId}-${pad(i + 1, 4)}`;
     const targetQty = 500 + Math.floor(opts.rng() * 9_500);
-    const status = pick(opts.rng, STATUS_POOL);
+    const status = i === 0 ? "未結案" : pick(opts.rng, STATUS_POOL);
     const isFinished = status === "已結案";
 
     const planStart = new Date(today);
@@ -196,15 +207,35 @@ function buildWorkOrders(opts: WorkOrderBuildOptions): Record<string, RagicRecor
         "Remark備註": opts.rng() < 0.2 ? "進度正常" : "",
         "Setup/Adjust架車(BA)or調機(SA)": pick(opts.rng, SETUP_ADJUST_POOL),
         "Setup/Adjust (Min)架.調車/分鐘": "0",
+        "Count Setup Time計算架車時間? (v)": "",
+        "[標準]架車時間 (Hr)": "1",
+        "Setup Loss架車損耗/PCS": "0",
+        "Process Loss製程損耗/PCS": "0",
+        "Total Container Qty結案容器數": "0",
+        "Container Unit結案容器單位": "箱",
+        "(P)Planned Idle計劃停機/分": "0",
         "(S)Unplanned Idle自主停機/分": String(Math.floor(opts.rng() * 30)),
+        "(M)Absent or Training人員請假.上課/分": "0",
+        "(C)待料No Material/分": "0",
+        "(E)Waiting for QC Approval 待判/分": "0",
+        "(Q)Meeting 開會/分": "0",
+        "(N)Cleaning打掃/分": "0",
+        "RD SamplingRD件試樣/分": "0",
+        "(H)Support Other Machines支援其他車台/分": "0",
+        "(D)Machine Breakdown 機台損壞/分": "0",
+        "(K)Machine Adjustment 機台調機/分": "0",
+        "(F)Others 其他/分": "0",
+        "(B)Waiting for Dies 待模/分": "0",
+        "(R)Testing Dies 試模/分": "0",
       };
     }
 
     records[id] = {
       _ragicId: id,
-      "開始排程?": opts.rng() < 0.85 ? "Y" : "",
+      "開始排程?": i === 0 || opts.rng() < 0.85 ? "Yes" : "",
       工令單單號: workOrderNo,
       內製指定機台: machineCode,
+      "[MIS]車": machineCode,
       預設機台: machineCode, // form-105 用這個 key
       修改狀態: "",
       鍛造母件: opts.rng() < 0.3 ? "M-BASE-001" : "",
@@ -242,9 +273,9 @@ function buildWorkOrders(opts: WorkOrderBuildOptions): Record<string, RagicRecor
       最後修改日期: formatDate(new Date()),
       指定主要來料: "鋼線 5mm",
       "[預設]主要製程來料": "鋼線 5mm",
-      上一站執行中: opts.rng() < 0.2 ? "Y" : "",
+      上一站執行中: opts.rng() < 0.2 ? "Yes" : "",
       上一站狀態: "完成",
-      "本站執行中?": isFinished ? "" : opts.rng() < 0.5 ? "Y" : "",
+      "本站執行中?": isFinished ? "" : i < 20 || opts.rng() < 0.5 ? "Yes" : "",
       "[上一站]完工數pc": String(producedTotal),
       "[上一站]完工重kg": String(producedTotal * 0.05),
       "[上一站]完工容器數": String(Math.floor(producedTotal / 100)),
@@ -326,7 +357,7 @@ export function buildDemoFixture(): DemoFixture {
     rng,
     machineCodes,
     operators,
-    processes,
+    processes: processes.filter((process) => /^(TI|BU|WP)/.test(process.subCode)),
   });
 
   const form105 = buildWorkOrders({
@@ -337,7 +368,7 @@ export function buildDemoFixture(): DemoFixture {
     rng,
     machineCodes,
     operators,
-    processes,
+    processes: processes.filter((process) => process.subCode.startsWith("HF")),
   });
 
   const form16 = buildForm16Downtime(rng, machineCodes);

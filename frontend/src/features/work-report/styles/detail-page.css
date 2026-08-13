@@ -483,8 +483,8 @@
 .detail-column-settings-panel {
   position: absolute;
   top: calc(100% + 0.35rem);
-  right: 0;
-  left: auto;
+  right: auto;
+  left: 0;
   min-width: 300px;
   max-width: min(92vw, 360px);
   max-height: 320px;

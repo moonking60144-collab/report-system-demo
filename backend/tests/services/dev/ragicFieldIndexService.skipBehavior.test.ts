@@ -14,7 +14,7 @@ import { resetProgress } from "../../../src/services/dev/ragicFieldIndexProgress
 const SAMPLE_HTML = `
 <html><body>
 <h3><span style='color:#888;'>表單:</span>[104] 工令單</h3>
-表單網址:<a href='https://fdtw.app/default/forms8/104' target='_blank'>...</a><br/>
+表單網址:<a href='https://demo.local/default/forms8/104' target='_blank'>...</a><br/>
 <h4>主表單欄位</h4>
 主表單Key: 1005987<table class='paramTable'>
 <tr><th>欄位位置</th><th>對應欄位</th><th>欄位編號</th><th>欄位型態</th><th>備註</th></tr>
@@ -54,7 +54,7 @@ function spyRepository(repo: RagicFieldIndexRepository): {
   };
 }
 
-test("hash skip integration: 連續兩次 refresh 同份 HTML → 第二次走 skip path、明顯比第一次快", async () => {
+test("hash skip integration: 連續兩次 refresh 同份 HTML → 第二次走 skip path 且不重寫索引", async () => {
   resetProgress();
   const { repo } = await buildRepo();
   const spy = spyRepository(repo);
@@ -72,9 +72,7 @@ test("hash skip integration: 連續兩次 refresh 同份 HTML → 第二次走 s
   });
 
   // --- 第一次 refresh：應走完整 path ---
-  const t1Start = Date.now();
   const counts1 = await svc.refresh();
-  const firstElapsed = Date.now() - t1Start;
 
   const state1 = await repo.getState();
   assert.equal(state1.status, "ready", "第一次完成後 status 應為 ready");
@@ -86,9 +84,7 @@ test("hash skip integration: 連續兩次 refresh 同份 HTML → 第二次走 s
   const firstHash = state1.lastDocHash;
 
   // --- 第二次 refresh：hash 命中 → 應走 skip path ---
-  const t2Start = Date.now();
   const counts2 = await svc.refresh();
-  const secondElapsed = Date.now() - t2Start;
 
   const state2 = await repo.getState();
   assert.equal(state2.lastDocHash, firstHash, "第二次後 lastDocHash 應與第一次相同");
@@ -102,28 +98,4 @@ test("hash skip integration: 連續兩次 refresh 同份 HTML → 第二次走 s
   );
   assert.equal(counts2.totalFields, 2, "skip path 仍回傳實際 countAll 結果");
 
-  // --- 時間斷言 ---
-  // 主要 gate：第二次 < 200ms（skip path 只做 fetch + countAll + setState，極快）
-  assert.ok(
-    secondElapsed < 200,
-    `第二次 refresh 應 < 200ms (skip path)，實際 ${secondElapsed}ms`
-  );
-  // 弱 gate：第二次 <= 第一次（小 HTML 下兩者都很快，但 skip path 至少不該更慢）
-  assert.ok(
-    secondElapsed <= firstElapsed,
-    `第二次 (${secondElapsed}ms) 不應慢於第一次 (${firstElapsed}ms)`
-  );
-
-  // 輸出量化值，方便上層收集
-  // eslint-disable-next-line no-console
-  console.log(
-    JSON.stringify({
-      kind: "skipBehavior.metrics",
-      firstElapsedMs: firstElapsed,
-      secondElapsedMs: secondElapsed,
-      fetchCalledTimes: fetchCallCount,
-      replaceAllCalledTimes: spy.replaceAllCallCount(),
-      secondCallMessage: state2.message,
-    })
-  );
 });

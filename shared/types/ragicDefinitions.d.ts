@@ -62,6 +62,9 @@ export interface RagicFormulaSiblingsResult {
 
 export interface RagicDefinitionManifest {
   schemaVersion: number;
+  revision?: string;
+  revisionAlgorithm?: "sha256-path-content-v1";
+  artifactCount?: number;
   namespaceFilter?: {
     mode: "all" | "include";
     namespaces?: string[];
@@ -72,6 +75,33 @@ export interface RagicDefinitionManifest {
     formulas: number;
     workflows: number;
   };
+}
+
+export interface RagicDefinitionsSnapshotDescriptor {
+  schemaVersion: 1;
+  revision: string;
+  revisionAlgorithm: "sha256-path-content-v1";
+  artifactCount: number;
+  counts: RagicDefinitionManifest["counts"];
+  namespaceFilter: RagicDefinitionManifest["namespaceFilter"] | null;
+  publishedAt: string | null;
+}
+
+export interface RagicDefinitionsSnapshotPayload {
+  schemaVersion: 1;
+  revision: string;
+  revisionAlgorithm: "sha256-path-content-v1";
+  artifactCount: number;
+  manifest: RagicDefinitionManifest;
+  forms: RagicDefinitionFormDetail[];
+}
+
+export interface RagicDefinitionsSnapshotHistoryItem
+  extends RagicDefinitionsSnapshotDescriptor {
+  materializedAt: string;
+  compressedBytes: number;
+  artifactSha256: string;
+  payloadSha256: string;
 }
 
 export interface RagicDefinitionGitStatus {
@@ -85,6 +115,7 @@ export interface RagicDefinitionsState {
   definitionsRoot: string;
   exists: boolean;
   manifest: RagicDefinitionManifest | null;
+  snapshot: RagicDefinitionsSnapshotDescriptor | null;
   gitStatus: RagicDefinitionGitStatus;
 }
 
@@ -135,19 +166,35 @@ export interface RagicDefinitionFormDetail {
   workflows: RagicDefinitionWorkflow[];
 }
 
+export type RagicDefinitionSearchType = "all" | "field" | "formula" | "workflow";
+
+export interface RagicDefinitionFieldReference {
+  attribute: "l" | "vd" | "stf";
+  fieldId: string;
+  formPath: string | null;
+  fieldName: string | null;
+  kind: string | null;
+  position: string | null;
+}
+
 export interface RagicDefinitionSearchItem {
-  type: "field" | "formula";
+  type: "field" | "formula" | "workflow";
   formPath: string;
   formName: string;
   sourceRelativePath: string;
-  fieldId: string;
-  fieldName: string;
+  fieldId: string | null;
+  fieldName: string | null;
   kind: string | null;
   position: string | null;
-  sourceLine: number;
+  sourceLine: number | null;
+  attrs: Record<string, string> | null;
+  fieldReferences: RagicDefinitionFieldReference[];
   formulaKind: RagicDefinitionFormula["formulaKind"] | null;
   nuiFormula: string | null;
   displayFormula: string | null;
+  workflowScope: string | null;
+  workflowFileName: string | null;
+  workflowExcerpt: string | null;
 }
 
 /**
@@ -183,6 +230,7 @@ export interface RagicFormulaPatchDryRunResult {
  */
 
 export type RagicFormulaAiConfidence = "low" | "medium" | "high";
+export type DevAiProviderName = "google" | "minimax";
 
 export interface RagicFormulaAiSuggestRequest {
   formPath: string;
@@ -211,7 +259,7 @@ export interface RagicFormulaAiContextPreview {
 
 export interface RagicFormulaAiSuggestResult {
   suggestionId: string;
-  provider: "google";
+  provider: DevAiProviderName;
   model: string;
   formPath: string;
   fieldId: string;
@@ -234,6 +282,7 @@ export interface DevAiChatRequest {
   mode?: DevAiChatMode;
   speedMode?: DevAiSpeedMode;
   formPath?: string;
+  fieldId?: string;
   includeDefinitions?: boolean;
   includeKnowledge?: boolean;
   maxSources?: number;
@@ -246,6 +295,10 @@ export interface DevAiKnowledgeSource {
   excerpt: string;
   score: number;
   path?: string;
+  revision?: string;
+  sourceType?: "field" | "formula" | "workflow";
+  formPath?: string;
+  fieldId?: string;
 }
 
 export interface DevAiChatContextPreview {
@@ -256,7 +309,7 @@ export interface DevAiChatContextPreview {
 
 export interface DevAiChatResult {
   chatId: string;
-  provider: "google";
+  provider: DevAiProviderName;
   model: string;
   mode: DevAiChatMode;
   speedMode: DevAiSpeedMode;
@@ -396,6 +449,7 @@ export interface DevAiCreateThreadRequest {
 }
 
 export interface DevAiSendMessageRequest {
+  clientMessageId: string;
   message: string;
   mode?: DevAiThreadMode;
   speedMode?: DevAiSpeedMode;

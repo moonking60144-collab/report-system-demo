@@ -198,7 +198,7 @@ test("createRow 拋錯 → 不寫入映射，重試時可重新嘗試", async ()
   const createRow = async () => {
     callCount += 1;
     if (callCount === 1) {
-      throw new Error("ENOTFOUND fdtw.app");
+      throw new Error("ENOTFOUND demo.local");
     }
     return { rowId: "R-2" };
   };

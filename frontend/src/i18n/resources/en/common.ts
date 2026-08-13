@@ -5,6 +5,12 @@ const commonEn = {
     zh: "Chinese",
     en: "English",
   },
+  subsystems: {
+    label: "Subsystems",
+    openMenu: "Open subsystem menu",
+    developerMode: "Developer Mode",
+    meetingMinutes: "Meeting Recording System",
+  },
   actions: {
     applyFilters: "Apply Filters",
     clearFilters: "Clear Filters",

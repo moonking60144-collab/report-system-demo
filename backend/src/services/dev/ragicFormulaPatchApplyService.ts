@@ -30,9 +30,9 @@ import {
   type RagicDefinitionsReadService,
 } from "./ragicDefinitionsReadService";
 import {
-  exportRagicDefinitions,
   formatRagicDefinitionsExportMessage,
 } from "./ragicDefinitionsExportService";
+import { exportRagicDefinitionsInChildProcess } from "./ragicDefinitionsExportProcess";
 import { withDefinitionsWriteLock } from "./ragicDefinitionsIoLock";
 import { suppressRagicDefinitionsWatchPaths } from "./ragicDefinitionsWatchService";
 import { invalidateRagicFormulaSiblingsLiveNuiCache } from "./ragicFormulaSiblingsService";
@@ -78,7 +78,7 @@ async function defaultExportDefinitions({
   definitionsRoot: string;
   namespaces: string;
 }): Promise<{ stdout: string; stderr: string }> {
-  const result = exportRagicDefinitions({
+  const result = await exportRagicDefinitionsInChildProcess({
     builderRoot,
     outDir: definitionsRoot,
     namespaces,

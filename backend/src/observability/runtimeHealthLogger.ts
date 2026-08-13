@@ -4,6 +4,10 @@ import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
 import { createReportTaskService } from "../services/createReportTaskService";
 import { form16WriteReverifyService } from "../services/form16/form16WriteReverifyService";
 import { getWorkReportEntryMutationQueueHealthStats } from "../services/work-report/workReportEntryMutationQueue";
+import { meetingMinutesJobRepository } from "../storage/meeting-minutes/meetingMinutesJobRepository";
+import type { MeetingJobQueueHealthStats } from "../storage/meeting-minutes/meetingJobQueueHealth";
+import { meetingProcessingJobRepository } from "../storage/meeting-minutes/meetingProcessingJobRepository";
+import { meetingTranscriptionJobRepository } from "../storage/meeting-minutes/meetingTranscriptionJobRepository";
 import { createLogger } from "./logger";
 
 const log = createLogger("runtime-health");
@@ -23,12 +27,19 @@ interface RuntimeMemoryStats {
   arrayBuffersBytes: number;
 }
 
+interface MeetingJobHealthStats {
+  processing: MeetingJobQueueHealthStats;
+  transcription: MeetingJobQueueHealthStats;
+  minutes: MeetingJobQueueHealthStats;
+}
+
 export interface RuntimeHealthSnapshot {
   at: string;
   ragic: ReturnType<typeof ragicRequestScheduler.getStats>;
   createTasks: ReturnType<typeof createReportTaskService.getStats>;
   form16WriteReverify: ReturnType<typeof form16WriteReverifyService.getStats>;
   workReportMutationQueue: ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+  meetingJobs: MeetingJobHealthStats | null;
   memory: RuntimeMemoryStats;
   eventLoopLagMs: EventLoopLagStats;
   warnings: string[];
@@ -40,6 +51,7 @@ interface RuntimeHealthCollectorDeps {
   getCreateTaskStats?: () => ReturnType<typeof createReportTaskService.getStats>;
   getForm16WriteReverifyStats?: () => ReturnType<typeof form16WriteReverifyService.getStats>;
   getMutationQueueStats?: () => ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+  getMeetingJobStats?: () => Promise<MeetingJobHealthStats>;
   getMemoryUsage?: () => NodeJS.MemoryUsage;
   getEventLoopLagStats?: () => EventLoopLagStats;
 }
@@ -65,10 +77,20 @@ function readEventLoopLagStats(): EventLoopLagStats {
   };
 }
 
+async function readMeetingJobStats(): Promise<MeetingJobHealthStats> {
+  const [processing, transcription, minutes] = await Promise.all([
+    meetingProcessingJobRepository.getQueueHealthStats(),
+    meetingTranscriptionJobRepository.getQueueHealthStats(),
+    meetingMinutesJobRepository.getQueueHealthStats(),
+  ]);
+  return { processing, transcription, minutes };
+}
+
 function resolveWarnings(input: {
   eventLoopLagMs: EventLoopLagStats;
   memory: RuntimeMemoryStats;
   mutationQueue: ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+  meetingJobs: MeetingJobHealthStats | null;
 }): string[] {
   const warnings: string[] = [];
   if (input.eventLoopLagMs.p95 >= env.RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS) {
@@ -86,6 +108,17 @@ function resolveWarnings(input: {
       input.mutationQueue.maxOldestPendingTaskAgeMs
   ) {
     warnings.push("WORK_REPORT_MUTATION_QUEUE_PRESSURE");
+  }
+  if (!input.meetingJobs) {
+    warnings.push("MEETING_JOB_HEALTH_UNAVAILABLE");
+  } else if (
+    Object.values(input.meetingJobs).some(
+      (stats) =>
+        stats.pending > 0 &&
+        stats.oldestPendingAgeMs >= env.RUNTIME_HEALTH_MEETING_PENDING_WARN_MS
+    )
+  ) {
+    warnings.push("MEETING_JOB_BACKLOG_OLD");
   }
   return warnings;
 }
@@ -109,6 +142,13 @@ export async function collectRuntimeHealthSnapshot(
   const workReportMutationQueue = (
     deps.getMutationQueueStats ?? getWorkReportEntryMutationQueueHealthStats
   )();
+  let meetingJobs: MeetingJobHealthStats | null = null;
+  try {
+    meetingJobs = await (deps.getMeetingJobStats ?? readMeetingJobStats)();
+  } catch {
+    meetingJobs = null;
+  }
+
   return {
     at: (deps.now?.() ?? new Date()).toISOString(),
     ragic: (deps.getRagicStats ?? (() => ragicRequestScheduler.getStats()))(),
@@ -120,12 +160,14 @@ export async function collectRuntimeHealthSnapshot(
       (() => form16WriteReverifyService.getStats())
     )(),
     workReportMutationQueue,
+    meetingJobs,
     memory,
     eventLoopLagMs,
     warnings: resolveWarnings({
       eventLoopLagMs,
       memory,
       mutationQueue: workReportMutationQueue,
+      meetingJobs,
     }),
   };
 }

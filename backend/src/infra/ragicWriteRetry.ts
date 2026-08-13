@@ -4,13 +4,11 @@ import { createLogger } from "../observability/logger";
 
 const log = createLogger("ragic-write-retry");
 
-const RETRYABLE_NETWORK_ERROR_CODES = new Set([
-  "ECONNRESET",
-  "ETIMEDOUT",
+// timeout/reset/5xx 可能發生在 Ragic 已完成寫入後，generic retry 會重跑 workflow。
+const RETRYABLE_PRECONNECT_ERROR_CODES = new Set([
   "EAI_AGAIN",
-  "ECONNABORTED",
   "ENOTFOUND",
-  "EPIPE",
+  "ECONNREFUSED",
 ]);
 
 interface WriteRetryOptions {
@@ -28,10 +26,10 @@ function isRetryableWriteError(error: unknown): boolean {
   if (status === 429) {
     return true;
   }
-  if (typeof status === "number" && status >= 500) {
-    return true;
-  }
-  if (typeof error.code === "string" && RETRYABLE_NETWORK_ERROR_CODES.has(error.code)) {
+  if (
+    typeof error.code === "string" &&
+    RETRYABLE_PRECONNECT_ERROR_CODES.has(error.code)
+  ) {
     return true;
   }
 

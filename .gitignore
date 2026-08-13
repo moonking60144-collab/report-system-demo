@@ -38,6 +38,7 @@ docs/handoff-current-state.md
 .claude/
 .serena/
 .data/
+ragic-definitions/.snapshots/
 frontend/test-results/
 frontend/playwright-report/
 .playwright-mcp/

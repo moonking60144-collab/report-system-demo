@@ -5,8 +5,7 @@ REM ============================================================================
 REM Ragic Report Frontend Local Test Launcher (Windows)
 REM - Uses local Node.js (Node 20+ recommended)
 REM - Overrides VITE_API_BASE_URL only for this process
-REM - Default: http://0.0.0.0:5174 -> http://192.168.1.98:3300/api
-REM - NOTE: 會對整個內網開放，僅限測試時使用，測完請關閉
+REM - Default: http://127.0.0.1:5174 -> http://127.0.0.1:3300/api
 REM =============================================================================
 
 set "NODE20_HOME=C:\Program Files\nodejs"
@@ -36,7 +35,7 @@ if not exist "node_modules" (
   )
 )
 
-set "VITE_API_BASE_URL=http://192.168.1.98:3300/api"
+set "VITE_API_BASE_URL=http://127.0.0.1:3300/api"
 set "FRONTEND_PORT=5174"
 
 echo [INFO] Frontend dir: %FRONTEND_DIR%
@@ -44,5 +43,5 @@ echo [INFO] Local test VITE_API_BASE_URL=%VITE_API_BASE_URL%
 echo [INFO] Local test frontend port=%FRONTEND_PORT%
 echo [INFO] Starting frontend in DEV mode...
 
-call npm run dev -- --host 0.0.0.0 --port %FRONTEND_PORT%
+call npm run dev -- --host 127.0.0.1 --port %FRONTEND_PORT%
 exit /b %errorlevel%

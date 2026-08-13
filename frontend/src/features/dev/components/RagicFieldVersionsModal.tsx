@@ -26,7 +26,7 @@ interface VersionRow {
   freshness: RagicFormulaSiblingInfo["freshness"] | null;
 }
 
-const RAGIC_BASE_URL = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://fdtw.app")
+const RAGIC_BASE_URL = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://demo.local")
   .trim()
   .replace(/\/+$/, "");
 

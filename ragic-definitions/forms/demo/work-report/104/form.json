@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "formPath": "demo/work-report/104",
+  "formName": "Demo Work Report",
+  "nuiFile": "104_Demo_Work_Report.nui",
+  "sourceEncoding": "utf-8",
+  "sourceRelativePath": "demo/work-report/104_Demo_Work_Report.nui",
+  "counts": {
+    "fields": 5,
+    "formulas": 1,
+    "workflows": 1
+  }
+}

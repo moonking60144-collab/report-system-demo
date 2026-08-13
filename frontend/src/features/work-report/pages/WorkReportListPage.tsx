@@ -1411,7 +1411,6 @@ export function WorkReportListPage() {
             currentPageContextLabel={`${currentFormId} / ${currentPageProdTypeCode}`}
             onOpenLandingPage={handleOpenLandingPage}
             onOpenDowntimePage={handleOpenDowntimePage}
-            onOpenTechnicalInfoView={() => navigate("/dev")}
             onOpenLocalSettingsView={openLocalSettingsView}
             showMobileFilterButton={activeTopView === "report" && isMobileViewport}
             onOpenMobileFilters={openMobileFilters}

@@ -53,7 +53,7 @@ const MAX_TABLE_CELL_LENGTH = 2000;
 const MAX_CHECKLIST_ITEMS = 200;
 const MAX_CHECKLIST_TEXT_LENGTH = 1000;
 const MAX_DOCUMENT_JSON_BYTES = 512 * 1024;
-const GOSHEN_REMOVAL_TEMPLATE_VERSION = 3;
+const LEGACY_APP_REMOVAL_TEMPLATE_VERSION = 3;
 const GENERIC_NEW_PC_TEMPLATE_VERSION = 4;
 
 function defaultSopRoot(): string {
@@ -209,13 +209,13 @@ function resolveExpectedUpdatedAt(input: unknown): string {
   return value;
 }
 
-function includesRemovedGoshenContent(value: string): boolean {
-  return value.includes("GOSHEN");
+function includesRemovedLegacyAppContent(value: string): boolean {
+  return value.includes("LEGACY_APP");
 }
 
-function removeRemovedGoshenSentences(value: string): string {
+function removeRemovedLegacyAppSentences(value: string): string {
   return value
-    .replace(/[^。]*GOSHEN[^。]*(?:。|$)/g, "")
+    .replace(/[^。]*LEGACY_APP[^。]*(?:。|$)/g, "")
     .replace(/LINE、MIS、/g, "LINE、MIS")
     .trim();
 }
@@ -228,11 +228,11 @@ function isLegacySingleMachineNewPcDocument(
   const sectionIds = new Set(document.sections.map((section) => section.id));
   return (
     hadLegacyRecordTitle ||
-    serialized.includes("WK-E-PC-001") ||
-    serialized.includes("WK-E-PC-002") ||
-    serialized.includes("192.168.1.181") ||
-    serialized.includes("34-5A-60-E1-25-C5") ||
-    serialized.includes("FDS\\FD0287") ||
+    serialized.includes("WK-DEMO-PC-001") ||
+    serialized.includes("WK-DEMO-PC-002") ||
+    serialized.includes("192.0.2.181") ||
+    serialized.includes("02-00-5E-10-00-00") ||
+    serialized.includes("DEMO\\IT-USER") ||
     sectionIds.has("key-findings") ||
     sectionIds.has("asset-profile") ||
     sectionIds.has("profile-follow-up")
@@ -247,28 +247,28 @@ function replaceWithGenericNewPcTemplate(document: ItSopDocument): void {
 }
 
 function migrateDocumentTemplate(document: ItSopDocument, fromTemplateVersion: number): void {
-  const hadLegacyRecordTitle = document.title === "WK-E-PC-001 新電腦建置紀錄 / index";
+  const hadLegacyRecordTitle = document.title === "WK-DEMO-PC-001 新電腦建置紀錄 / index";
   if (
-    fromTemplateVersion < GOSHEN_REMOVAL_TEMPLATE_VERSION &&
+    fromTemplateVersion < LEGACY_APP_REMOVAL_TEMPLATE_VERSION &&
     hadLegacyRecordTitle
   ) {
     document.title = "新電腦配置";
   }
-  if (fromTemplateVersion < GOSHEN_REMOVAL_TEMPLATE_VERSION) {
-    document.summary = removeRemovedGoshenSentences(document.summary);
+  if (fromTemplateVersion < LEGACY_APP_REMOVAL_TEMPLATE_VERSION) {
+    document.summary = removeRemovedLegacyAppSentences(document.summary);
     document.sections = document.sections
       .filter(
         (section) =>
-          section.id !== "goshen-status" &&
-          section.id !== "goshen-command" &&
-          !includesRemovedGoshenContent(section.title)
+          section.id !== "legacy-app-status" &&
+          section.id !== "legacy-app-command" &&
+          !includesRemovedLegacyAppContent(section.title)
       )
       .map((section) => ({
         ...section,
         rows: section.rows.filter((row) =>
-          row.cells.every((cell) => !includesRemovedGoshenContent(cell))
+          row.cells.every((cell) => !includesRemovedLegacyAppContent(cell))
         ),
-        items: section.items.filter((item) => !includesRemovedGoshenContent(item.text)),
+        items: section.items.filter((item) => !includesRemovedLegacyAppContent(item.text)),
       }));
   }
   if (

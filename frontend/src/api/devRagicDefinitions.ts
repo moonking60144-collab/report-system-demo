@@ -1,7 +1,9 @@
 import { createApiClient } from "./apiClient";
 import {
+  encodeTaskActorLabelHeader,
   getOrCreateClientId,
   getOrCreateTabId,
+  readWorkReportDeviceLabel,
 } from "../utils/clientIdentity";
 import type {
   RagicDefinitionsState,
@@ -9,6 +11,7 @@ import type {
   RagicDefinitionFormula,
   RagicDefinitionFormDetail,
   RagicDefinitionSearchItem,
+  RagicDefinitionSearchType,
   RagicFormulaPatchDryRunResult,
   RagicFormulaPatchApplyResult,
   RagicFormulaPatchBatchApplyResult,
@@ -40,11 +43,9 @@ function authHeaders(token: string): Record<string, string> {
     "x-debug-client-id": getOrCreateClientId(),
     "x-debug-tab-id": getOrCreateTabId(),
   };
-  if (typeof window !== "undefined") {
-    const label = window.localStorage.getItem("debug.deviceLabel");
-    if (label && label.trim()) {
-      headers["x-debug-device-label"] = label.trim();
-    }
+  const label = readWorkReportDeviceLabel();
+  if (label) {
+    headers["x-debug-device-label"] = encodeTaskActorLabelHeader(label);
   }
   return headers;
 }
@@ -55,10 +56,12 @@ export type {
   RagicDefinitionsState,
   RagicDefinitionForm,
   RagicDefinitionField,
+  RagicDefinitionFieldReference,
   RagicDefinitionFormula,
   RagicDefinitionWorkflow,
   RagicDefinitionFormDetail,
   RagicDefinitionSearchItem,
+  RagicDefinitionSearchType,
   RagicFormulaPatchDryRunResult,
   RagicFormulaPatchApplyResult,
   RagicFormulaPatchBatchTargetResult,
@@ -110,14 +113,16 @@ export interface RagicDefinitionsReExportResult {
     fields: number;
     formulas: number;
     workflows: number;
+    revision: string;
+    artifactCount: number;
+    compressedBytes: number;
+    warnings: string[];
     namespaces: string;
     outDir: string;
   };
   state: RagicDefinitionsState;
   versionStatus: RagicDefinitionsVersionControlStatus;
 }
-
-export type RagicDefinitionSearchType = "all" | "field" | "formula";
 
 export interface RagicDefinitionListResult<T> {
   data: T[];
@@ -129,6 +134,7 @@ export interface RagicDefinitionListResult<T> {
     fieldId?: string;
     formPath?: string;
     type?: RagicDefinitionSearchType;
+    revision?: string | null;
   };
 }
 

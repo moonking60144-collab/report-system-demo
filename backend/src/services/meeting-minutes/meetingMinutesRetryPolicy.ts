@@ -1,0 +1,14 @@
+export const MEETING_MINUTES_AUTO_RETRY_ERROR_CODES = [
+  "MEETING_MINUTES_MINIMAX_QUEUE_TIMEOUT",
+  "MEETING_MINUTES_MINIMAX_TIMEOUT",
+  "MEETING_MINUTES_MINIMAX_RATE_LIMITED",
+  "MEETING_MINUTES_MINIMAX_UNAVAILABLE",
+  "MEETING_MINUTES_GOOGLE_TIMEOUT",
+  "MEETING_MINUTES_GOOGLE_RATE_LIMITED",
+] as const;
+
+const autoRetryErrorCodes = new Set<string>(MEETING_MINUTES_AUTO_RETRY_ERROR_CODES);
+
+export function isMeetingMinutesFailureRetryable(errorCode: string): boolean {
+  return autoRetryErrorCodes.has(errorCode);
+}

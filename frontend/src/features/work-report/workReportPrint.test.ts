@@ -132,7 +132,7 @@ describe("workReportPrint", () => {
     expect(html).toContain("<strong>P10</strong>");
     expect(html).toContain("<strong>P11</strong>");
     expect(html).toContain("上一站完工容器");
-    expect(html).not.toContain("fdtw.app/default");
+    expect(html).not.toContain("demo.local/default");
     expect(html).not.toContain("onclick=");
   });
 

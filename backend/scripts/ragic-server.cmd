@@ -17,7 +17,7 @@ set "NODE_ENV=production"
 set "RAGIC_WRITE_TARGET=prod"
 set "SERVE_FRONTEND_FROM_BACKEND=true"
 set "FRONTEND_STATIC_DIR=%FRONTEND_DEPLOY%"
-if not defined TRUST_PROXY set "TRUST_PROXY=false"
+REM TRUST_PROXY is loaded from backend\.env; do not shadow dotenv here.
 set "REPO_DIR=%BACKEND_DIR%\.."
 set "BUILD_SCOPE_CMD=%TEMP%\ragic-report-build-scope.cmd"
 set "RUN_BACKEND_INSTALL=1"
@@ -109,6 +109,15 @@ echo.
 echo [2/6] backend: kill stale node + smart install/build
 cd /d "%BACKEND_DIR%"
 
+echo [preflight] validate Meeting and Dev AI provider env before stopping backend
+call node scripts\validate-provider-env.js "%BACKEND_DIR%\.env"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] provider env preflight failed ^(exit %RC%^). Existing backend was not stopped.
+  goto end
+)
+set "PROVIDER_PREFLIGHT_OK=1"
+
 REM Kill port 3000 listener (= old backend) to release sqlite3 native binding
 REM lock. Use Get-NetTCPConnection to target the listener PIDs, so we
 REM do not nuke other node services running on this box (e.g. Ragic platform).
@@ -196,6 +205,16 @@ cd /d "%BACKEND_DIR%"
 :start
 title Report
 echo.
+if "%PROVIDER_PREFLIGHT_OK%"=="1" goto provider_preflight_ready
+echo [preflight] validate Meeting and Dev AI provider env
+call node scripts\validate-provider-env.js "%BACKEND_DIR%\.env"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo [ERROR] provider env preflight failed ^(exit %RC%^).
+  goto end
+)
+
+:provider_preflight_ready
 echo [6/6] npm start
 echo [INFO] UV_THREADPOOL_SIZE=%UV_THREADPOOL_SIZE%
 echo [INFO] NODE_ENV=%NODE_ENV% RAGIC_WRITE_TARGET=%RAGIC_WRITE_TARGET%

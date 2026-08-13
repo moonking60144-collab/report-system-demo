@@ -6,8 +6,6 @@ if (process.env.NODE_ENV !== "test") {
   dotenv.config();
 }
 
-// Brand-neutral env names (UPSTREAM_*)：demo repo 對外文件避免綁死特定 SaaS 名稱；
-// runtime 仍沿用主系統的 RAGIC_* key，兩者自動互補。
 const ENV_ALIASES: Array<[string, string]> = [
   ["UPSTREAM_PROTOCOL", "RAGIC_PROTOCOL"],
   ["UPSTREAM_DOMAIN", "RAGIC_DOMAIN"],
@@ -67,10 +65,9 @@ for (const [neutral, legacy] of ENV_ALIASES) {
   }
 }
 
-const isDemoMode =
-  process.env.DEMO_MODE === "true" ||
-  process.env.DEMO_MODE === "1" ||
-  process.env.DEMO_MODE === "yes";
+const isDemoMode = ["1", "true", "yes"].includes(
+  String(process.env.DEMO_MODE ?? "").trim().toLowerCase()
+);
 
 if (isDemoMode) {
   process.env.RAGIC_PROTOCOL ??= "https";
@@ -110,23 +107,20 @@ if (isDemoMode) {
   process.env.FORM16_ORPHAN_CLEANUP_ENABLED ??= "false";
   process.env.DEV_AI_ENABLED ??= "false";
   process.env.DEV_AI_CONVERSATION_HISTORY_ENABLED ??= "false";
+  process.env.MEETING_WORKER_ENABLED ??= "false";
+  process.env.MEETING_TRANSCRIPTION_PROVIDER ??= "disabled";
+  process.env.MEETING_MINUTES_PROVIDER ??= "disabled";
+  process.env.MEETING_RECORDING_OWNER_COOKIE_SECRET ??= randomBytes(32).toString("base64url");
+  process.env.MEETING_LIBRARY_CODE_PEPPER ??= randomBytes(32).toString("base64url");
   process.env.TRUST_PROXY ??= "1";
   process.env.CORS_ORIGIN ??=
     "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174";
 
-  if (!process.env.DEMO_RESET_KEY) {
-    const generated = randomBytes(16).toString("hex");
-    process.env.DEMO_RESET_KEY = generated;
-    console.info(
-      `[demo] DEMO_RESET_KEY 未設定，已自動產生：${generated}\n` +
-        `       呼叫範例：curl -X POST http://localhost:${process.env.PORT ?? "3000"}/api/__demo/reset \\\n` +
-        `         -H "X-Demo-Key: ${generated}"`
-    );
-  }
-
+  process.env.DEMO_RESET_KEY ??= randomBytes(16).toString("hex");
   process.env.NOTICE_ADMIN_USERNAME ??= "demo";
   process.env.NOTICE_ADMIN_PASSWORD_HASH ??=
     "2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
+  process.env.RAGIC_DEFINITIONS_SOURCE_API_TOKEN ??= "demo-definitions-source-token-0001";
 
   if (process.env.FLY_APP_NAME) {
     process.env.SQLITE_DB_FILE ??= "/data/work-report-read-model.v1.sqlite3";
@@ -137,10 +131,17 @@ if (isDemoMode) {
     process.env.SYSTEM_NOTICE_FILE ??= "/data/system-notice.v1.json";
     process.env.FORM16_WRITE_REVERIFY_STORE_FILE ??= "/data/form16-write-reverify.v1.json";
     process.env.DEV_AI_CONVERSATION_DB_FILE ??= "/data/dev-ai-conversations.v1.sqlite3";
+    process.env.EFFICIENCY_REPORT_DB_FILE ??= "/data/efficiency-reports/metadata.v1.sqlite3";
+    process.env.EFFICIENCY_REPORT_ARCHIVE_DIR ??= "/data/efficiency-reports/files";
+    process.env.MEETING_RECORDING_STORAGE_DIR ??= "/data/meeting-recordings";
+    process.env.MEETING_PROCESSING_DB_FILE ??= "/data/meeting-processing/metadata.v1.sqlite3";
+    process.env.MEETING_PROCESSING_DIR ??= "/data/meeting-processing/artifacts";
   }
 }
 
 type WriteTarget = "test" | "prod";
+type MeetingTranscriptionProvider = "disabled" | "local-whisper";
+type MeetingMinutesProvider = "disabled" | "minimax" | "google-gemini";
 
 const DEFAULT_CORS_ORIGINS = [
   "http://localhost:5173",
@@ -169,6 +170,14 @@ function resolveSqliteDbFile(): string {
     return path.join(sqliteTestDir, `work-report-read-model.${process.pid}.sqlite3`);
   }
   return process.env.SQLITE_DB_FILE ?? "./.cache/work-report-read-model.v1.sqlite3";
+}
+
+function readRequiredNumericIdEnv(key: string): string {
+  const value = readRequiredEnv(key).trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`必要環境變數 ${key} 必須是純數字 Ragic ID，目前值為 ${JSON.stringify(value)}。`);
+  }
+  return value;
 }
 
 function readNumberEnv(key: string, fallback: number): number {
@@ -259,6 +268,29 @@ function readWriteTargetEnv(): WriteTarget {
     return value;
   }
   return "test";
+}
+
+function readMeetingTranscriptionProviderEnv(): MeetingTranscriptionProvider {
+  const value = (process.env.MEETING_TRANSCRIPTION_PROVIDER ?? "disabled")
+    .trim()
+    .toLowerCase();
+  if (value === "local-whisper") return value;
+  return "disabled";
+}
+
+function readMeetingMinutesProviderEnv(): MeetingMinutesProvider {
+  const value = (process.env.MEETING_MINUTES_PROVIDER ?? "disabled")
+    .trim()
+    .toLowerCase();
+  if (value === "minimax" || value === "google-gemini") return value;
+  return "disabled";
+}
+
+function readMeetingMinutesGoogleApiKey(): string {
+  const dedicatedKey = process.env.MEETING_MINUTES_GOOGLE_API_KEY?.trim();
+  if (dedicatedKey) return dedicatedKey;
+  if (!readBooleanEnv("MEETING_ALLOW_SHARED_GEMINI_CREDENTIAL", false)) return "";
+  return process.env.GOOGLE_GEMINI_API_KEY?.trim() || "";
 }
 
 const legacyRagicGlobalRatePerSecond = Math.max(
@@ -385,17 +417,18 @@ export const env = {
   RAGIC_FORM_105_REOPEN_ACTION_BUTTON_ID: process.env.RAGIC_FORM_105_REOPEN_ACTION_BUTTON_ID ?? "",
   RAGIC_FORM_16_PATH: process.env.RAGIC_FORM_16_PATH ?? "/default/c1/16",
   RAGIC_FORM_16_TEST_PATH: process.env.RAGIC_FORM_16_TEST_PATH ?? "",
-  RAGIC_FORM_16_SAVE_ACTION_BUTTON_ID:
-    process.env.RAGIC_FORM_16_SAVE_ACTION_BUTTON_ID ?? "",
+  RAGIC_FORM_16_SAVE_ACTION_BUTTON_ID: readRequiredNumericIdEnv(
+    "RAGIC_FORM_16_SAVE_ACTION_BUTTON_ID"
+  ),
   // Form 16 欄位 ID 全部強制必填：若 Ragic schema 改 ID、.env 沒同步，
   // 寧可 boot 直接 throw，也不要 baked-in 的值 silent mismatch 害系統繼續寫錯欄位
-  RAGIC_FORM_16_WORK_ORDER_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_WORK_ORDER_FIELD_ID"),
-  RAGIC_FORM_16_TYPE_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_TYPE_FIELD_ID"),
-  RAGIC_FORM_16_PROCESS_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_PROCESS_FIELD_ID"),
-  RAGIC_FORM_16_DEP_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_DEP_FIELD_ID"),
-  RAGIC_FORM_16_PROD_TYPE_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_PROD_TYPE_FIELD_ID"),
-  RAGIC_FORM_16_REMARK_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_REMARK_FIELD_ID"),
-  RAGIC_FORM_16_DATE_FIELD_ID: readRequiredEnv("RAGIC_FORM_16_DATE_FIELD_ID"),
+  RAGIC_FORM_16_WORK_ORDER_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_WORK_ORDER_FIELD_ID"),
+  RAGIC_FORM_16_TYPE_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_TYPE_FIELD_ID"),
+  RAGIC_FORM_16_PROCESS_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_PROCESS_FIELD_ID"),
+  RAGIC_FORM_16_DEP_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_DEP_FIELD_ID"),
+  RAGIC_FORM_16_PROD_TYPE_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_PROD_TYPE_FIELD_ID"),
+  RAGIC_FORM_16_REMARK_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_REMARK_FIELD_ID"),
+  RAGIC_FORM_16_DATE_FIELD_ID: readRequiredNumericIdEnv("RAGIC_FORM_16_DATE_FIELD_ID"),
   // 稼動表 Excel 匯出：使用者在 Ragic「發佈到網路」做好的完整下載網址（含 APIKey + view，view 已自己篩好）。
   // 後端當 proxy 直接抓這條網址、原樣轉給前端下載，把含 key 的網址藏在後端、同事按鈕不必看到 key。
   // 建議用 .csv 結尾的網址（稼動表「從文字檔」吃 CSV）；留空時匯出 endpoint 回明確錯誤、不影響主流程。
@@ -403,6 +436,190 @@ export const env = {
   REPORT_EXCEL_CSV_TIMEOUT_MS: Math.max(
     10_000,
     Math.trunc(readNumberEnv("REPORT_EXCEL_CSV_TIMEOUT_MS", 120_000))
+  ),
+  EFFICIENCY_REPORT_DB_FILE:
+    process.env.EFFICIENCY_REPORT_DB_FILE?.trim() ||
+    "./.data/efficiency-reports/metadata.v1.sqlite3",
+  EFFICIENCY_REPORT_ARCHIVE_DIR:
+    process.env.EFFICIENCY_REPORT_ARCHIVE_DIR?.trim() ||
+    "./.data/efficiency-reports/files",
+  EFFICIENCY_REPORT_MAX_SOURCE_BYTES: Math.max(
+    1_048_576,
+    Math.trunc(readNumberEnv("EFFICIENCY_REPORT_MAX_SOURCE_BYTES", 50 * 1024 * 1024))
+  ),
+  EFFICIENCY_REPORT_MAX_SOURCE_ROWS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("EFFICIENCY_REPORT_MAX_SOURCE_ROWS", 200_000))
+  ),
+  EFFICIENCY_REPORT_RETENTION_MONTHS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("EFFICIENCY_REPORT_RETENTION_MONTHS", 24))
+  ),
+  EFFICIENCY_REPORT_CLEANUP_ENABLED: readBooleanEnv(
+    "EFFICIENCY_REPORT_CLEANUP_ENABLED",
+    true
+  ),
+  EFFICIENCY_REPORT_CLEANUP_DRY_RUN: readBooleanEnv(
+    "EFFICIENCY_REPORT_CLEANUP_DRY_RUN",
+    false
+  ),
+  EFFICIENCY_REPORT_CLEANUP_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("EFFICIENCY_REPORT_CLEANUP_STARTUP_DELAY_MS", 5 * 60 * 1000))
+  ),
+  EFFICIENCY_REPORT_CLEANUP_INTERVAL_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("EFFICIENCY_REPORT_CLEANUP_INTERVAL_MS", 24 * 60 * 60 * 1000))
+  ),
+  MEETING_RECORDING_STORAGE_DIR:
+    process.env.MEETING_RECORDING_STORAGE_DIR?.trim() ||
+    "./.data/meeting-recordings",
+  MEETING_RECORDING_OWNER_COOKIE_SECRET:
+    process.env.MEETING_RECORDING_OWNER_COOKIE_SECRET?.trim() || "",
+  MEETING_LIBRARY_CODE_PEPPER:
+    process.env.MEETING_LIBRARY_CODE_PEPPER?.trim() || "",
+  MEETING_RECORDING_MAX_TOTAL_BYTES: Math.max(
+    1_073_741_824,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_MAX_TOTAL_BYTES", 100 * 1024 * 1024 * 1024))
+  ),
+  MEETING_RECORDING_MAX_SESSION_BYTES: Math.max(
+    104_857_600,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_MAX_SESSION_BYTES", 5 * 1024 * 1024 * 1024))
+  ),
+  MEETING_RECORDING_MAX_CHUNK_BYTES: Math.max(
+    262_144,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_MAX_CHUNK_BYTES", 8 * 1024 * 1024))
+  ),
+  MEETING_RECORDING_STALE_SESSION_MS: Math.max(
+    60 * 60 * 1000,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_STALE_SESSION_MS", 48 * 60 * 60 * 1000))
+  ),
+  MEETING_RECORDING_CLEANUP_ENABLED: readBooleanEnv(
+    "MEETING_RECORDING_CLEANUP_ENABLED",
+    true
+  ),
+  MEETING_RECORDING_CLEANUP_STARTUP_DELAY_MS: Math.max(
+    0,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_CLEANUP_STARTUP_DELAY_MS", 10 * 60 * 1000))
+  ),
+  MEETING_RECORDING_CLEANUP_INTERVAL_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_RECORDING_CLEANUP_INTERVAL_MS", 60 * 60 * 1000))
+  ),
+  MEETING_PROCESSING_DB_FILE:
+    process.env.MEETING_PROCESSING_DB_FILE?.trim() ||
+    "./.data/meeting-processing/metadata.v1.sqlite3",
+  MEETING_PROCESSING_DIR:
+    process.env.MEETING_PROCESSING_DIR?.trim() ||
+    "./.data/meeting-processing/artifacts",
+  MEETING_WORKER_ENABLED: readBooleanEnv("MEETING_WORKER_ENABLED", false),
+  MEETING_WORKER_POLL_INTERVAL_MS: Math.max(
+    250,
+    Math.trunc(readNumberEnv("MEETING_WORKER_POLL_INTERVAL_MS", 2_000))
+  ),
+  MEETING_WORKER_RESTART_DELAY_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("MEETING_WORKER_RESTART_DELAY_MS", 5_000))
+  ),
+  MEETING_PROCESSING_MAX_ATTEMPTS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("MEETING_PROCESSING_MAX_ATTEMPTS", 3))
+  ),
+  MEETING_PROCESSING_RETRY_DELAY_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("MEETING_PROCESSING_RETRY_DELAY_MS", 60_000))
+  ),
+  MEETING_PROCESSING_MAX_TOTAL_BYTES: Math.max(
+    1,
+    Math.trunc(readNumberEnv("MEETING_PROCESSING_MAX_TOTAL_BYTES", 100 * 1024 ** 3))
+  ),
+  MEETING_PROCESSING_CLEANUP_INTERVAL_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_PROCESSING_CLEANUP_INTERVAL_MS", 60 * 60 * 1000))
+  ),
+  MEETING_PROCESSING_STALE_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_PROCESSING_STALE_MS", 30 * 60 * 1000))
+  ),
+  MEETING_PROCESS_TIMEOUT_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_PROCESS_TIMEOUT_MS", 2 * 60 * 60 * 1000))
+  ),
+  MEETING_FFMPEG_PATH: process.env.MEETING_FFMPEG_PATH?.trim() || "",
+  MEETING_FFPROBE_PATH: process.env.MEETING_FFPROBE_PATH?.trim() || "",
+  MEETING_ALLOW_SHARED_GEMINI_CREDENTIAL: readBooleanEnv(
+    "MEETING_ALLOW_SHARED_GEMINI_CREDENTIAL",
+    false
+  ),
+  MEETING_TRANSCRIPTION_PROVIDER: readMeetingTranscriptionProviderEnv(),
+  MEETING_TRANSCRIPTION_LOCAL_URL:
+    process.env.MEETING_TRANSCRIPTION_LOCAL_URL?.trim() || "",
+  MEETING_TRANSCRIPTION_LOCAL_TOKEN:
+    process.env.MEETING_TRANSCRIPTION_LOCAL_TOKEN?.trim() || "",
+  MEETING_TRANSCRIPTION_LOCAL_MODEL:
+    process.env.MEETING_TRANSCRIPTION_LOCAL_MODEL?.trim() || "large-v3",
+  MEETING_TRANSCRIPTION_PHRASES: readStringListEnv(
+    "MEETING_TRANSCRIPTION_PHRASES",
+    []
+  ).slice(0, 500),
+  MEETING_TRANSCRIPTION_LANGUAGE:
+    process.env.MEETING_TRANSCRIPTION_LANGUAGE?.trim() || "zh-TW",
+  MEETING_TRANSCRIPTION_CHUNK_MS: Math.min(
+    30 * 60 * 1000,
+    Math.max(
+      60_000,
+      Math.trunc(readNumberEnv("MEETING_TRANSCRIPTION_CHUNK_MS", 10 * 60 * 1000))
+    )
+  ),
+  MEETING_TRANSCRIPTION_MAX_ATTEMPTS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("MEETING_TRANSCRIPTION_MAX_ATTEMPTS", 3))
+  ),
+  MEETING_TRANSCRIPTION_RETRY_DELAY_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("MEETING_TRANSCRIPTION_RETRY_DELAY_MS", 60_000))
+  ),
+  MEETING_TRANSCRIPTION_REQUEST_TIMEOUT_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_TRANSCRIPTION_REQUEST_TIMEOUT_MS", 30 * 60 * 1000))
+  ),
+  MEETING_AI_PROVIDER_MIGRATION_RETRY_GRACE_MS: Math.max(
+    60_000,
+    Math.trunc(
+      readNumberEnv(
+        "MEETING_AI_PROVIDER_MIGRATION_RETRY_GRACE_MS",
+        7 * 24 * 60 * 60 * 1000
+      )
+    )
+  ),
+  MEETING_MINUTES_PROVIDER: readMeetingMinutesProviderEnv(),
+  MEETING_MINUTES_GOOGLE_API_KEY: readMeetingMinutesGoogleApiKey(),
+  MEETING_MINUTES_GOOGLE_MODEL:
+    process.env.MEETING_MINUTES_GOOGLE_MODEL?.trim() || "gemini-3.5-flash",
+  MEETING_MINUTES_MINIMAX_MAX_OUTPUT_TOKENS: Math.min(
+    64_000,
+    Math.max(
+      1_024,
+      Math.trunc(
+        readNumberEnv("MEETING_MINUTES_MINIMAX_MAX_OUTPUT_TOKENS", 16_384)
+      )
+    )
+  ),
+  MEETING_MINUTES_MAX_INPUT_CHARACTERS: Math.max(
+    10_000,
+    Math.trunc(readNumberEnv("MEETING_MINUTES_MAX_INPUT_CHARACTERS", 500_000))
+  ),
+  MEETING_MINUTES_MAX_ATTEMPTS: Math.max(
+    1,
+    Math.trunc(readNumberEnv("MEETING_MINUTES_MAX_ATTEMPTS", 3))
+  ),
+  MEETING_MINUTES_RETRY_DELAY_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("MEETING_MINUTES_RETRY_DELAY_MS", 60_000))
+  ),
+  MEETING_MINUTES_REQUEST_TIMEOUT_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("MEETING_MINUTES_REQUEST_TIMEOUT_MS", 30 * 60 * 1000))
   ),
   RAGIC_ACTION_BUTTON_TIMEOUT_MS: Math.max(
     1_000,
@@ -503,8 +720,8 @@ export const env = {
     0,
     Math.trunc(readNumberEnv("RAGIC_MUTATION_READ_MAX_RETRIES", 1))
   ),
-  // 舊版總預算設定保留為相容欄位；實際 runtime 已拆成 foreground/mutation/background
-  // 三個 bucket，避免背景同步或一般 refresh 吃掉 mutation precondition 的 token。
+  // 所有 lane 先受各自 bucket 約束，再共同受這組 global bucket 約束。
+  // lane 預留互動預算，global 則限制所有 Ragic outbound request 的合計速率。
   RAGIC_GLOBAL_RATE_PER_SECOND: legacyRagicGlobalRatePerSecond,
   RAGIC_GLOBAL_BURST_CAPACITY: legacyRagicGlobalBurstCapacity,
   RAGIC_FOREGROUND_RATE_PER_SECOND: Math.max(
@@ -638,9 +855,10 @@ export const env = {
     1_000,
     Math.trunc(readNumberEnv("RAGIC_CIRCUIT_COOLDOWN_MS", 30_000))
   ),
-  // Default false：fallback 應該是「沒設定就安全」（不噴 log 噪音）；
-  // dev / 觀察 lane 流量時 ops 主動 opt-in 設 true
-  RUNTIME_HEALTH_LOG_ENABLED: readBooleanEnv("RUNTIME_HEALTH_LOG_ENABLED", false),
+  RUNTIME_HEALTH_LOG_ENABLED: readBooleanEnv(
+    "RUNTIME_HEALTH_LOG_ENABLED",
+    process.env.NODE_ENV === "production"
+  ),
   RUNTIME_HEALTH_LOG_INTERVAL_MS: Math.max(
     5000,
     Math.trunc(readNumberEnv("RUNTIME_HEALTH_LOG_INTERVAL_MS", 60000))
@@ -648,6 +866,10 @@ export const env = {
   RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS: Math.max(
     10,
     Math.trunc(readNumberEnv("RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS", 100))
+  ),
+  RUNTIME_HEALTH_MEETING_PENDING_WARN_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("RUNTIME_HEALTH_MEETING_PENDING_WARN_MS", 30 * 60 * 1000))
   ),
   WORK_REPORT_DEBUG_LOG_ENABLED: readBooleanEnv(
     "WORK_REPORT_DEBUG_LOG_ENABLED",
@@ -750,7 +972,7 @@ export const env = {
     Math.trunc(readNumberEnv("WORK_REPORT_TASK_REGISTRY_HISTORY_LIMIT", 5000))
   ),
   DEV_AI_ENABLED: readBooleanEnv("DEV_AI_ENABLED", false),
-  DEV_AI_PROVIDER: process.env.DEV_AI_PROVIDER?.trim() || "google",
+  DEV_AI_PROVIDER: process.env.DEV_AI_PROVIDER?.trim() || "minimax",
   GOOGLE_GEMINI_API_KEY: process.env.GOOGLE_GEMINI_API_KEY?.trim() ?? "",
   GOOGLE_GEMINI_MODEL: process.env.GOOGLE_GEMINI_MODEL?.trim() || "gemini-3.5-flash",
   GOOGLE_GEMINI_FAST_MODEL: process.env.GOOGLE_GEMINI_FAST_MODEL?.trim() || "",
@@ -759,6 +981,18 @@ export const env = {
   GOOGLE_GEMINI_STORE_INTERACTIONS: readBooleanEnv(
     "GOOGLE_GEMINI_STORE_INTERACTIONS",
     false
+  ),
+  MINIMAX_API_BASE_URL:
+    process.env.MINIMAX_API_BASE_URL?.trim() || "https://api.minimax.io/anthropic",
+  MINIMAX_API_KEY: process.env.MINIMAX_API_KEY?.trim() ?? "",
+  MINIMAX_MODEL: process.env.MINIMAX_MODEL?.trim() || "MiniMax-M2.7",
+  MINIMAX_REQUEST_CONCURRENCY: Math.max(
+    1,
+    Math.trunc(readNumberEnv("MINIMAX_REQUEST_CONCURRENCY", 1))
+  ),
+  MINIMAX_QUEUE_TIMEOUT_MS: Math.max(
+    1_000,
+    Math.trunc(readNumberEnv("MINIMAX_QUEUE_TIMEOUT_MS", 120_000))
   ),
   DEV_AI_MAX_CONTEXT_CHARS: Math.max(
     4_000,
@@ -860,6 +1094,12 @@ export const env = {
     process.env.SYSTEM_NOTICE_FILE ?? "./.data/system-notice.v1.json",
   NOTICE_ADMIN_USERNAME: process.env.NOTICE_ADMIN_USERNAME ?? "",
   NOTICE_ADMIN_PASSWORD_HASH: process.env.NOTICE_ADMIN_PASSWORD_HASH ?? "",
+  RAGIC_DEFINITIONS_SOURCE_API_TOKEN:
+    process.env.RAGIC_DEFINITIONS_SOURCE_API_TOKEN ?? "",
+  RAGIC_DEFINITIONS_EXPORT_TIMEOUT_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("RAGIC_DEFINITIONS_EXPORT_TIMEOUT_MS", 10 * 60 * 1000))
+  ),
   NOTICE_TOKEN_TTL_MINUTES: Math.max(
     5,
     Math.trunc(readNumberEnv("NOTICE_TOKEN_TTL_MINUTES", 10080))

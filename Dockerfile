@@ -64,7 +64,16 @@ ENV NODE_ENV=production \
     RAGIC_CALLBACK_TASK_STORE_FILE=/data/ragic-callback-tasks.v1.json \
     WORK_REPORT_TASK_REGISTRY_STORE_FILE=/data/work-report-task-registry.v1.json \
     FORM16_WRITE_REVERIFY_STORE_FILE=/data/form16-write-reverify.v1.json \
-    SYSTEM_NOTICE_FILE=/data/system-notice.v1.json
+    SYSTEM_NOTICE_FILE=/data/system-notice.v1.json \
+    EFFICIENCY_REPORT_DB_FILE=/data/efficiency-reports/metadata.v1.sqlite3 \
+    EFFICIENCY_REPORT_ARCHIVE_DIR=/data/efficiency-reports/files \
+    MEETING_RECORDING_STORAGE_DIR=/data/meeting-recordings \
+    MEETING_PROCESSING_DB_FILE=/data/meeting-processing/metadata.v1.sqlite3 \
+    MEETING_PROCESSING_DIR=/data/meeting-processing/artifacts \
+    MEETING_WORKER_ENABLED=false \
+    MEETING_TRANSCRIPTION_PROVIDER=disabled \
+    MEETING_MINUTES_PROVIDER=disabled \
+    RAGIC_DEFINITIONS_SOURCE_API_TOKEN=demo-definitions-source-token-0001
 
 COPY --from=backend-builder /app/backend/package.json ./package.json
 COPY --from=backend-builder /app/backend/node_modules ./node_modules

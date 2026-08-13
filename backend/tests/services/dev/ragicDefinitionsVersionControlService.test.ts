@@ -351,7 +351,7 @@ test("version control push：只有本地領先 origin/main 時才 push", async 
         return { stdout: "0\t1\n", stderr: "" };
       }
       if (command === "push origin main") {
-        return { stdout: "", stderr: "To github.com:funda-dev/ragic-report.git\n" };
+        return { stdout: "", stderr: "To github.com:example-org/report-system.git\n" };
       }
       throw new Error(`unexpected git command: ${command}`);
     };
@@ -399,7 +399,7 @@ test("version control push：工作樹仍有 definitions 差異時仍可推送�
         return { stdout: "0\t1\n", stderr: "" };
       }
       if (command === "push origin main") {
-        return { stdout: "", stderr: "To github.com:funda-dev/ragic-report.git\n" };
+        return { stdout: "", stderr: "To github.com:example-org/report-system.git\n" };
       }
       throw new Error(`unexpected git command: ${command}`);
     };
@@ -451,7 +451,7 @@ test("version control push：ahead/behind 分叉且工作樹乾淨時先 rebase 
       }
       if (command === "push origin main") {
         pushed = true;
-        return { stdout: "", stderr: "To github.com:funda-dev/ragic-report.git\n" };
+        return { stdout: "", stderr: "To github.com:example-org/report-system.git\n" };
       }
       throw new Error(`unexpected git command: ${command}`);
     };

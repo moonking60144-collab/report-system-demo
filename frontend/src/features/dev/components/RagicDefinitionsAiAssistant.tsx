@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type PointerEvent as ReactPointerEvent,
+  type SetStateAction,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   CloseOutlined,
@@ -22,18 +31,29 @@ import {
 } from "../../../api/devRagicDefinitions";
 import type {
   DevAiMessageIntent,
+  DevAiSendMessageRequest,
   DevAiSpeedMode,
   DevAiThread,
   DevAiThreadDetail,
 } from "@shared-types/ragicDefinitions";
 import { ResultList } from "./RagicDefinitionsVersionPanel";
 import {
+  clampDevAiLauncherPosition,
   devAiContextStatusLabel,
+  devAiKnowledgeSourceLabel,
+  getDevAiPanelPosition,
   isAiSuggestionForDraft,
+  readDevAiLauncherPosition,
   shouldDefaultIncludeDefinitions,
+  writeDevAiLauncherPosition,
+  type DevAiLauncherPosition,
 } from "./RagicDefinitionsAiAssistantUtils";
 import { FORMULA_KIND_LABELS } from "./ragicDefinitionsExplorerUtils";
 import { FormulaSyntax } from "./ragicDefinitionsSyntax";
+import {
+  resolveDevAiMessageSubmission,
+  type DevAiMessageSubmission,
+} from "../utils/devAiClientMessageId";
 
 interface RagicDefinitionsAiAssistantProps {
   token: string;
@@ -41,6 +61,40 @@ interface RagicDefinitionsAiAssistantProps {
   onDraftChange: Dispatch<SetStateAction<RagicFormulaPatchDryRunInput>>;
   onOpenFormulaEditor: () => void;
   onError: (err: unknown, fallback: string) => string | null;
+}
+
+const DEV_AI_LAUNCHER_VIEWPORT_MARGIN_PX = 12;
+const DEV_AI_LAUNCHER_DRAG_THRESHOLD_PX = 6;
+const DEV_AI_PANEL_GAP_PX = 12;
+
+interface DevAiLauncherDragState {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startPosition: DevAiLauncherPosition;
+  didDrag: boolean;
+}
+
+function positionDevAiPanel(
+  launcherPosition: DevAiLauncherPosition,
+  launcher: HTMLButtonElement | null,
+  panel: HTMLElement | null
+) {
+  if (!launcher || !panel) return;
+  const launcherRect = launcher.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const panelPosition = getDevAiPanelPosition(
+    launcherPosition,
+    { width: window.innerWidth, height: window.innerHeight },
+    { width: launcherRect.width, height: launcherRect.height },
+    { width: panelRect.width, height: panelRect.height },
+    DEV_AI_LAUNCHER_VIEWPORT_MARGIN_PX,
+    DEV_AI_PANEL_GAP_PX
+  );
+  panel.style.left = `${panelPosition.x}px`;
+  panel.style.top = `${panelPosition.y}px`;
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
 }
 
 export function RagicDefinitionsAiAssistant({
@@ -70,7 +124,16 @@ export function RagicDefinitionsAiAssistant({
   const [feedbackState, setFeedbackState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [knowledgeStatus, setKnowledgeStatus] = useState<DevAiKnowledgeStatusResult | null>(null);
   const [knowledgeState, setKnowledgeState] = useState<"idle" | "loading" | "compiling" | "failed">("idle");
+  const [launcherPosition, setLauncherPosition] = useState<DevAiLauncherPosition | null>(null);
+  const [launcherDragging, setLauncherDragging] = useState(false);
   const includeDefinitionsTouchedRef = useRef(false);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const launcherPositionRef = useRef<DevAiLauncherPosition | null>(null);
+  const launcherDragRef = useRef<DevAiLauncherDragState | null>(null);
+  const suppressLauncherClickUntilRef = useRef(0);
+  const threadSendInFlightRef = useRef(false);
+  const messageSubmissionRef = useRef<DevAiMessageSubmission | null>(null);
 
   const targetFormPath = draft.formPath.trim();
   const targetFieldId = draft.fieldId.trim();
@@ -116,6 +179,119 @@ export function RagicDefinitionsAiAssistant({
   }, [targetFormPath]);
 
   useEffect(() => {
+    const launcher = launcherRef.current;
+    if (!launcher) return;
+
+    const rect = launcher.getBoundingClientRect();
+    const storedPosition = readDevAiLauncherPosition();
+    const nextPosition = clampDevAiLauncherPosition(
+      storedPosition ?? { x: rect.left, y: rect.top },
+      { width: window.innerWidth, height: window.innerHeight },
+      { width: rect.width, height: rect.height },
+      DEV_AI_LAUNCHER_VIEWPORT_MARGIN_PX
+    );
+    launcherPositionRef.current = nextPosition;
+    setLauncherPosition(nextPosition);
+
+    function handleResize() {
+      const currentPosition = launcherPositionRef.current;
+      const currentLauncher = launcherRef.current;
+      if (!currentPosition || !currentLauncher) return;
+      const currentRect = currentLauncher.getBoundingClientRect();
+      const clampedPosition = clampDevAiLauncherPosition(
+        currentPosition,
+        { width: window.innerWidth, height: window.innerHeight },
+        { width: currentRect.width, height: currentRect.height },
+        DEV_AI_LAUNCHER_VIEWPORT_MARGIN_PX
+      );
+      const positionUnchanged =
+        clampedPosition.x === currentPosition.x &&
+        clampedPosition.y === currentPosition.y;
+      positionDevAiPanel(clampedPosition, currentLauncher, panelRef.current);
+      if (!positionUnchanged) {
+        launcherPositionRef.current = clampedPosition;
+        setLauncherPosition(clampedPosition);
+        writeDevAiLauncherPosition(clampedPosition);
+      }
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open || !launcherPosition) return;
+    positionDevAiPanel(launcherPosition, launcherRef.current, panelRef.current);
+  }, [launcherPosition, open]);
+
+  function handleLauncherPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!event.isPrimary || event.button !== 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const startPosition = launcherPositionRef.current ?? { x: rect.left, y: rect.top };
+    launcherDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPosition,
+      didDrag: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setLauncherDragging(true);
+  }
+
+  function handleLauncherPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = launcherDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - drag.startClientX;
+    const deltaY = event.clientY - drag.startClientY;
+    if (!drag.didDrag && Math.hypot(deltaX, deltaY) < DEV_AI_LAUNCHER_DRAG_THRESHOLD_PX) {
+      return;
+    }
+    drag.didDrag = true;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const nextPosition = clampDevAiLauncherPosition(
+      { x: drag.startPosition.x + deltaX, y: drag.startPosition.y + deltaY },
+      { width: window.innerWidth, height: window.innerHeight },
+      { width: rect.width, height: rect.height },
+      DEV_AI_LAUNCHER_VIEWPORT_MARGIN_PX
+    );
+    launcherPositionRef.current = nextPosition;
+    event.currentTarget.style.left = `${nextPosition.x}px`;
+    event.currentTarget.style.top = `${nextPosition.y}px`;
+    positionDevAiPanel(nextPosition, event.currentTarget, panelRef.current);
+  }
+
+  function finishLauncherDrag(event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) {
+    const drag = launcherDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    launcherDragRef.current = null;
+    setLauncherDragging(false);
+    if (cancelled) {
+      launcherPositionRef.current = drag.startPosition;
+      event.currentTarget.style.left = `${drag.startPosition.x}px`;
+      event.currentTarget.style.top = `${drag.startPosition.y}px`;
+      setLauncherPosition(drag.startPosition);
+      positionDevAiPanel(drag.startPosition, event.currentTarget, panelRef.current);
+      return;
+    }
+    if (!drag.didDrag) return;
+    suppressLauncherClickUntilRef.current = window.performance.now() + 400;
+    const currentPosition = launcherPositionRef.current;
+    if (currentPosition) {
+      setLauncherPosition(currentPosition);
+      writeDevAiLauncherPosition(currentPosition);
+    }
+  }
+
+  function handleLauncherClick() {
+    if (window.performance.now() < suppressLauncherClickUntilRef.current) return;
+    setOpen((current) => !current);
+  }
+
+  useEffect(() => {
     if (!open || mode !== "chat") return;
     let cancelled = false;
     setKnowledgeState((current) => (current === "idle" ? "loading" : current));
@@ -155,7 +331,8 @@ export function RagicDefinitionsAiAssistant({
   }
 
   async function handleThreadSend() {
-    if (!canSendThreadMessage) return;
+    if (!canSendThreadMessage || threadSendInFlightRef.current) return;
+    threadSendInFlightRef.current = true;
     const message = composerText.trim();
     setLoading(true);
     setError(null);
@@ -163,7 +340,7 @@ export function RagicDefinitionsAiAssistant({
     setFeedbackState("idle");
     try {
       const targetThread = await ensureThread();
-      const next = await sendDevAiThreadMessage(token, targetThread.id, {
+      const payload: Omit<DevAiSendMessageRequest, "clientMessageId"> = {
         message,
         mode: "auto",
         speedMode,
@@ -178,7 +355,18 @@ export function RagicDefinitionsAiAssistant({
             : {},
         includeKnowledge,
         includeDefinitions,
+      };
+      const submission = resolveDevAiMessageSubmission(
+        messageSubmissionRef.current,
+        targetThread.id,
+        payload
+      );
+      messageSubmissionRef.current = submission;
+      const next = await sendDevAiThreadMessage(token, targetThread.id, {
+        ...payload,
+        clientMessageId: submission.clientMessageId,
       });
+      messageSubmissionRef.current = null;
       setThread(next.thread);
       setThreadDetail((current) => ({
         thread: next.thread,
@@ -202,6 +390,7 @@ export function RagicDefinitionsAiAssistant({
       const messageText = onError(err, "Dev AI 對話送出失敗");
       setError(messageText);
     } finally {
+      threadSendInFlightRef.current = false;
       setLoading(false);
     }
   }
@@ -326,6 +515,7 @@ export function RagicDefinitionsAiAssistant({
     >
       {open ? (
         <section
+          ref={panelRef}
           className="ragic-defs-ai-bot__panel"
           role="dialog"
           aria-label="AI 公式助手"
@@ -491,11 +681,21 @@ export function RagicDefinitionsAiAssistant({
 
       <button
         type="button"
-        className="ragic-defs-ai-bot__launcher"
+        ref={launcherRef}
+        className={`ragic-defs-ai-bot__launcher${launcherDragging ? " is-dragging" : ""}`}
+        style={
+          launcherPosition
+            ? { left: launcherPosition.x, top: launcherPosition.y, right: "auto", bottom: "auto" }
+            : undefined
+        }
         aria-expanded={open}
         aria-label={open ? "收合 Funda Dev AI" : "開啟 Funda Dev AI"}
-        title="Funda Dev AI"
-        onClick={() => setOpen((current) => !current)}
+        title="Funda Dev AI · 可拖曳位置"
+        onPointerDown={handleLauncherPointerDown}
+        onPointerMove={handleLauncherPointerMove}
+        onPointerUp={finishLauncherDrag}
+        onPointerCancel={(event) => finishLauncherDrag(event, true)}
+        onClick={handleLauncherClick}
       >
         <RobotOutlined />
         <span>AI</span>
@@ -757,9 +957,7 @@ function AiChatResult({
           <ResultList
             title="來源"
             tone="warn"
-            items={result.sources.map(
-              (source) => `${sourceKindLabel(source.kind)} · ${source.title}：${source.excerpt}`
-            )}
+            items={result.sources.map(devAiKnowledgeSourceLabel)}
           />
         ) : null}
         {result.assumptions.length ? (
@@ -958,16 +1156,5 @@ function intentLabel(intent: DevAiMessageIntent): string {
       return "需釐清";
     default:
       return "一般";
-  }
-}
-
-function sourceKindLabel(kind: DevAiChatResult["sources"][number]["kind"]): string {
-  switch (kind) {
-    case "official":
-      return "Ragic 官方";
-    case "definitions":
-      return "Definitions";
-    default:
-      return "Knowledge";
   }
 }

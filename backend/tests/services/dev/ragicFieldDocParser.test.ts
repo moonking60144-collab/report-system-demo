@@ -12,8 +12,8 @@ import {
 const SAMPLE_HTML = `
 <html><body>
 <h3><span style='color:#888;'>表單:</span>✍[104] 工令單搓牙報工+排程</h3>
-表單網址:<a href='https://fdtw.app/default/forms8/104' target='_blank'>https://fdtw.app/default/forms8/104</a><br/>
-API 網址:<a href='https://fdtw.app/default/forms8/104?api=true' target='_blank'>...</a>
+表單網址:<a href='https://demo.local/default/forms8/104' target='_blank'>https://demo.local/default/forms8/104</a><br/>
+API 網址:<a href='https://demo.local/default/forms8/104?api=true' target='_blank'>...</a>
 <h4 style='margin:15px 0 0 0;'>主表單欄位</h4>
 主表單Key: 1005987<table class='paramTable'>
 <tr>
@@ -51,7 +51,7 @@ API 網址:<a href='https://fdtw.app/default/forms8/104?api=true' target='_blank
 </table>
 
 <h3><span>表單:</span>[105] 報工表</h3>
-表單網址:<a href='https://fdtw.app/default/forms8/105'>https://fdtw.app/default/forms8/105</a>
+表單網址:<a href='https://demo.local/default/forms8/105'>https://demo.local/default/forms8/105</a>
 <h4>主表單欄位</h4>
 主表單Key: 999<table class='paramTable'>
 <tr>
@@ -118,7 +118,7 @@ test("parseRagicDocHtml 略過 資料回傳格式範例 / 敘述欄位 等非欄
 test("parseRagicDocHtml 跳過沒有 paramTable 的 form 不會炸", () => {
   const html = `
     <h3><span>表單:</span>空表</h3>
-    表單網址:<a href='https://fdtw.app/default/forms8/999'>x</a>
+    表單網址:<a href='https://demo.local/default/forms8/999'>x</a>
     <h4>主表單欄位</h4>
     主表單Key: 1
   `;
@@ -132,7 +132,7 @@ test("parseRagicDocHtml 跳過沒有 paramTable 的 form 不會炸", () => {
 test("parseRagicDocHtml 過濾非數字的 field id", () => {
   const html = `
     <h3><span>表單:</span>怪表</h3>
-    表單網址:<a href='https://fdtw.app/default/forms8/666'>x</a>
+    表單網址:<a href='https://demo.local/default/forms8/666'>x</a>
     <h4>主表單欄位</h4>
     <table class='paramTable'>
     <tr><th>位置</th><th>名</th><th>id</th><th>型</th><th>註</th></tr>
@@ -159,7 +159,7 @@ test("parseRagicDocHtml 巢狀 table 不會污染外層 row 計數", () => {
   // 用 .find("tr") 會把巢狀 row 也算進來 → 期望實作改用 direct-child 後不會出現。
   const html = `
     <h3><span>表單:</span>巢狀表</h3>
-    表單網址:<a href='https://fdtw.app/default/forms8/777'>x</a>
+    表單網址:<a href='https://demo.local/default/forms8/777'>x</a>
     <h4>主表單欄位</h4>
     主表單Key: 7770000
     <table class='paramTable'>
@@ -188,7 +188,7 @@ test("parseRagicDocHtml formName 內部多空白／換行 collapse 成單空格"
   const html = `
     <h3><span style='color:#888;'>表單:</span>  ✍[104]   工令單
     搓牙\t報工+排程  </h3>
-    表單網址:<a href='https://fdtw.app/default/forms8/104'>x</a>
+    表單網址:<a href='https://demo.local/default/forms8/104'>x</a>
     <h4>主表單欄位</h4>
     主表單Key: 1
     <table class='paramTable'>
@@ -204,7 +204,7 @@ test("parseRagicDocHtml formName 內部多空白／換行 collapse 成單空格"
 test("parseRagicDocHtml cell 內 <br> 兩側 whitespace 仍然分號隔開", () => {
   const html = `
     <h3><span>表單:</span>br 測試</h3>
-    表單網址:<a href='https://fdtw.app/default/forms8/888'>x</a>
+    表單網址:<a href='https://demo.local/default/forms8/888'>x</a>
     <h4>主表單欄位</h4>
     主表單Key: 1
     <table class='paramTable'>

@@ -6,6 +6,10 @@ import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
 import { form16WriteReverifyService } from "../services/form16/form16WriteReverifyService";
 import { ragicCallbackRefreshService } from "../services/ragicCallbackRefreshService";
 import {
+  getMeetingProviderReadiness,
+  type MeetingProviderReadiness,
+} from "../config/meetingProviderReadiness";
+import {
   getRuntimeHealthSnapshot,
   type RuntimeHealthSnapshot,
 } from "../observability/runtimeHealthLogger";
@@ -14,6 +18,7 @@ interface HealthRouterDeps {
   getForm16WriteReverifyStats?: () => { pending: number; failed: number; total: number };
   getRagicSchedulerStats?: () => unknown;
   getRagicCallbackRefreshStats?: () => unknown;
+  getMeetingProviderReadiness?: () => MeetingProviderReadiness;
   getRuntimeHealthSnapshot?: () => RuntimeHealthSnapshot | null;
 }
 
@@ -31,6 +36,8 @@ export function createHealthRouter(deps: HealthRouterDeps = {}): Router {
     deps.getRagicSchedulerStats ?? (() => ragicRequestScheduler.getStats());
   const getRagicCallbackRefreshStats =
     deps.getRagicCallbackRefreshStats ?? (() => ragicCallbackRefreshService.getStats());
+  const readMeetingProviderReadiness =
+    deps.getMeetingProviderReadiness ?? getMeetingProviderReadiness;
   const readRuntimeHealthSnapshot =
     deps.getRuntimeHealthSnapshot ?? getRuntimeHealthSnapshot;
 
@@ -47,6 +54,7 @@ export function createHealthRouter(deps: HealthRouterDeps = {}): Router {
     if (isDetailRequested(req.query.detail)) {
       payload.ragicScheduler = getRagicSchedulerStats();
       payload.ragicCallbackRefresh = getRagicCallbackRefreshStats();
+      payload.meetingProviders = readMeetingProviderReadiness();
       payload.runtime = readRuntimeHealthSnapshot();
     }
 

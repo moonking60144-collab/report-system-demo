@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createDevAiThreadRepository } from "../../../src/services/dev/ai/devAiThreadRepository";
+import type { DevAiSendMessageResult } from "@shared-types/ragicDefinitions";
+
+function idFactory() {
+  let seq = 0;
+  return () => `id-${++seq}`;
+}
 
 test("Dev AI thread repository 依 owner_actor 隔離 thread", async () => {
   const repo = createDevAiThreadRepository({
@@ -174,4 +183,71 @@ test("Dev AI thread repository 可刪除過期封存與超量 threads", async ()
   );
 
   await repo.close();
+});
+
+test("Dev AI message request 完成結果可跨 repository reopen 重放", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "dev-ai-request-"));
+  const dbFile = path.join(root, "threads.sqlite3");
+  try {
+    const firstRepo = createDevAiThreadRepository({ dbFile, idFactory: idFactory() });
+    const thread = await firstRepo.createThread({
+      ownerActor: "alice",
+      title: "Thread",
+      mode: "general",
+      context: {},
+      now: "2026-08-07T00:00:00.000Z",
+    });
+    const userMessage = await firstRepo.appendMessage({
+      ownerActor: "alice",
+      threadId: thread.id,
+      role: "user",
+      content: "同一題",
+      intent: "general",
+      now: "2026-08-07T00:00:01.000Z",
+    });
+    const assistantMessage = await firstRepo.appendMessage({
+      ownerActor: "alice",
+      threadId: thread.id,
+      role: "assistant",
+      content: "同一答",
+      intent: "general",
+      model: "test-model",
+      now: "2026-08-07T00:00:02.000Z",
+    });
+    const result: DevAiSendMessageResult = {
+      thread,
+      userMessage,
+      assistantMessage,
+      artifacts: [],
+      intent: "general",
+    };
+    await firstRepo.startMessageRequest({
+      ownerActor: "alice",
+      threadId: thread.id,
+      clientMessageId: "message-reopen-001",
+      requestFingerprint: "fingerprint-001",
+      now: "2026-08-07T00:00:00.000Z",
+    });
+    await firstRepo.completeMessageRequest({
+      ownerActor: "alice",
+      threadId: thread.id,
+      clientMessageId: "message-reopen-001",
+      requestFingerprint: "fingerprint-001",
+      result,
+      now: "2026-08-07T00:00:03.000Z",
+    });
+    await firstRepo.close();
+
+    const reopened = createDevAiThreadRepository({ dbFile });
+    const stored = await reopened.getMessageRequest({
+      ownerActor: "alice",
+      threadId: thread.id,
+      clientMessageId: "message-reopen-001",
+    });
+    assert.equal(stored?.status, "completed");
+    assert.equal(stored?.result?.assistantMessage.content, "同一答");
+    await reopened.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

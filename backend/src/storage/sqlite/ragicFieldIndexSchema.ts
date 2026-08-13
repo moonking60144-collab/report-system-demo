@@ -77,85 +77,6 @@ JOIN ragic_field_index_state state
   ON state.id = 1 AND fi.generation_id = state.active_generation_id;
 `;
 
-// 欄位依賴邊：從 ragic_field_index.field_note 解析出的有向邊（衍生資料，可獨立 rebuild）。
-// 一條邊 = 來源欄位 --type--> 目標（表單 / 同表 cell / field_id / 外部系統）。
-// kind=data 進依賴圖；kind=side_effect 是跨系統副作用（dbfcommander/savework/...），
-// 單獨列出供「營運自主」評估，不混進 data 遍歷。
-//   - link / load：target_form_path + target_field_id（best-effort 解析；落空標 resolved=0）
-//   - formula_ref：target_field_id（同表 cell pos → field_id）
-//   - reference：target_field_id（autogen {n`reference`id} 直接帶）
-const RAGIC_FIELD_EDGE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS ragic_field_edge (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  src_form_path TEXT NOT NULL,
-  src_field_id TEXT NOT NULL,
-  src_field_name TEXT,
-  kind TEXT NOT NULL,                 -- 'data' | 'side_effect'
-  edge_type TEXT NOT NULL,            -- link|load|formula_ref|reference|external_db_write|cross_form_write|external_http|ragic_action
-  target_form_name TEXT,              -- link/load 原文目標表單名
-  target_form_path TEXT,             -- 解析後 form_path（NULL=未解析/同表/副作用）
-  target_field_raw TEXT,             -- link/load 目標欄位名 或 formula cell pos
-  target_field_id TEXT,              -- 解析後目標 field_id（依賴遍歷用）
-  sync INTEGER,                      -- load 專屬：1=隨時同步 0=一次性
-  broken INTEGER NOT NULL DEFAULT 0, -- 1=dangling（目標失聯）
-  resolved INTEGER NOT NULL DEFAULT 0, -- 1=目標已解析到 form/field
-  side_effect_via TEXT,              -- dbfcommander/savework/callHtmlApp/saveClose
-  side_effect_target TEXT,           -- UNC 路徑/formId/host（盡力抽，可能 NULL）
-  raw_segment TEXT,                  -- 來源 segment（debug）
-  refreshed_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ragic_field_edge_src
-  ON ragic_field_edge (src_field_id);
-CREATE INDEX IF NOT EXISTS idx_ragic_field_edge_src_form
-  ON ragic_field_edge (src_form_path);
-CREATE INDEX IF NOT EXISTS idx_ragic_field_edge_tgt_field
-  ON ragic_field_edge (target_field_id);
-CREATE INDEX IF NOT EXISTS idx_ragic_field_edge_tgt_form
-  ON ragic_field_edge (target_form_path);
-CREATE INDEX IF NOT EXISTS idx_ragic_field_edge_type
-  ON ragic_field_edge (edge_type);
-`;
-
-// Workflow JS 依賴邊：從 server-side workflow JS（txtedit.jsp 撈、落 .cache/ragic-workflows）解析出的有向邊。
-// 補 ragic_field_edge（欄位公式/連結）那層看不到的「JS 盲區」：getAPIQuery 跨表、setFieldValue JS 寫值、連外副作用。
-// 獨立表、不混 ragic_field_edge：粒度不同（表→表 vs 欄位→欄位），且 rebuildEdges 會 DELETE 整張 field_edge。
-// 來源是 .cache/*.js（非 ragic_field_index），由 analyze-ragic-workflows.ts 解析後 rebuild（彙總去重 + occur_count）。
-const RAGIC_WORKFLOW_EDGE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS ragic_workflow_edge (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  src_form_path TEXT NOT NULL,        -- workflow 所在表（'default/forms8/71'）
-  scope TEXT NOT NULL,                -- 'pre' | 'post' | 'button'
-  edge_type TEXT NOT NULL,            -- 'query'（getAPIQuery 跨表）| 'set'（setFieldValue 寫值）| 'external'（連外）
-  target_form_path TEXT,              -- query 專屬：解析後 form_path（補 account；非 query 為 NULL）
-  target_field_id TEXT,               -- set 專屬：被 setFieldValue 寫的 field_id
-  external_via TEXT,                  -- external 專屬：'http' | 'dbf' | 'callHtmlApp'
-  external_target TEXT,               -- external 專屬：url / host
-  resolved INTEGER NOT NULL DEFAULT 0, -- query：target 在不在 ragic_field_index 已知 form（1/0）
-  occur_count INTEGER NOT NULL DEFAULT 1, -- 同 (src,scope,type,target) 在 JS 出現次數
-  refreshed_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ragic_workflow_edge_src
-  ON ragic_workflow_edge (src_form_path);
-CREATE INDEX IF NOT EXISTS idx_ragic_workflow_edge_tgt_form
-  ON ragic_workflow_edge (target_form_path);
-CREATE INDEX IF NOT EXISTS idx_ragic_workflow_edge_type
-  ON ragic_workflow_edge (edge_type);
-`;
-
-// Workflow JS 原文：供 /dev 展開看完整 server-side workflow JS（每表每 scope 一筆）。
-// 跟 ragic_workflow_edge 同來源（.cache/*.js），analyze 一起 rebuild。原文較大（全量約 47MB），
-// 獨立表避免拖慢 edge 查詢；前端要看才拉單張。
-const RAGIC_WORKFLOW_SOURCE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS ragic_workflow_source (
-  form_path TEXT NOT NULL,
-  scope TEXT NOT NULL,                -- 'pre' | 'post' | 'button'
-  js TEXT NOT NULL,
-  char_count INTEGER NOT NULL,
-  refreshed_at TEXT NOT NULL,
-  PRIMARY KEY (form_path, scope)
-);
-`;
-
 async function rebuildFtsFromMain(db: Database): Promise<void> {
   await db.exec("DELETE FROM ragic_field_index_fts");
   await db.exec(
@@ -279,9 +200,6 @@ async function ensureFieldIndexActiveGeneration(db: Database): Promise<void> {
 
 export async function ensureRagicFieldIndexSchema(db: Database): Promise<void> {
   await db.exec(RAGIC_FIELD_INDEX_SCHEMA_SQL);
-  await db.exec(RAGIC_FIELD_EDGE_SCHEMA_SQL);
-  await db.exec(RAGIC_WORKFLOW_EDGE_SCHEMA_SQL);
-  await db.exec(RAGIC_WORKFLOW_SOURCE_SCHEMA_SQL);
   await ensureFieldIndexGenerationColumns(db);
   await ensureStateDocHashColumn(db);
   await ensureFieldIndexActiveGeneration(db);

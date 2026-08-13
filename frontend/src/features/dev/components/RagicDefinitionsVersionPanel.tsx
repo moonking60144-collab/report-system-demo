@@ -128,6 +128,21 @@ export function DevCommandBar({
         : presence?.error
           ? presence.error
           : "目前沒有其他 Dev definitions tab";
+  const snapshotRevision = state?.snapshot?.revision ?? null;
+  const snapshotShortRevision = snapshotRevision
+    ? snapshotRevision.slice("sha256:".length, "sha256:".length + 10)
+    : null;
+  const snapshotTitle = state?.snapshot
+    ? [
+        `revision: ${state.snapshot.revision}`,
+        `artifacts: ${state.snapshot.artifactCount.toLocaleString()}`,
+        state.snapshot.publishedAt
+          ? `published: ${new Date(state.snapshot.publishedAt).toLocaleString("zh-TW")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "目前 baseline 尚未建立可驗證快照";
   const pushAvailable = Boolean(status?.canPush || canPushBaselineWithAutoSync(status));
   const pushWillAutoSync = Boolean(
     status?.canAutoSyncPush || (!status?.canPush && canPushBaselineWithAutoSync(status))
@@ -135,7 +150,7 @@ export function DevCommandBar({
   return (
     <section className="ragic-defs__command">
       <div className="ragic-defs__command-title">
-        <strong>Definitions baseline</strong>
+        <strong>NUI GUI</strong>
         <code>{form?.formPath ?? "未選擇表單"}</code>
       </div>
       <div className="ragic-defs__command-current">
@@ -156,6 +171,12 @@ export function DevCommandBar({
         <div className="ragic-defs__command-status" aria-label="definitions 狀態">
           <span className={hasActionableGitDiff ? "is-dirty" : "is-clean"}>
             {hasActionableGitDiff ? "Git 有差異" : "Git 無問題"}
+          </span>
+          <span
+            className={snapshotRevision ? "is-clean" : "is-dirty"}
+            title={snapshotTitle}
+          >
+            {snapshotShortRevision ? `快照 ${snapshotShortRevision}` : "快照未建立"}
           </span>
           <span className={realtimeChipClass} title={realtime.message ?? undefined}>
             {realtimeChipText}
@@ -471,7 +492,16 @@ export function BaselineStatusBar({
                     {actionResult.result.summary.forms.toLocaleString()} 表單 ·{" "}
                     {actionResult.result.summary.fields.toLocaleString()} 欄 ·{" "}
                     {actionResult.result.summary.formulas.toLocaleString()} 公式 ·{" "}
-                    {actionResult.result.summary.workflows.toLocaleString()} workflow
+                    {actionResult.result.summary.workflows.toLocaleString()} workflow · 快照{" "}
+                    <code>
+                      {actionResult.result.summary.revision.slice(
+                        "sha256:".length,
+                        "sha256:".length + 10
+                      )}
+                    </code>
+                    {actionResult.result.summary.warnings.length > 0
+                      ? ` · 警告 ${actionResult.result.summary.warnings.length} 筆`
+                      : null}
                   </small>
                 ) : null}
                 {actionResult.type === "commit" &&

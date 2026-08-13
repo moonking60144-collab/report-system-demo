@@ -1374,11 +1374,13 @@ export function useWorkReportDetailInlineController({
           });
           setNotice({ type: "success", message: t("workReport:messages.detailUpdateQueued") });
         }
-      setEditingRowId(null);
-      setEditingRowDraft(null);
-      if (isCreatePlaceholderRow(row)) {
-        clearActiveRowEditLock();
-      }
+        setEditingRowId(null);
+        setEditingRowDraft(null);
+        if (isCreatePlaceholderRow(row)) {
+          clearActiveRowEditLock();
+        } else {
+          await releaseRowEditLock(row.rowId);
+        }
       } catch (error) {
         logDetailEvent("api", "inline-save-failed", getErrorMessage(error), {
           level: "error",

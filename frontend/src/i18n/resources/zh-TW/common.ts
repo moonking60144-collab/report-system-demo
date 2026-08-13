@@ -5,6 +5,12 @@ const commonZhTw = {
     zh: "中文",
     en: "English",
   },
+  subsystems: {
+    label: "子系統",
+    openMenu: "開啟子系統選單",
+    developerMode: "開發者模式",
+    meetingMinutes: "開會紀錄錄音系統",
+  },
   actions: {
     applyFilters: "套用篩選",
     clearFilters: "清除篩選",

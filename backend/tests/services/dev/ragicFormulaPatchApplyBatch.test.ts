@@ -27,6 +27,34 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
 
+async function readJson<T>(path: string): Promise<T> {
+  return JSON.parse(await readFile(path, "utf-8")) as T;
+}
+
+async function syncFixtureDefinitionCounts(
+  fixture: Awaited<ReturnType<typeof buildFixture>>
+): Promise<void> {
+  const counts = { forms: FORMS.length, fields: 0, formulas: 0, workflows: 0 };
+  for (const form of FORMS) {
+    const formDir = join(fixture.root, "forms", "default", "devtest", form.id);
+    const formDefinition = await readJson<Record<string, unknown>>(
+      join(formDir, "form.json")
+    );
+    const fields = await readJson<unknown[]>(join(formDir, "fields.json"));
+    const formulas = await readJson<unknown[]>(join(formDir, "formulas.json"));
+    counts.fields += fields.length;
+    counts.formulas += formulas.length;
+    await writeJson(join(formDir, "form.json"), {
+      ...formDefinition,
+      counts: { fields: fields.length, formulas: formulas.length, workflows: 0 },
+    });
+  }
+  const manifest = await readJson<Record<string, unknown>>(
+    join(fixture.root, "manifest.json")
+  );
+  await writeJson(join(fixture.root, "manifest.json"), { ...manifest, counts });
+}
+
 async function buildFixture() {
   const root = await mkdtemp(join(tmpdir(), "ragic-batch-test-"));
   const builderRoot = join(root, "builder");
@@ -35,7 +63,12 @@ async function buildFixture() {
   await writeJson(join(root, "manifest.json"), {
     schemaVersion: 1,
     namespaceFilter: { mode: "include", namespaces: ["default"] },
-    counts: { forms: FORMS.length, fields: 1, formulas: 1, workflows: 0 },
+    counts: {
+      forms: FORMS.length,
+      fields: FORMS.length,
+      formulas: FORMS.length,
+      workflows: 0,
+    },
   });
 
   for (const form of FORMS) {
@@ -122,6 +155,7 @@ async function reexportFromNui(
       },
     ]);
   }
+  await syncFixtureDefinitionCounts(fixture);
   return { stdout: "[test] exported", stderr: "" };
 }
 
@@ -533,6 +567,7 @@ test("批次套用：兄弟表欄位存在但沒有既有公式時可新增 f= a
   try {
     const form56Dir = join(fixture.root, "forms", "default", "devtest", "56");
     await writeJson(join(form56Dir, "formulas.json"), []);
+    await syncFixtureDefinitionCounts(fixture);
     const nui56Lines = Array.from({ length: 26 }, (_, index) => `# filler ${index + 1}`);
     nui56Lines[23] = "D,7,6,1036641,測試,text=1";
     await writeFile(

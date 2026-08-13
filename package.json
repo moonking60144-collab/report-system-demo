@@ -1,0 +1,12 @@
+{
+  "name": "ragic-report-local",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "bash ./scripts/run-frontend-local.sh",
+    "dev:backend": "bash ./scripts/run-backend-local.sh",
+    "dev": "concurrently -k -n FRONTEND,BACKEND -c cyan,magenta \"npm run dev:frontend\" \"npm run dev:backend\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4"
+  }
+}

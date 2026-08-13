@@ -1,20 +1,13 @@
 import { env } from "../../../config/env";
 import { HttpError } from "../../../utils/httpError";
+import type {
+  DevAiJsonProvider,
+  DevAiJsonRequest,
+} from "./devAiJsonProvider";
 
-export interface GoogleGeminiJsonRequest {
-  prompt: string;
-  schema: Record<string, unknown>;
-  model?: string;
-  thinkingLevel?: string;
-  maxOutputTokens?: number;
-  storeInteraction?: boolean;
-  signal?: AbortSignal;
-}
+export type GoogleGeminiJsonRequest = DevAiJsonRequest;
 
-export interface GoogleGeminiClient {
-  readonly model: string;
-  generateJsonText(request: GoogleGeminiJsonRequest): Promise<string>;
-}
+export type GoogleGeminiClient = DevAiJsonProvider;
 
 export interface GoogleGeminiClientConfig {
   apiKey: string;
@@ -114,6 +107,7 @@ export function createGoogleGeminiClient(
   fetchImpl: FetchLike = fetch
 ): GoogleGeminiClient {
   return {
+    name: "google",
     model: config.model,
     async generateJsonText(request) {
       if (!config.apiKey.trim()) {
@@ -143,8 +137,8 @@ export function createGoogleGeminiClient(
               store: request.storeInteraction ?? config.storeInteractions ?? false,
               input: request.prompt,
               generation_config: {
-                ...(request.thinkingLevel ?? config.thinkingLevel
-                  ? { thinking_level: request.thinkingLevel ?? config.thinkingLevel }
+                ...(request.effort ?? config.thinkingLevel
+                  ? { thinking_level: request.effort ?? config.thinkingLevel }
                   : {}),
                 ...(request.maxOutputTokens
                   ? { max_output_tokens: request.maxOutputTokens }

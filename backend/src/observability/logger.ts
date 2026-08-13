@@ -3,6 +3,7 @@ import { env } from "../config/env";
 
 // 開發模式下輸出人讀，production 輸出 JSON 行方便 log aggregation
 const isProd = env.NODE_ENV === "production";
+const isTest = env.NODE_ENV === "test";
 
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? (isProd ? "info" : "debug"),
@@ -12,7 +13,7 @@ export const logger = pino({
     paths: ["req.headers.authorization", "req.headers.cookie", "*.apiKey", "*.RAGIC_API_KEY"],
     remove: true,
   },
-  ...(isProd
+  ...(isProd || isTest
     ? {}
     : {
         transport: {

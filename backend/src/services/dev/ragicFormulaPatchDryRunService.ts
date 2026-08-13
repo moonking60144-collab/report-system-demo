@@ -57,7 +57,7 @@ export function maskSecrets(s: string): string {
     .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "***REDACTED-JWT***")
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-***REDACTED***")
     .replace(/AIza[A-Za-z0-9_-]{20,}/g, "AIza***REDACTED***")
-    .replace(/fdtw-ragic-callback-[A-Za-z0-9_-]+/g, "fdtw-ragic-callback-***REDACTED***");
+    .replace(/[A-Za-z0-9_-]+-ragic-callback-[A-Za-z0-9_-]+/g, "demo-ragic-callback-***REDACTED***");
 }
 
 export function normalizeFormulaForNuiStorage(formula: string): string {

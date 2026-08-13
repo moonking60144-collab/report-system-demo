@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meeting-stt:
+    name: Meeting STT
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/meeting-stt
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.12
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.11 --dev
+
+      - name: Test
+        run: uv run pytest
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      RAGIC_PROTOCOL: https
+      RAGIC_DOMAIN: example.invalid
+      RAGIC_API_KEY: ci-test-key
+      RAGIC_FORM_104_PATH: /default/forms8/104
+      RAGIC_FORM_104_TEST_PATH: /default/forms8/104
+      RAGIC_FORM_105_PATH: /default/forms8/105
+      RAGIC_FORM_105_TEST_PATH: /default/forms8/105
+      RAGIC_FORM_16_TEST_PATH: /default/c1/16
+      RAGIC_FORM_16_SAVE_ACTION_BUTTON_ID: "48"
+      RAGIC_FORM_16_WORK_ORDER_FIELD_ID: "1006365"
+      RAGIC_FORM_16_TYPE_FIELD_ID: "1012669"
+      RAGIC_FORM_16_PROCESS_FIELD_ID: "1002195"
+      RAGIC_FORM_16_DEP_FIELD_ID: "1002221"
+      RAGIC_FORM_16_PROD_TYPE_FIELD_ID: "1002191"
+      RAGIC_FORM_16_REMARK_FIELD_ID: "1002177"
+      RAGIC_FORM_16_DATE_FIELD_ID: "1002190"
+      RAGIC_SOURCE_MACHINE: /default/source/machines
+      RAGIC_SOURCE_OPERATOR: /default/source/operators
+      RAGIC_SOURCE_PROCESS: /default/source/processes
+      RAGIC_WRITE_TARGET: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

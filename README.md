@@ -1,10 +1,19 @@
-# 報工系統 — Demo 版
+# 工廠營運平台 — 完整技術 Demo
 
-> 內網生產用的工廠報工管理系統，原為自有部署，本 repo 已加入 **Demo Mode**：上游 no-code SaaS DB 替換成記憶體假倉，可以 zero-config 在本機完整啟動。
+> 這是從實際內網產品架構整理出的公開技術展示版。它不是單頁 UI mock，而是保留正式資料流、背景任務、SQLite read model、即時事件與錯誤治理的可執行系統；所有上游資料、Definitions、會議內容與公司環境值都改成 deterministic 合成 fixture。
 
 ![Demo screenshot](docs/demo-screenshot.png)
 
-技術棧：**React 19 + Vite 7 + AntD 6** 前端／**Express 4 + TypeScript 5.9 + Node 20 + SQLite** 後端。
+技術棧：**React 19 + Vite 7 + AntD 6** 前端／**Express 4 + TypeScript 5.9 + Node 20 + SQLite** 後端／可選的 **FastAPI + faster-whisper** 本機 STT service。
+
+目前公開 Demo 包含四個可獨立展示的子系統：
+
+| 子系統 | 可展示內容 |
+|---|---|
+| 報工與停機 | 工令列表、精確篩選、optimistic mutation、任務中心、同步、稽核、A4 PDF |
+| 效率報表 | 月報 CSV、分析 XLSX、版本化封存、retention cleanup |
+| Meeting | 瀏覽器錄音、分段上傳、背景音訊處理、逐字稿、會議記錄版本與錄音庫 |
+| Developer | 合成 Ragic Definitions、欄位檢索、provider-based Dev AI、snapshot source API |
 
 右下「故障模擬」panel 是 demo 專屬控制台，可即時注入 **上游失敗率 / 上游延遲 / 寫入時掉欄位** — 對應展示 circuit breaker / token bucket 排隊 / Form 16 write verifier 自動 rollback 三條防線。
 
@@ -26,11 +35,13 @@ npm install
 npm run dev
 ```
 
-打開 [http://localhost:5173](http://localhost:5173)，右上角會看到「DEMO MODE」徽章，列表已預載 80 筆假工令、約 400 筆報工列、150 筆停機紀錄。
+打開 [http://localhost:5173](http://localhost:5173)，右上角會看到「DEMO MODE」徽章，列表已預載 80 筆假工令、約 400 筆報工列與合成停機紀錄。左上子系統選單可切換報工、Meeting 與 Developer Mode。
 
 > 啟動時 80 筆工令與 6 條 linked source 表（機台 / 操作員 / 工序）會 deterministic 生成。重啟服務會回到初始 fixture。
 
-開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看欄位索引、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
+開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看公開合成 Definitions、欄位檢索、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
+
+Meeting 錄音入口在 [http://localhost:5173/meetings/audio-check](http://localhost:5173/meetings/audio-check)。Zero-config 模式保留錄音、chunk upload、processing job、library 與權限流程，但預設關閉 AI/STT provider，因此不需要第三方 API key。若要展示真實逐字稿，可依 [Meeting STT 說明](services/meeting-stt/README.md) 啟動隔離的 Python service，再於 backend env 啟用 provider。
 
 本版已同步主系統近期資料流調整：報工與 Form 16 寫入在 accepted 後先以 optimistic overlay 更新畫面，再由背景 worker、registry 與 read-model projection 確認結果；新增 / 單筆刪除 / 批次新增 / 批次刪除都能在任務中心追蹤與重送。列表也加入精確篩選、欄位設定與 A4 PDF 排程下載，PDF 可調字級並以機台區隔連續排列。
 
@@ -126,6 +137,22 @@ sequenceDiagram
 - **Record audit log**：每筆 update / delete 全量前後快照、操作人、時戳，前端 UI 可看歷史
 - **Form 16 孤兒清理**：背景週期掃 createdAt > 10 分鐘且符合條件的記錄做 soft delete（demo 下關閉）
 
+### 效率報表封存
+- Form 16 月報 CSV 與分析 XLSX 由同一個 archive service 產生，避免 UI 直接依賴臨時檔
+- SQLite metadata + immutable artifacts 保存來源列數、檔案大小、版本與衍生參數
+- 歷史 modal 可重下載既有版本；cleanup job 依 retention 刪除過期 artifact，Demo 預設保守關閉
+
+### Meeting 錄音與會議記錄
+- `MediaRecorder` 雙來源錄音、chunk sequence/idempotency、session owner cookie 與 library viewer code
+- 音訊處理、逐字稿、會議記錄拆成三種 durable SQLite jobs；worker 有 lease、heartbeat、retry 與 shutdown recovery
+- 逐字稿支援 10 分鐘 checkpoint、來源標識、全文搜尋與可編輯 document；會議記錄保存 HTML/JSON artifact 與版本
+- STT service 與報工 backend 隔離：Python 只接 canonical WAV，不讀 Ragic、報工 SQLite 或 Dev AI
+
+### Dev AI 與 Definitions
+- Provider factory 將 Google Gemini、MiniMax 與 disabled mode 收斂成同一 contract；Demo 預設 disabled，沒有 key 也能啟動
+- `ragic-definitions/` 只含兩張合成表單，讓搜尋、關聯欄位、formula 與 workflow explorer 有可操作資料
+- Definitions export 使用 child process、atomic swap、revision snapshot、ETag 與 compressed source API；不把原始公司 `.nui` 放進公開 repo
+
 ---
 
 ## Demo 模式運作
@@ -140,6 +167,9 @@ sequenceDiagram
 | 任務 registry | SQLite / JSON 持久化 | 同樣持久化到本機 `.cache` / Fly `/data` |
 | Form 16 連動 | 上游 workflow | mockClient.propagateForm16ToParentSubtable |
 | 預熱 / 自動同步 | 啟用 | full-cache prewarm 關閉；104 / 105 SQLite auto-sync 開啟 |
+| 效率報表封存 | SQLite + 檔案 storage | 使用本機 `.data`，保留完整 route/service/repository |
+| Meeting provider | local Whisper / MiniMax | 預設 disabled；錄音、job、library 仍可操作 |
+| Ragic Definitions | Builder `.nui` export | 公開合成 fixture，不讀公司 Builder 或正式資料 |
 
 實作：
 - **替換點**：[backend/src/ragic/client.ts](backend/src/ragic/client.ts) 出口處 `createRagicClient()` 依 `env.DEMO_MODE` 決定 export `RagicClient` 還是 in-memory mock client
@@ -167,6 +197,9 @@ report-system-demo/
 │   │   ├── services/         ← 業務邏輯（read/write/idempotency/recalculate）
 │   │   ├── infra/            ← scheduler / circuit breaker / retry
 │   │   ├── storage/sqlite/   ← SQLite read model
+│   │   ├── storage/meeting-minutes/ ← Meeting durable jobs / library
+│   │   ├── storage/efficiency-report/ ← 報表版本與 artifact metadata
+│   │   ├── workers/          ← Meeting lease/heartbeat worker
 │   │   ├── events/           ← SSE 推送
 │   │   ├── observability/    ← 日誌 / presence / boot state
 │   │   └── server.ts
@@ -180,8 +213,13 @@ report-system-demo/
 │       │   ├── components/   ← 表格 / 過濾 / 分析 / 同步進度
 │       │   ├── hooks/        ← 100+ 個專責 hook（dataPipeline / refresh / events）
 │       │   └── debug/        ← 開發者模式契約
+│       ├── features/meeting-minutes/ ← 錄音、逐字稿、會議記錄與 library
+│       ├── features/dev/     ← Definitions explorer 與 provider-based Dev AI
 │       └── i18n/             ← 中英繁簡
-└── scripts/                  ← 部署打包腳本
+├── services/meeting-stt/     ← 隔離的 FastAPI + faster-whisper service
+├── ragic-definitions/        ← 公開合成 Definitions fixture
+├── .github/workflows/ci.yml  ← Node/Python 三條驗證 job
+└── scripts/                  ← 本機啟動腳本
 ```
 
 ---
@@ -202,6 +240,16 @@ POST   /api/forms/104/reports/:entryId/batch-create  批次新增
 POST   /api/forms/104/reports/:entryId/batch-delete   批次刪除
 GET    /api/forms/104/tasks                    任務中心列表
 GET    /api/downtime/tasks                     停機新增任務列表
+GET    /api/downtime/efficiency-reports        效率報表版本歷史
+GET    /api/downtime/export/monthly-csv        產生／下載月報 CSV
+GET    /api/downtime/export/analysis-xlsx      產生／下載分析 XLSX
+POST   /api/meetings/recordings                建立錄音 session
+PUT    /api/meetings/recordings/:id/tracks/:source/chunks/:seq  冪等上傳音訊 chunk
+POST   /api/meetings/recordings/:id/process    建立音訊處理 job
+POST   /api/meetings/recordings/:id/transcriptions  建立逐字稿 job
+POST   /api/meetings/recordings/:id/minutes    建立會議記錄 job
+GET    /api/integrations/ragic-definitions/state     Definitions source revision
+GET    /api/integrations/ragic-definitions/snapshot  Definitions 壓縮快照
 POST   /api/forms/104/sync                     觸發 SQLite 同步
 GET    /api/events                             SSE 即時事件流
 GET    /api/health                             健康 + demoMode flag
@@ -211,3 +259,35 @@ Demo 下可直接 curl 試：
 ```bash
 curl http://localhost:3000/api/forms/104/reports?limit=5
 ```
+
+---
+
+## 驗證矩陣
+
+```bash
+# Backend：型別、編譯、route/service/storage/worker 測試
+cd backend
+npm run typecheck
+npm run build
+npm test
+
+# Frontend：lint、unit/component、production bundle
+cd ../frontend
+npm run lint
+npm test
+npm run build
+
+# Meeting STT：fake engine，不下載模型、不需要 GPU
+cd ../services/meeting-stt
+uv sync --locked --python 3.11 --dev
+uv run pytest
+```
+
+GitHub Actions 會分別執行 `meeting-stt`、`backend`、`frontend` 三個 job。測試 backend 強制使用獨立暫存 SQLite 與不可連線的假 upstream host，避免開發機 `.env`、本機服務或正式上游污染結果。
+
+## 公開版資料邊界
+
+- `DEMO_MODE=true` 時 upstream 一律走 [mockClient](backend/src/ragic/mockClient.ts)，不會呼叫公司 Ragic。
+- Repo 只包含合成工令、停機、Definitions 與一般化 IT SOP；不包含員工、客戶、料號、錄音、逐字稿或內網位址。
+- `.env`、SQLite、cache、錄音與生成 artifacts 都在 `.gitignore`；部署持久資料統一放 `/data`。
+- Meeting AI/STT 與 Dev AI provider 預設為 `disabled`。只有操作者明確提供自己的 endpoint/key 並啟用時才會呼叫外部 provider。

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createDevAiRouter } from "../../src/routes/devAi";
 import { errorHandler } from "../../src/middleware/errorHandler";
@@ -129,7 +129,9 @@ test("Dev AI route 可建立 thread 並送 message", async () => {
       return detail;
     },
     async sendMessage(actor, threadId, request) {
-      calls.push(`send:${actor}:${threadId}:${request.message}`);
+      calls.push(
+        `send:${actor}:${threadId}:${request.clientMessageId}:${request.message}`
+      );
       return result;
     },
     async archiveThread(actor, threadId) {
@@ -153,11 +155,105 @@ test("Dev AI route 可建立 thread 並送 message", async () => {
     const sendRes = await fetch(`${baseUrl}/api/dev/ai/threads/thread-1/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ message: "你好" }),
+      body: JSON.stringify({
+        clientMessageId: "message-route-001",
+        message: "你好",
+      }),
     });
     assert.equal(sendRes.status, 200);
     assert.equal((await sendRes.json()).data.intent, "general");
   });
 
-  assert.deepEqual(calls, ["create:dev-user:auto", "send:dev-user:thread-1:你好"]);
+  assert.deepEqual(calls, [
+    "create:dev-user:auto",
+    "send:dev-user:thread-1:message-route-001:你好",
+  ]);
+});
+
+test("Dev AI message route 缺 clientMessageId 時不呼叫 service", async () => {
+  let sendCalled = false;
+  const service: DevAiThreadService = {
+    async createThread() { return thread(); },
+    async listThreads() { return []; },
+    async getThreadDetail() { throw new Error("unused"); },
+    async sendMessage() {
+      sendCalled = true;
+      throw new Error("must not be called");
+    },
+    async archiveThread() { return thread(); },
+  };
+
+  await withServer(service, async (baseUrl) => {
+    const response = await fetch(
+      `${baseUrl}/api/dev/ai/threads/thread-1/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${VALID_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: "缺少冪等鍵" }),
+      }
+    );
+    assert.equal(response.status, 400);
+    const payload = (await response.json()) as { error: { code: string } };
+    assert.equal(payload.error.code, "DEV_AI_CLIENT_MESSAGE_ID_REQUIRED");
+  });
+  assert.equal(sendCalled, false);
+});
+
+test("Dev AI message request 中斷時會 abort 尚未完成的 provider 工作", async () => {
+  let observedSignal: AbortSignal | undefined;
+  let markStarted!: () => void;
+  let markAborted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const aborted = new Promise<void>((resolve) => { markAborted = resolve; });
+  const service: DevAiThreadService = {
+    async createThread() { return thread(); },
+    async listThreads() { return []; },
+    async getThreadDetail() { throw new Error("unused"); },
+    async sendMessage(_actor, _threadId, _request, options) {
+      observedSignal = options?.signal;
+      markStarted();
+      if (!observedSignal) throw new Error("missing abort signal");
+      return new Promise<DevAiSendMessageResult>((_resolve, reject) => {
+        observedSignal?.addEventListener(
+          "abort",
+          () => {
+            markAborted();
+            reject(new DOMException("aborted", "AbortError"));
+          },
+          { once: true }
+        );
+      });
+    },
+    async archiveThread() { return thread(); },
+  };
+
+  await withServer(service, async (baseUrl) => {
+    const url = new URL(`${baseUrl}/api/dev/ai/threads/thread-1/messages`);
+    const body = JSON.stringify({
+      clientMessageId: "message-route-abort-001",
+      message: "請產生長回答",
+    });
+    const request = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${VALID_TOKEN}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    });
+    request.on("error", () => {});
+    request.end(body);
+
+    await started;
+    assert.ok(observedSignal);
+    request.destroy();
+    await aborted;
+    assert.equal(observedSignal.aborted, true);
+  });
 });

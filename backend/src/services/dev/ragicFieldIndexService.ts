@@ -298,9 +298,6 @@ export function createRagicFieldIndexService(options?: {
               totalFields: counts.totalFields,
               elapsedMs: Date.now() - startedAt,
             });
-            // 主索引沒變 → 邊通常也沒變，不重算（保留 skip 的省時）。
-            // 唯一例外：首次升級邊表還空，補建一次。
-            await rebuildEdgesIfEmpty(repository, skippedRefreshedAt);
             resetProgress();
             return counts;
           }
@@ -351,8 +348,6 @@ export function createRagicFieldIndexService(options?: {
           totalFields: counts.totalFields,
           warnings: parsed.health.warnings.length,
         });
-        // 主索引已換新 → 依賴邊一定重建（衍生資料，失敗不影響主 refresh）
-        await rebuildEdgesSafely(repository, refreshedAt);
         resetProgress();
         return counts;
       } catch (error) {
@@ -399,50 +394,6 @@ function buildParserHealthError(health: ParseHealth): Error {
   );
 }
 
-/**
- * 重建依賴邊。邊是衍生資料：失敗只 log，不讓主索引 refresh 算失敗
- * （主索引已成功寫入，邊缺了下一次 refresh 會補）。
- */
-async function rebuildEdgesSafely(
-  repository: RagicFieldIndexRepository,
-  refreshedAt: string
-): Promise<void> {
-  try {
-    const r = await repository.rebuildEdges(refreshedAt);
-    log.info({
-      event: "edges.rebuilt",
-      totalEdges: r.totalEdges,
-      dataEdges: r.dataEdges,
-      sideEffectEdges: r.sideEffectEdges,
-      resolvedEdges: r.resolvedEdges,
-      brokenEdges: r.brokenEdges,
-    });
-  } catch (error) {
-    log.warn({
-      event: "edges.rebuild-failed",
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-/** 邊表為空時才重建（升級後首次 refresh 剛好 hash-skip 的補救路徑）*/
-async function rebuildEdgesIfEmpty(
-  repository: RagicFieldIndexRepository,
-  refreshedAt: string
-): Promise<void> {
-  try {
-    const stats = await repository.getEdgeStats();
-    if (stats.totalData + stats.totalSideEffect === 0) {
-      await rebuildEdgesSafely(repository, refreshedAt);
-    }
-  } catch (error) {
-    log.warn({
-      event: "edges.rebuild-check-failed",
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
 let docHttpClient: AxiosInstance | null = null;
 const DOC_FETCH_TIMEOUT_MS = 60_000;
 
@@ -479,60 +430,65 @@ function getDocHttpClient(): AxiosInstance {
  * CanceledError，外層 service 重新包成 AbortError 統一處理。
  */
 async function defaultFetchDocHtml(signal?: AbortSignal): Promise<string> {
-  return ragicRequestScheduler.runRead(
-    "ragic-doc-fetch",
-    () =>
-      runWithReadRetry(
-        async () => {
-          try {
-            const res = await getDocHttpClient().get("/sims/doc.jsp?a=default", {
-              signal,
-              onDownloadProgress: (event) => {
-                const loaded =
-                  typeof event.loaded === "number" && Number.isFinite(event.loaded)
-                    ? event.loaded
-                    : 0;
-                const total =
-                  typeof event.total === "number" &&
-                  Number.isFinite(event.total) &&
-                  event.total > 0
-                    ? event.total
-                    : null;
-                patchProgress({
-                  phase: "downloading",
-                  downloadedBytes: loaded,
-                  totalBytes: total,
-                });
-              },
-            });
-            // 診斷：確認 Ragic doc.jsp 回傳有沒有 gzip。axios 已預設
-            // decompress:true + 送 Accept-Encoding: gzip，client 端無得再優化；
-            // 這行 log 揭露 server 端到底有沒有壓縮，決定 fetch 那段是不是極限。
-            log.info({
-              event: "doc-fetch.transport",
-              contentEncoding: res.headers?.["content-encoding"] ?? "(none)",
-              contentLength: res.headers?.["content-length"] ?? "(none)",
-              decodedBytes: Buffer.byteLength(String(res.data ?? ""), "utf8"),
-            });
-            return String(res.data ?? "");
-          } catch (error) {
-            // axios 把 abort 包成 CanceledError，name = 'CanceledError'。
-            // 統一翻譯成 DOMException AbortError，外層用 name 判斷
-            if (axios.isCancel(error)) {
-              throw new DOMException("refresh aborted", "AbortError");
-            }
-            throw error;
-          }
+  return runRagicDocFetchWithRetry(async () => {
+    try {
+      const res = await getDocHttpClient().get("/sims/doc.jsp?a=default", {
+        signal,
+        onDownloadProgress: (event) => {
+          const loaded =
+            typeof event.loaded === "number" && Number.isFinite(event.loaded)
+              ? event.loaded
+              : 0;
+          const total =
+            typeof event.total === "number" &&
+            Number.isFinite(event.total) &&
+            event.total > 0
+              ? event.total
+              : null;
+          patchProgress({
+            phase: "downloading",
+            downloadedBytes: loaded,
+            totalBytes: total,
+          });
         },
-        {
-          label: "ragic-doc-fetch",
-          priority: "background",
-          timeoutMs: DOC_FETCH_TIMEOUT_MS,
-          getSchedulerStats: () => ragicRequestScheduler.getStats(),
-        }
-      ),
-    "background"
-  );
+      });
+      log.info({
+        event: "doc-fetch.transport",
+        contentEncoding: res.headers?.["content-encoding"] ?? "(none)",
+        contentLength: res.headers?.["content-length"] ?? "(none)",
+        decodedBytes: Buffer.byteLength(String(res.data ?? ""), "utf8"),
+      });
+      return String(res.data ?? "");
+    } catch (error) {
+      if (axios.isCancel(error)) {
+        throw new DOMException("refresh aborted", "AbortError");
+      }
+      throw error;
+    }
+  });
+}
+
+export function runRagicDocFetchWithRetry<T>(
+  attempt: () => Promise<T>,
+  options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    runScheduledAttempt?: (attempt: () => Promise<T>) => Promise<T>;
+  } = {}
+): Promise<T> {
+  const runScheduledAttempt =
+    options.runScheduledAttempt ??
+    ((scheduledAttempt: () => Promise<T>) =>
+      ragicRequestScheduler.runRead("ragic-doc-fetch", scheduledAttempt, "background"));
+
+  return runWithReadRetry(() => runScheduledAttempt(attempt), {
+    label: "ragic-doc-fetch",
+    priority: "background",
+    timeoutMs: DOC_FETCH_TIMEOUT_MS,
+    maxRetries: options.maxRetries,
+    baseDelayMs: options.baseDelayMs,
+    getSchedulerStats: () => ragicRequestScheduler.getStats(),
+  });
 }
 
 export const ragicFieldIndexService = createRagicFieldIndexService();

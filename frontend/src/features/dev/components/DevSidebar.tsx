@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import {
+  AudioOutlined,
   ApartmentOutlined,
   BranchesOutlined,
   ClusterOutlined,
@@ -183,6 +184,8 @@ function devToolIcon(id: string) {
       return <TableOutlined />;
     case "it-sop":
       return <FileTextOutlined />;
+    case "meeting-libraries":
+      return <AudioOutlined />;
     case "entities":
       return <DatabaseOutlined />;
     case "matrix":
@@ -198,6 +201,6 @@ function devToolIcon(id: string) {
 
 function shortSidebarLabel(label: string): string {
   if (label.startsWith("JS")) return "JS";
-  if (label.startsWith("Definitions")) return "DB";
+  if (label.startsWith("NUI")) return "NUI";
   return Array.from(label).slice(0, 2).join("");
 }

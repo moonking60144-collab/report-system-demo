@@ -13,7 +13,7 @@ import {
 const SAMPLE_HTML = `
 <html><body>
 <h3><span style='color:#888;'>表單:</span>[104] 工令單</h3>
-表單網址:<a href='https://fdtw.app/default/forms8/104' target='_blank'>...</a><br/>
+表單網址:<a href='https://demo.local/default/forms8/104' target='_blank'>...</a><br/>
 <h4>主表單欄位</h4>
 主表單Key: 1005987<table class='paramTable'>
 <tr><th>欄位位置</th><th>對應欄位</th><th>欄位編號</th><th>欄位型態</th><th>備註</th></tr>

@@ -5,7 +5,7 @@
  * - 只攔 mutation：POST / PUT / DELETE / PATCH（GET 由 ragicRequestScheduler 的 token bucket 顧）
  * - 只盯需要保護的 prefix（/api/forms/*、/api/downtime/*）
  *   health / system-notice/login / __demo 跳過 — 健康檢查與 demo control plane 不該被限流
- * - per-IP 30 次/分鐘；超過回 429 + Retry-After
+ * - 業務寫入 per-IP 30 次/分鐘；editing presence 心跳獨立為 300 次/分鐘
  * - 純記憶體 Map：扛不住多 instance，但 demo Fly 機器 scale=1 夠用；不引額外 npm 套件
  * - 過期 entry 不會回收 → 加 lazy cleanup（每次寫入順手清掉舊的）
  *
@@ -21,6 +21,7 @@ interface RateLimitBucket {
 
 const WINDOW_MS = 60 * 1000;
 const MAX_PER_WINDOW = 30;
+const PRESENCE_MAX_PER_WINDOW = 300;
 
 /** 過期條目超過這個量才觸發 sweep，避免每個請求都 O(N) */
 const CLEANUP_THRESHOLD = 1000;
@@ -40,6 +41,13 @@ const SKIP_PREFIXES: readonly string[] = [
 ];
 
 const buckets = new Map<string, RateLimitBucket>();
+
+function resolveRateLimitPolicy(req: Request): { scope: string; maxPerWindow: number } {
+  if (req.path.endsWith("/editing-presence")) {
+    return { scope: "editing-presence", maxPerWindow: PRESENCE_MAX_PER_WINDOW };
+  }
+  return { scope: "mutation", maxPerWindow: MAX_PER_WINDOW };
+}
 
 function shouldEnforce(req: Request): boolean {
   if (!MUTATION_METHODS.has(req.method.toUpperCase())) return false;
@@ -76,31 +84,36 @@ export function demoRateLimit(req: Request, res: Response, next: NextFunction): 
   lazyCleanup(now);
 
   const ip = resolveClientIp(req);
-  let bucket = buckets.get(ip);
+  const policy = resolveRateLimitPolicy(req);
+  const bucketKey = `${policy.scope}:${ip}`;
+  let bucket = buckets.get(bucketKey);
   if (!bucket || bucket.resetAt <= now) {
     bucket = { count: 0, resetAt: now + WINDOW_MS };
-    buckets.set(ip, bucket);
+    buckets.set(bucketKey, bucket);
   }
 
   bucket.count++;
 
-  if (bucket.count > MAX_PER_WINDOW) {
+  if (bucket.count > policy.maxPerWindow) {
     const retryAfterSec = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
     res.setHeader("Retry-After", String(retryAfterSec));
-    res.setHeader("X-RateLimit-Limit", String(MAX_PER_WINDOW));
+    res.setHeader("X-RateLimit-Limit", String(policy.maxPerWindow));
     res.setHeader("X-RateLimit-Remaining", "0");
     res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
     res.status(429).json({
       error: {
         code: "DEMO_RATE_LIMIT",
-        message: `Demo 限流：每分鐘最多 ${MAX_PER_WINDOW} 次寫入，請 ${retryAfterSec} 秒後再試`,
+        message: `Demo 限流：每分鐘最多 ${policy.maxPerWindow} 次${policy.scope === "editing-presence" ? "編輯狀態更新" : "寫入"}，請 ${retryAfterSec} 秒後再試`,
       },
     });
     return;
   }
 
-  res.setHeader("X-RateLimit-Limit", String(MAX_PER_WINDOW));
-  res.setHeader("X-RateLimit-Remaining", String(Math.max(0, MAX_PER_WINDOW - bucket.count)));
+  res.setHeader("X-RateLimit-Limit", String(policy.maxPerWindow));
+  res.setHeader(
+    "X-RateLimit-Remaining",
+    String(Math.max(0, policy.maxPerWindow - bucket.count))
+  );
   res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
   next();
 }

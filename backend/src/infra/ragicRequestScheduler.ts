@@ -1,7 +1,10 @@
+import { AxiosError } from "axios";
 import { env } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { CircuitBreaker, type CircuitState } from "./circuitBreaker";
 import { TokenBucket, TokenBucketAcquireTimeoutError } from "./tokenBucket";
+
+const NON_COUNTED_RAGIC_HTTP_STATUSES = new Set([400, 401, 403, 404, 409, 422]);
 
 /**
  * 哪些 error 算「Ragic upstream failure」要進 breaker，哪些是 local backpressure 不算。
@@ -10,6 +13,12 @@ import { TokenBucket, TokenBucketAcquireTimeoutError } from "./tokenBucket";
 function isCountedAsRagicFailure(err: unknown): boolean {
   // Local rate limiter timeout：上游可能完全健康，只是我們自己排太擠
   if (err instanceof TokenBucketAcquireTimeoutError) return false;
+  if (
+    err instanceof AxiosError &&
+    NON_COUNTED_RAGIC_HTTP_STATUSES.has(err.response?.status ?? 0)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -29,6 +38,11 @@ interface ConcurrencyLaneMetrics {
 }
 
 export type RagicReadPriority = "user" | "mutation" | "sync" | "background";
+
+interface RagicRequestSchedulerOptions {
+  globalRatePerSecond?: number;
+  globalBurstCapacity?: number;
+}
 
 export interface RagicRequestSchedulerStats {
   readActive: number;
@@ -68,7 +82,7 @@ export interface RagicRequestSchedulerStats {
   syncCircuitState: CircuitState;
   backgroundCircuitState: CircuitState;
   writeCircuitState: CircuitState;
-  // 相容舊 health payload 的 aggregate token bucket 指標。
+  // 所有 lane 共用的真正全域 token bucket 指標。
   globalRateLimiterAvailableTokens: number;
   globalRateLimiterPendingWaiters: number;
   globalRateLimiterCapacity: number;
@@ -258,7 +272,7 @@ class ConcurrencyLane {
   }
 }
 
-class RagicRequestScheduler {
+export class RagicRequestScheduler {
   // user lane：使用者請求，最高優先，最大 concurrency
   private readonly userLane = new ConcurrencyLane(
     "user",
@@ -303,6 +317,14 @@ class RagicRequestScheduler {
     refillPerSecond: env.RAGIC_BACKGROUND_RATE_PER_SECOND,
     capacity: env.RAGIC_BACKGROUND_BURST_CAPACITY,
   });
+  private readonly globalRateLimiter: TokenBucket;
+
+  constructor(options: RagicRequestSchedulerOptions = {}) {
+    this.globalRateLimiter = new TokenBucket({
+      refillPerSecond: options.globalRatePerSecond ?? env.RAGIC_GLOBAL_RATE_PER_SECOND,
+      capacity: options.globalBurstCapacity ?? env.RAGIC_GLOBAL_BURST_CAPACITY,
+    });
+  }
 
   async runRead<T>(
     _label: string,
@@ -312,11 +334,12 @@ class RagicRequestScheduler {
     const lane = this.pickReadLane(priority);
     return lane.run(
       async () => {
-        // 取得 lane slot 後再過全域 rate limiter，OPEN circuit breaker 已 fast-fail
+        // 取得 lane slot 後再過 lane 與 global rate limiter，OPEN circuit breaker 已 fast-fail
         // 不必白等 rate limiter token。
         // Timeout 用 RAGIC_QUEUE_TIMEOUT_MS：lane slot 已被佔用，等 token 太久就放棄
         // 避免 lane.active 被 token-bucket-waiter 長期佔住失真。
         await this.pickRateLimiter(priority).acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
+        await this.globalRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
         return task();
       },
       // TokenBucketAcquireTimeoutError 是 local backpressure，不算 Ragic failure
@@ -328,6 +351,7 @@ class RagicRequestScheduler {
     return this.writeLane.run(
       async () => {
         await this.foregroundRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
+        await this.globalRateLimiter.acquire({ timeoutMs: env.RAGIC_QUEUE_TIMEOUT_MS });
         return task();
       },
       { isFailureCounted: isCountedAsRagicFailure }
@@ -336,7 +360,7 @@ class RagicRequestScheduler {
 
   /** 給 health endpoint / monitor 用 */
   getRateLimiterStats(): ReturnType<TokenBucket["getStats"]> {
-    return this.getAggregateRateLimiterStats();
+    return this.globalRateLimiter.getStats();
   }
 
   private pickReadLane(priority: RagicReadPriority): ConcurrencyLane {
@@ -356,21 +380,6 @@ class RagicRequestScheduler {
     return this.foregroundRateLimiter;
   }
 
-  private getAggregateRateLimiterStats(): ReturnType<TokenBucket["getStats"]> {
-    const foreground = this.foregroundRateLimiter.getStats();
-    const mutation = this.mutationRateLimiter.getStats();
-    const background = this.backgroundRateLimiter.getStats();
-    return {
-      availableTokens:
-        foreground.availableTokens + mutation.availableTokens + background.availableTokens,
-      pendingWaiters:
-        foreground.pendingWaiters + mutation.pendingWaiters + background.pendingWaiters,
-      capacity: foreground.capacity + mutation.capacity + background.capacity,
-      refillPerSecond:
-        foreground.refillPerSecond + mutation.refillPerSecond + background.refillPerSecond,
-    };
-  }
-
   getStats(): RagicRequestSchedulerStats {
     const read = this.userLane.getStats();
     const mutation = this.mutationLane.getStats();
@@ -385,7 +394,7 @@ class RagicRequestScheduler {
     const foregroundRateLimiter = this.foregroundRateLimiter.getStats();
     const mutationRateLimiter = this.mutationRateLimiter.getStats();
     const backgroundRateLimiter = this.backgroundRateLimiter.getStats();
-    const aggregateRateLimiter = this.getAggregateRateLimiterStats();
+    const globalRateLimiter = this.globalRateLimiter.getStats();
 
     return {
       readActive: read.active,
@@ -423,10 +432,10 @@ class RagicRequestScheduler {
       syncCircuitState: sync.circuitState,
       backgroundCircuitState: background.circuitState,
       writeCircuitState: write.circuitState,
-      globalRateLimiterAvailableTokens: aggregateRateLimiter.availableTokens,
-      globalRateLimiterPendingWaiters: aggregateRateLimiter.pendingWaiters,
-      globalRateLimiterCapacity: aggregateRateLimiter.capacity,
-      globalRateLimiterRefillPerSecond: aggregateRateLimiter.refillPerSecond,
+      globalRateLimiterAvailableTokens: globalRateLimiter.availableTokens,
+      globalRateLimiterPendingWaiters: globalRateLimiter.pendingWaiters,
+      globalRateLimiterCapacity: globalRateLimiter.capacity,
+      globalRateLimiterRefillPerSecond: globalRateLimiter.refillPerSecond,
       foregroundRateLimiterAvailableTokens: foregroundRateLimiter.availableTokens,
       foregroundRateLimiterPendingWaiters: foregroundRateLimiter.pendingWaiters,
       foregroundRateLimiterCapacity: foregroundRateLimiter.capacity,

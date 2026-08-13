@@ -67,6 +67,7 @@ function parseCreateThreadBody(body: {
 }
 
 function parseSendMessageBody(body: {
+  clientMessageId?: unknown;
   message?: unknown;
   mode?: unknown;
   speedMode?: unknown;
@@ -74,10 +75,20 @@ function parseSendMessageBody(body: {
   includeKnowledge?: unknown;
   includeDefinitions?: unknown;
 }): DevAiSendMessageRequest {
+  const clientMessageId =
+    typeof body.clientMessageId === "string" ? body.clientMessageId.trim() : "";
+  if (!clientMessageId) {
+    throw new HttpError(
+      400,
+      "缺少 clientMessageId",
+      "DEV_AI_CLIENT_MESSAGE_ID_REQUIRED"
+    );
+  }
   const message = typeof body.message === "string" ? body.message : "";
   const mode = parseMode(body.mode);
   const speedMode = parseSpeedMode(body.speedMode);
   return {
+    clientMessageId,
     message,
     ...(mode ? { mode } : {}),
     ...(speedMode ? { speedMode } : {}),
@@ -149,16 +160,37 @@ export function createDevAiRouter(deps: DevAiRouterDeps = {}): Router {
   router.post(
     "/threads/:threadId/messages",
     asyncHandler(async (req, res) => {
-      const result = await threadService.sendMessage(
-        devActor(res.locals),
-        req.params.threadId,
-        parseSendMessageBody(req.body as Parameters<typeof parseSendMessageBody>[0]),
-        {
-          clientId: String(req.header("x-debug-client-id") ?? "").trim() || null,
-          tabId: String(req.header("x-debug-tab-id") ?? "").trim() || null,
-        }
-      );
-      res.json({ data: result });
+      const abortController = new AbortController();
+      let responseFinished = false;
+      const onFinish = () => {
+        responseFinished = true;
+      };
+      const onClose = () => {
+        if (!responseFinished) abortController.abort();
+      };
+      res.once("finish", onFinish);
+      res.once("close", onClose);
+
+      try {
+        const result = await threadService.sendMessage(
+          devActor(res.locals),
+          req.params.threadId,
+          parseSendMessageBody(req.body as Parameters<typeof parseSendMessageBody>[0]),
+          {
+            clientId: String(req.header("x-debug-client-id") ?? "").trim() || null,
+            tabId: String(req.header("x-debug-tab-id") ?? "").trim() || null,
+            signal: abortController.signal,
+          }
+        );
+        if (abortController.signal.aborted || res.writableEnded) return;
+        res.json({ data: result });
+      } catch (error) {
+        if (abortController.signal.aborted) return;
+        throw error;
+      } finally {
+        res.removeListener("finish", onFinish);
+        res.removeListener("close", onClose);
+      }
     })
   );
 

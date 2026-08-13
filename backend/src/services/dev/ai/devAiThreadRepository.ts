@@ -7,6 +7,7 @@ import { env } from "../../../config/env";
 import type {
   DevAiMessageIntent,
   DevAiMessageRole,
+  DevAiSendMessageResult,
   DevAiThread,
   DevAiThreadArtifact,
   DevAiThreadContext,
@@ -53,6 +54,30 @@ interface ArtifactRow {
   created_at: string;
 }
 
+interface MessageRequestRow {
+  owner_actor: string;
+  thread_id: string;
+  client_message_id: string;
+  request_fingerprint: string;
+  status: "pending" | "completed" | "failed";
+  result_json: string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DevAiMessageRequestRecord {
+  ownerActor: string;
+  threadId: string;
+  clientMessageId: string;
+  requestFingerprint: string;
+  status: "pending" | "completed" | "failed";
+  result: DevAiSendMessageResult | null;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CreateThreadInput {
   ownerActor: string;
   title: string;
@@ -89,6 +114,34 @@ export interface DevAiThreadRepository {
   listArtifacts(ownerActor: string, threadId: string, limit?: number): Promise<DevAiThreadArtifact[]>;
   appendMessage(input: AppendMessageInput): Promise<DevAiThreadMessage>;
   appendArtifact(input: AppendArtifactInput): Promise<DevAiThreadArtifact>;
+  getMessageRequest(params: {
+    ownerActor: string;
+    threadId: string;
+    clientMessageId: string;
+  }): Promise<DevAiMessageRequestRecord | null>;
+  startMessageRequest(params: {
+    ownerActor: string;
+    threadId: string;
+    clientMessageId: string;
+    requestFingerprint: string;
+    now: string;
+  }): Promise<DevAiMessageRequestRecord>;
+  completeMessageRequest(params: {
+    ownerActor: string;
+    threadId: string;
+    clientMessageId: string;
+    requestFingerprint: string;
+    result: DevAiSendMessageResult;
+    now: string;
+  }): Promise<void>;
+  failMessageRequest(params: {
+    ownerActor: string;
+    threadId: string;
+    clientMessageId: string;
+    requestFingerprint: string;
+    errorCode: string | null;
+    now: string;
+  }): Promise<void>;
   updateThreadAfterMessage(params: {
     ownerActor: string;
     threadId: string;
@@ -195,6 +248,28 @@ function mapArtifact(row: ArtifactRow): DevAiThreadArtifact {
   };
 }
 
+function mapMessageRequest(row: MessageRequestRow): DevAiMessageRequestRecord {
+  let result: DevAiSendMessageResult | null = null;
+  if (row.result_json) {
+    try {
+      result = JSON.parse(row.result_json) as DevAiSendMessageResult;
+    } catch {
+      result = null;
+    }
+  }
+  return {
+    ownerActor: row.owner_actor,
+    threadId: row.thread_id,
+    clientMessageId: row.client_message_id,
+    requestFingerprint: row.request_fingerprint,
+    status: row.status,
+    result,
+    errorCode: row.error_code,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 async function initializeSchema(db: Database): Promise<void> {
   await db.exec(`
     PRAGMA journal_mode=WAL;
@@ -244,12 +319,28 @@ async function initializeSchema(db: Database): Promise<void> {
       FOREIGN KEY(thread_id) REFERENCES dev_ai_threads(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS dev_ai_message_requests (
+      owner_actor TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      client_message_id TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result_json TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(owner_actor, thread_id, client_message_id),
+      FOREIGN KEY(thread_id) REFERENCES dev_ai_threads(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_dev_ai_threads_owner_updated
       ON dev_ai_threads(owner_actor, archived_at, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_dev_ai_messages_thread_created
       ON dev_ai_messages(owner_actor, thread_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_dev_ai_artifacts_thread
       ON dev_ai_message_artifacts(thread_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_dev_ai_message_requests_thread_updated
+      ON dev_ai_message_requests(owner_actor, thread_id, updated_at DESC);
   `);
 
   const columns = await db.all<Array<{ name: string }>>("PRAGMA table_info(dev_ai_threads)");
@@ -403,6 +494,79 @@ export function createDevAiThreadRepository(
       return mapArtifact(row as ArtifactRow);
     },
 
+    async getMessageRequest(params) {
+      const db = await getDb();
+      const row = await db.get<MessageRequestRow>(
+        `SELECT * FROM dev_ai_message_requests
+         WHERE owner_actor = ? AND thread_id = ? AND client_message_id = ?`,
+        params.ownerActor,
+        params.threadId,
+        params.clientMessageId
+      );
+      return row ? mapMessageRequest(row) : null;
+    },
+
+    async startMessageRequest(params) {
+      const db = await getDb();
+      await db.run(
+        `INSERT INTO dev_ai_message_requests (
+          owner_actor, thread_id, client_message_id, request_fingerprint,
+          status, result_json, error_code, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+        ON CONFLICT(owner_actor, thread_id, client_message_id) DO UPDATE SET
+          status = 'pending',
+          result_json = NULL,
+          error_code = NULL,
+          updated_at = excluded.updated_at
+        WHERE dev_ai_message_requests.status <> 'completed'
+          AND dev_ai_message_requests.request_fingerprint = excluded.request_fingerprint`,
+        params.ownerActor,
+        params.threadId,
+        params.clientMessageId,
+        params.requestFingerprint,
+        params.now,
+        params.now
+      );
+      const row = await this.getMessageRequest(params);
+      if (!row) throw new Error("Dev AI message request reservation was not persisted");
+      return row;
+    },
+
+    async completeMessageRequest(params) {
+      const db = await getDb();
+      const updated = await db.run(
+        `UPDATE dev_ai_message_requests
+         SET status = 'completed', result_json = ?, error_code = NULL, updated_at = ?
+         WHERE owner_actor = ? AND thread_id = ? AND client_message_id = ?
+           AND request_fingerprint = ? AND status = 'pending'`,
+        JSON.stringify(params.result),
+        params.now,
+        params.ownerActor,
+        params.threadId,
+        params.clientMessageId,
+        params.requestFingerprint
+      );
+      if (updated.changes !== 1) {
+        throw new Error("Dev AI message request completion state did not match");
+      }
+    },
+
+    async failMessageRequest(params) {
+      const db = await getDb();
+      await db.run(
+        `UPDATE dev_ai_message_requests
+         SET status = 'failed', result_json = NULL, error_code = ?, updated_at = ?
+         WHERE owner_actor = ? AND thread_id = ? AND client_message_id = ?
+           AND request_fingerprint = ? AND status = 'pending'`,
+        params.errorCode,
+        params.now,
+        params.ownerActor,
+        params.threadId,
+        params.clientMessageId,
+        params.requestFingerprint
+      );
+    },
+
     async updateThreadAfterMessage(params) {
       const db = await getDb();
       const context = params.context ? normalizeContext(params.context) : null;
@@ -469,6 +633,7 @@ export function createDevAiThreadRepository(
       if (!thread) return;
       const maxMessages = Math.max(1, Math.trunc(params.maxMessages));
       const maxArtifacts = Math.max(1, Math.trunc(params.maxArtifacts));
+      const maxRequests = Math.max(1, Math.floor(maxMessages / 2));
       await db.run(
         `DELETE FROM dev_ai_message_artifacts
          WHERE thread_id = ?
@@ -499,6 +664,21 @@ export function createDevAiThreadRepository(
         maxMessages,
         thread.summaryMessageId,
         thread.summaryMessageId
+      );
+      await db.run(
+        `DELETE FROM dev_ai_message_requests
+         WHERE owner_actor = ? AND thread_id = ? AND status <> 'pending'
+           AND client_message_id NOT IN (
+             SELECT client_message_id FROM dev_ai_message_requests
+             WHERE owner_actor = ? AND thread_id = ?
+             ORDER BY updated_at DESC
+             LIMIT ?
+           )`,
+        params.ownerActor,
+        params.threadId,
+        params.ownerActor,
+        params.threadId,
+        maxRequests
       );
     },
 

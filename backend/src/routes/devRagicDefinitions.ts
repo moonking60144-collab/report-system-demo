@@ -199,6 +199,7 @@ function parseDevAiChatBody(body: {
   mode?: unknown;
   speedMode?: unknown;
   formPath?: unknown;
+  fieldId?: unknown;
   includeDefinitions?: unknown;
   includeKnowledge?: unknown;
   maxSources?: unknown;
@@ -208,6 +209,7 @@ function parseDevAiChatBody(body: {
   const speedMode =
     body.speedMode === "balanced" || body.speedMode === "deep" ? body.speedMode : "fast";
   const formPath = typeof body.formPath === "string" ? body.formPath.trim() : "";
+  const fieldId = typeof body.fieldId === "string" ? body.fieldId.trim() : "";
   const maxSources = Number(body.maxSources ?? 8);
 
   if (!question) throw new HttpError(400, "缺少 question", "MISSING_QUESTION");
@@ -217,6 +219,7 @@ function parseDevAiChatBody(body: {
     mode,
     speedMode,
     ...(formPath ? { formPath } : {}),
+    ...(fieldId ? { fieldId } : {}),
     includeDefinitions: body.includeDefinitions === true,
     includeKnowledge: body.includeKnowledge !== false,
     maxSources: Number.isFinite(maxSources) && maxSources > 0 ? Math.trunc(maxSources) : 8,
@@ -374,8 +377,11 @@ export function createDevRagicDefinitionsRouter(
     "/search",
     asyncHandler(async (req, res) => {
       const rawType = String(req.query.type ?? "all").trim();
-      const type: "all" | "field" | "formula" =
-        rawType === "field" || rawType === "formula" || rawType === "all"
+      const type: "all" | "field" | "formula" | "workflow" =
+        rawType === "field" ||
+        rawType === "formula" ||
+        rawType === "workflow" ||
+        rawType === "all"
           ? rawType
           : "all";
       const params = {
@@ -609,6 +615,7 @@ export function createDevRagicDefinitionsRouter(
         mode?: unknown;
         speedMode?: unknown;
         formPath?: unknown;
+        fieldId?: unknown;
         includeDefinitions?: unknown;
         includeKnowledge?: unknown;
         maxSources?: unknown;

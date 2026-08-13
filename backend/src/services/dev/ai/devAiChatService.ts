@@ -7,10 +7,17 @@ import {
   type RagicDefinitionsReadService,
 } from "../ragicDefinitionsReadService";
 import { maskSecrets } from "../ragicFormulaPatchDryRunService";
+import type { DevAiEffort, DevAiJsonProvider } from "./devAiJsonProvider";
 import {
-  createGoogleGeminiClient,
-  type GoogleGeminiClient,
-} from "./googleGeminiClient";
+  createDevAiJsonProvider,
+  getDevAiProviderProfile,
+  normalizeDevAiProviderName,
+} from "./devAiProviderFactory";
+import {
+  parseDevAiJsonObject,
+  requireDevAiString,
+  requireDevAiStringArray,
+} from "./devAiJsonValidation";
 import {
   devAiKnowledgeBaseService,
   type DevAiKnowledgeBaseService,
@@ -22,6 +29,7 @@ import type {
   DevAiChatResult,
   DevAiKnowledgeSource,
   DevAiSpeedMode,
+  RagicDefinitionSearchItem,
 } from "@shared-types/ragicDefinitions";
 
 const log = createLogger("dev-ai-chat");
@@ -31,7 +39,9 @@ export interface DevAiChatRuntimeConfig {
   provider: string;
   model: string;
   fastModel: string;
-  thinkingLevel: string;
+  fastEffort: DevAiEffort;
+  balancedEffort: DevAiEffort;
+  deepEffort: DevAiEffort;
   maxContextChars: number;
   maxOutputTokens: number;
   maxConcurrentRequests: number;
@@ -49,8 +59,8 @@ export interface DevAiChatOptions {
 
 export interface DevAiChatServiceDeps {
   config?: Partial<DevAiChatRuntimeConfig>;
-  googleClient?: GoogleGeminiClient;
-  definitionsService?: Pick<RagicDefinitionsReadService, "readForm" | "search">;
+  providerClient?: DevAiJsonProvider;
+  definitionsService?: Pick<RagicDefinitionsReadService, "search">;
   knowledgeService?: DevAiKnowledgeBaseService;
   chatIdFactory?: () => string;
   now?: () => number;
@@ -79,52 +89,35 @@ const CHAT_SCHEMA = {
 };
 
 function runtimeConfig(override: Partial<DevAiChatRuntimeConfig> = {}): DevAiChatRuntimeConfig {
+  const provider = override.provider ?? env.DEV_AI_PROVIDER;
+  const profile = getDevAiProviderProfile(provider);
   return {
     enabled: env.DEV_AI_ENABLED,
-    provider: env.DEV_AI_PROVIDER,
-    model: env.GOOGLE_GEMINI_MODEL,
-    fastModel: env.GOOGLE_GEMINI_FAST_MODEL,
-    thinkingLevel: env.GOOGLE_GEMINI_THINKING_LEVEL,
+    provider,
+    model: profile.model,
+    fastModel: profile.fastModel,
+    fastEffort: profile.fastEffort,
+    balancedEffort: profile.balancedEffort,
+    deepEffort: profile.deepEffort,
     maxContextChars: env.DEV_AI_CHAT_MAX_CONTEXT_CHARS,
-    maxOutputTokens: env.DEV_AI_CHAT_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: profile.chatMaxOutputTokens,
     maxConcurrentRequests: env.DEV_AI_MAX_CONCURRENT_REQUESTS,
     rateLimitPerMinute: env.DEV_AI_SUGGEST_RATE_LIMIT_PER_MINUTE,
-    storeInteractions: env.GOOGLE_GEMINI_STORE_INTERACTIONS,
+    storeInteractions: profile.storeInteractions,
     storeRawOutput: env.DEV_AI_STORE_RAW_OUTPUT,
     ...override,
   };
 }
 
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
-    : [];
-}
-
-function parseJson(raw: string): unknown {
-  const trimmed = raw.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return JSON.parse(fenced ? fenced[1] : trimmed);
-}
-
 function normalizeModelOutput(raw: string): AiChatModelOutput {
-  let parsed: unknown;
-  try {
-    parsed = parseJson(raw);
-  } catch {
-    throw new HttpError(502, "Google API 回傳不是可解析的 JSON", "DEV_AI_GOOGLE_MALFORMED_JSON");
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new HttpError(502, "Google API 回傳格式不是物件", "DEV_AI_GOOGLE_BAD_JSON");
-  }
-  const object = parsed as Record<string, unknown>;
-  const answer = String(object.answer ?? "").trim();
-  if (!answer) throw new HttpError(502, "Google API 沒有回傳 answer", "DEV_AI_MISSING_ANSWER");
+  const object = parseDevAiJsonObject(raw);
+  const answer = requireDevAiString(object, "answer");
+  if (!answer) throw new HttpError(502, "AI provider 沒有回傳 answer", "DEV_AI_MISSING_ANSWER");
   return {
     answer,
-    assumptions: stringArray(object.assumptions),
-    followUps: stringArray(object.followUps),
-    sourceIds: stringArray(object.sourceIds),
+    assumptions: requireDevAiStringArray(object, "assumptions"),
+    followUps: requireDevAiStringArray(object, "followUps"),
+    sourceIds: requireDevAiStringArray(object, "sourceIds"),
   };
 }
 
@@ -142,10 +135,13 @@ function modelForSpeed(config: DevAiChatRuntimeConfig, speedMode: DevAiSpeedMode
   return config.model;
 }
 
-function thinkingForSpeed(config: DevAiChatRuntimeConfig, speedMode: DevAiSpeedMode): string {
-  if (speedMode === "fast") return "minimal";
-  if (speedMode === "deep") return "high";
-  return config.thinkingLevel;
+function effortForSpeed(
+  config: DevAiChatRuntimeConfig,
+  speedMode: DevAiSpeedMode
+): DevAiEffort {
+  if (speedMode === "fast") return config.fastEffort;
+  if (speedMode === "deep") return config.deepEffort;
+  return config.balancedEffort;
 }
 
 function outputTokensForSpeed(config: DevAiChatRuntimeConfig, speedMode: DevAiSpeedMode): number {
@@ -196,38 +192,65 @@ function buildPrompt(params: {
   ].join("\n");
 }
 
-function compactDefinitionSource(item: {
-  type: string;
-  formPath: string;
-  formName: string;
-  fieldId?: string | null;
-  fieldName?: string | null;
-  position?: string | null;
-  formulaKind?: string | null;
-  nuiFormula?: string | null;
-}): DevAiKnowledgeSource {
-  const idParts = [item.formPath, item.type, item.fieldId, item.position, item.formulaKind]
+function compactDefinitionSource(
+  item: RagicDefinitionSearchItem,
+  revision: string | null,
+  score: number
+): DevAiKnowledgeSource {
+  const idParts = [
+    item.formPath,
+    item.type,
+    item.fieldId,
+    item.position,
+    item.formulaKind,
+    item.workflowFileName,
+  ]
     .filter(Boolean)
     .join(":");
   const excerpt = [
     item.formName ? `表單：${item.formName}` : "",
+    item.fieldId ? `Field ID：${item.fieldId}` : "",
     item.fieldName ? `欄位：${item.fieldName}` : "",
     item.position ? `位置：${item.position}` : "",
+    item.attrs ? `欄位設定：${JSON.stringify(item.attrs)}` : "",
+    item.fieldReferences.length
+      ? `關聯欄位：${item.fieldReferences.map((reference) => [
+          `${reference.attribute}=${reference.fieldId}`,
+          reference.formPath,
+          reference.fieldName,
+          reference.position,
+        ].filter(Boolean).join(" / ")).join("；")}`
+      : "",
     item.nuiFormula ? `公式：${item.nuiFormula}` : "",
+    item.workflowFileName ? `Workflow：${item.workflowFileName}` : "",
+    item.workflowExcerpt ? `Workflow 片段：${item.workflowExcerpt}` : "",
   ].filter(Boolean).join("；");
+  const title = item.type === "workflow"
+    ? `${item.formName || item.formPath} · ${item.workflowFileName || "workflow"}`
+    : `${item.formName || item.formPath}${item.fieldName ? ` · ${item.fieldName}` : ""}`;
   return {
     sourceId: `definitions:${idParts}`,
-    title: `${item.formName || item.formPath}${item.fieldName ? ` · ${item.fieldName}` : ""}`,
+    title,
     kind: "definitions",
     excerpt: maskSecrets(excerpt || JSON.stringify(item)),
-    score: 1,
+    score,
     path: item.formPath,
+    ...(revision ? { revision } : {}),
+    sourceType: item.type,
+    formPath: item.formPath,
+    ...(item.fieldId ? { fieldId: item.fieldId } : {}),
   };
+}
+
+function fieldIdFromQuestion(question: string): string {
+  return question.match(
+    /(?:\bfield\s*id\b|欄位\s*(?:id|編號))\s*[:：#]?\s*(\d{5,10})(?!\d)/i
+  )?.[1] ?? "";
 }
 
 export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiChatService {
   const config = runtimeConfig(deps.config);
-  const googleClient = deps.googleClient ?? createGoogleGeminiClient();
+  let providerClient = deps.providerClient;
   const definitionsService = deps.definitionsService ?? ragicDefinitionsReadService;
   const knowledgeService = deps.knowledgeService ?? devAiKnowledgeBaseService;
   const chatIdFactory = deps.chatIdFactory ?? randomUUID;
@@ -237,9 +260,14 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
 
   function assertEnabled(): void {
     if (!config.enabled) throw new HttpError(403, "Dev AI 未啟用", "DEV_AI_DISABLED");
-    if (config.provider !== "google") {
-      throw new HttpError(400, "目前 Dev AI 只支援 google provider", "DEV_AI_BAD_PROVIDER");
+    if (!normalizeDevAiProviderName(config.provider)) {
+      throw new HttpError(400, "不支援的 Dev AI provider", "DEV_AI_BAD_PROVIDER");
     }
+  }
+
+  function getProviderClient(): DevAiJsonProvider {
+    providerClient ??= createDevAiJsonProvider(config.provider);
+    return providerClient;
   }
 
   function claimRequestSlot(): () => void {
@@ -278,35 +306,37 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
       }
     }
     const includeDefinitions = request.includeDefinitions === true || mode === "definitions" || Boolean(request.formPath);
-    let definitionItems = 0;
     if (includeDefinitions) {
       try {
-        if (request.formPath) {
-          const detail = await definitionsService.readForm(request.formPath);
-          const excerpt = [
-            `表單：${detail.form.formName || detail.form.formPath}`,
-            `路徑：${detail.form.formPath}`,
-            `欄位數：${detail.fields.length}`,
-            `公式數：${detail.formulas.length}`,
-            `workflow 數：${detail.workflows.length}`,
-            `欄位摘要：${detail.fields.slice(0, 24).map((field) => `${field.position}:${field.fieldName || field.fieldId}`).join(" / ")}`,
-            `公式摘要：${detail.formulas.slice(0, 12).map((formula) => `${formula.position}:${formula.nuiFormula}`).join(" / ")}`,
-          ].join("\n");
-          sources.push({
-            sourceId: `definitions:${detail.form.formPath}`,
-            title: detail.form.formName || detail.form.formPath,
-            kind: "definitions",
-            excerpt: maskSecrets(excerpt),
-            score: 10,
-            path: detail.form.formPath,
+        const requestedFieldId = request.fieldId?.trim() || fieldIdFromQuestion(question);
+        let result = await definitionsService.search({
+          ...(requestedFieldId ? { fieldId: requestedFieldId } : { q: question }),
+          ...(request.formPath ? { formPath: request.formPath } : {}),
+          type: "all",
+          limit: maxSources,
+        });
+        let score = requestedFieldId ? 10 : request.formPath ? 8 : 5;
+        if (!result.data.length && requestedFieldId) {
+          result = await definitionsService.search({
+            q: question,
+            ...(request.formPath ? { formPath: request.formPath } : {}),
+            type: "all",
+            limit: maxSources,
           });
-          definitionItems += 1;
-        } else {
-          const result = await definitionsService.search({ q: question, type: "all", limit: maxSources });
-          const mapped = result.data.map(compactDefinitionSource);
-          definitionItems += mapped.length;
-          sources.push(...mapped);
+          score = request.formPath ? 8 : 5;
         }
+        if (!result.data.length && request.formPath) {
+          result = await definitionsService.search({
+            formPath: request.formPath,
+            type: "all",
+            limit: maxSources,
+          });
+          score = 8;
+        }
+        const mapped = result.data.map((item) =>
+          compactDefinitionSource(item, result.meta.revision, score)
+        );
+        sources.push(...mapped);
       } catch {
         // definitions context 是輔助資料；失敗時讓模型明確看到 sources 不足即可。
       }
@@ -320,6 +350,10 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
         title: source.title,
         kind: source.kind,
         excerpt: source.excerpt,
+        revision: source.revision,
+        sourceType: source.sourceType,
+        formPath: source.formPath,
+        fieldId: source.fieldId,
       })), null, 2)),
       contextCharsForSpeed(config, normalizeSpeedMode(request.speedMode))
     );
@@ -328,7 +362,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
       context,
       preview: {
         knowledgeItems: deduped.filter((source) => source.kind === "curated" || source.kind === "official").length,
-        definitionItems,
+        definitionItems: deduped.filter((source) => source.kind === "definitions").length,
         chars: context.length,
       },
     };
@@ -348,17 +382,18 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
         const context = await collectSources(request, mode, options.signal);
         const model = modelForSpeed(config, speedMode);
         const maxOutputTokens = outputTokensForSpeed(config, speedMode);
+        const client = getProviderClient();
         const prompt = buildPrompt({
           mode,
           question,
           context: context.context,
           maxOutputTokens,
         });
-        const raw = await googleClient.generateJsonText({
+        const raw = await client.generateJsonText({
           prompt,
           schema: CHAT_SCHEMA,
           model,
-          thinkingLevel: thinkingForSpeed(config, speedMode),
+          effort: effortForSpeed(config, speedMode),
           maxOutputTokens,
           storeInteraction: config.storeInteractions,
           signal: options.signal,
@@ -370,7 +405,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
           : context.sources;
         const result: DevAiChatResult = {
           chatId,
-          provider: "google",
+          provider: client.name,
           model,
           mode,
           speedMode,
@@ -389,6 +424,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
           tabId: options.tabId ?? null,
           mode,
           speedMode,
+          provider: client.name,
           model,
           contextPreview: context.preview,
           sources: result.sources.length,

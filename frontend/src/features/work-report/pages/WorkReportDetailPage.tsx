@@ -546,7 +546,7 @@ export function WorkReportDetailPage() {
     if (!formId || !safeEntryId || !record?.workOrderNo) {
       return null;
     }
-    const ragicBaseUrl = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://fdtw.app")
+    const ragicBaseUrl = String(import.meta.env.VITE_RAGIC_BASE_URL ?? "https://demo.local")
       .trim()
       .replace(/\/+$/, "");
     if (!ragicBaseUrl) {
@@ -1664,6 +1664,10 @@ export function WorkReportDetailPage() {
           return;
         }
         const maxScrollTop = Math.max(0, scrollRoot.scrollHeight - scrollRoot.clientHeight);
+        if (maxScrollTop === 0) {
+          window.scrollBy({ top: pendingAmount, behavior: "auto" });
+          return;
+        }
         scrollRoot.scrollTop = Math.max(
           0,
           Math.min(maxScrollTop, scrollRoot.scrollTop + pendingAmount)
@@ -1691,11 +1695,11 @@ export function WorkReportDetailPage() {
     let pointerX = 0;
     let pointerY = 0;
     let hasPointer = false;
-    const edgeThreshold = 56;
+    const edgeThreshold = 88;
     const horizontalScrollStep = 18;
     const verticalStepIntervalMs = 140;
     const horizontalStepIntervalMs = 140;
-    const verticalIntentThreshold = 36;
+    const verticalIntentThreshold = 8;
 
     const updateTargetFromPointer = () => {
       if (!hasPointer) {
@@ -1789,14 +1793,13 @@ export function WorkReportDetailPage() {
       void finalizeBatchCreateFill(batchCreateFillDragRef.current);
     };
     window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("mouseup", handleMouseUp, true);
     return () => {
       if (frameId) {
         window.cancelAnimationFrame(frameId);
       }
-      batchCreateFillPointerStartRef.current = null;
       window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("mouseup", handleMouseUp, true);
     };
   }, [
     batchCreateFillDragging,

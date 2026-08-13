@@ -708,13 +708,13 @@ test("PUT /api/it/duty/day-notes/:date 新建備註", async () => {
   await withTestServer(repo, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/api/it/duty/day-notes/2026-06-01`, {
       method: "PUT",
-      headers: { "content-type": "application/json", "x-debug-device-label": "FD0287" },
+      headers: { "content-type": "application/json", "x-debug-device-label": "DEMO-IT-01" },
       body: JSON.stringify({ note: "客戶來訪" }),
     });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.data.note, "客戶來訪");
-    assert.equal(body.data.updatedByLabel, "FD0287");
+    assert.equal(body.data.updatedByLabel, "DEMO-IT-01");
   });
 });
 

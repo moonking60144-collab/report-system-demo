@@ -22,6 +22,25 @@ async function withTestServer(run: (baseUrl: string) => Promise<void>): Promise<
         activeCoalescingKeys: 1,
         coalescedCallbacks: 2,
       }),
+      getMeetingProviderReadiness: () => ({
+        ready: false,
+        issues: ["MEETING_MINUTES_PROVIDER_UNSUPPORTED"],
+        transcription: {
+          configuredProvider: "google-gemini",
+          runtimeProvider: "disabled",
+          enabled: false,
+        },
+        minutes: {
+          configuredProvider: "anthropic-claude",
+          runtimeProvider: "disabled",
+          enabled: false,
+        },
+        devAi: {
+          configuredProvider: "minimax",
+          enabled: true,
+          ready: true,
+        },
+      }),
       getRuntimeHealthSnapshot: () => ({
         at: "2026-08-13T00:00:00.000Z",
         ragic: {} as never,
@@ -36,6 +55,11 @@ async function withTestServer(run: (baseUrl: string) => Promise<void>): Promise<
           maxPendingTaskCount: 500,
           maxPendingTaskCountPerKey: 25,
           maxOldestPendingTaskAgeMs: 600000,
+        },
+        meetingJobs: {
+          processing: { pending: 1, running: 0, ready: 2, failed: 0, total: 3, oldestPendingAgeMs: 500 },
+          transcription: { pending: 0, running: 1, ready: 1, failed: 0, total: 2, oldestPendingAgeMs: 0 },
+          minutes: { pending: 0, running: 0, ready: 1, failed: 0, total: 1, oldestPendingAgeMs: 0 },
         },
         memory: {
           rssBytes: 100,
@@ -98,8 +122,13 @@ test("GET /api/health?detail=1 回傳 Ragic scheduler 與 callback queue 指標"
         activeCoalescingKeys: number;
         coalescedCallbacks: number;
       };
+      meetingProviders: {
+        ready: boolean;
+        issues: string[];
+      };
       runtime: {
         workReportMutationQueue: { pendingTaskCount: number };
+        meetingJobs: { processing: { pending: number } };
         eventLoopLagMs: { p95: number };
       };
     };
@@ -115,7 +144,12 @@ test("GET /api/health?detail=1 回傳 Ragic scheduler 與 callback queue 指標"
       activeCoalescingKeys: 1,
       coalescedCallbacks: 2,
     });
+    assert.equal(payload.meetingProviders.ready, false);
+    assert.deepEqual(payload.meetingProviders.issues, [
+      "MEETING_MINUTES_PROVIDER_UNSUPPORTED",
+    ]);
     assert.equal(payload.runtime.workReportMutationQueue.pendingTaskCount, 2);
+    assert.equal(payload.runtime.meetingJobs.processing.pending, 1);
     assert.equal(payload.runtime.eventLoopLagMs.p95, 2);
   });
 });

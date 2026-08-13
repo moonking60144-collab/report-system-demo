@@ -91,7 +91,7 @@ async function buildFixture() {
   ]);
   await writeFile(
     join(formDir, "workflows", "post.js"),
-    "var entry = param.getUpdatedEntry();\n",
+    "var entry = param.getUpdatedEntry();\nvar targetFieldId = 1036641;\n",
     "utf-8"
   );
   const nuiLines = Array.from({ length: 26 }, (_, index) => `# filler ${index + 1}`);
@@ -150,6 +150,10 @@ async function reexportFixtureDefinitionsSummary(
     fields: 2,
     formulas: 1,
     workflows: 1,
+    revision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    artifactCount: 4,
+    compressedBytes: 1024,
+    warnings: [],
     namespaces: "default",
     outDir: fixture.root,
   };
@@ -333,6 +337,56 @@ test("POST ai/chat 無 token 會先被 Dev auth 擋下", async () => {
         });
         assert.equal(res.status, 401);
         assert.equal(called, false);
+      },
+      { devAiChatService }
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("POST ai/chat 會將明確 Field ID 傳入 Dev AI definitions 檢索", async () => {
+  const fixture = await buildFixture();
+  let receivedRequest: Parameters<DevAiChatService["ask"]>[0] | null = null;
+  const devAiChatService: DevAiChatService = {
+    async ask(request) {
+      receivedRequest = request;
+      return {
+        chatId: "chat-field-source",
+        provider: "google",
+        model: "gemini-balanced",
+        mode: "definitions",
+        speedMode: "balanced",
+        answer: "已找到欄位來源。",
+        assumptions: [],
+        followUps: [],
+        sources: [],
+        contextPreview: { knowledgeItems: 0, definitionItems: 1, chars: 120 },
+        latencyMs: 25,
+      };
+    },
+  };
+  try {
+    await withTestServer(
+      fixture,
+      async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/api/dev/ragic-definitions/ai/chat`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${VALID_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            question: "這個 Name 欄位來自哪裡？",
+            mode: "definitions",
+            formPath: "default/devtest/51",
+            fieldId: "1036641",
+          }),
+        });
+        assert.equal(res.status, 200);
+        assert.equal((await res.json()).data.chatId, "chat-field-source");
+        assert.equal(receivedRequest?.formPath, "default/devtest/51");
+        assert.equal(receivedRequest?.fieldId, "1036641");
       },
       { devAiChatService }
     );
@@ -772,7 +826,7 @@ test("GET forms 回 baseline 表單清單", async () => {
   }
 });
 
-test("GET search 可用 fieldId 找到欄位與公式", async () => {
+test("GET search 可用 fieldId 找到欄位、公式、欄位設定與 workflow 引用", async () => {
   const fixture = await buildFixture();
   try {
     await withTestServer(fixture, async (baseUrl) => {
@@ -782,15 +836,48 @@ test("GET search 可用 fieldId 找到欄位與公式", async () => {
       );
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.equal(body.data.length, 2);
+      assert.equal(body.data.length, 3);
       assert.deepEqual(
         body.data.map((item: { type: string }) => item.type).sort(),
-        ["field", "formula"]
+        ["field", "formula", "workflow"]
+      );
+      assert.deepEqual(
+        body.data.find((item: { type: string }) => item.type === "field").attrs,
+        { text: "1" }
       );
       assert.equal(
         body.data.find((item: { type: string }) => item.type === "formula")
           .displayFormula,
         "F6*D6+123456"
+      );
+      assert.match(
+        body.data.find((item: { type: string }) => item.type === "workflow")
+          .workflowExcerpt,
+        /1036641/
+      );
+      assert.match(body.meta.revision, /^sha256:[a-f0-9]{64}$/);
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("GET search 支援 workflow type 並回 artifact 路徑", async () => {
+  const fixture = await buildFixture();
+  try {
+    await withTestServer(fixture, async (baseUrl) => {
+      const res = await fetch(
+        `${baseUrl}/api/dev/ragic-definitions/search?type=workflow&q=getUpdatedEntry`,
+        { headers: { Authorization: `Bearer ${VALID_TOKEN}` } }
+      );
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.data.length, 1);
+      assert.equal(body.data[0].type, "workflow");
+      assert.equal(body.data[0].workflowFileName, "post.js");
+      assert.equal(
+        body.data[0].sourceRelativePath,
+        "forms/default/devtest/51/workflows/post.js"
       );
     });
   } finally {

@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFile } from "fs/promises";
 import axios from "axios";
 import JSZip from "jszip";
 import { env } from "../../config/env";
 import { HttpError } from "../../utils/httpError";
+import { parseForm16PublishedCsv } from "./form16PublishedCsv";
 
 export interface PivotAnalysisExport {
   filename: string;
@@ -19,6 +21,12 @@ export interface PivotAnalysisExport {
 
 const TEMPLATE_PATH = "./templates/pivot-analysis-template.xlsx";
 const COLUMN_COUNT = 65;
+export const FORM16_PIVOT_CALCULATION_VERSION = "v2";
+
+export interface Form16PivotTemplateBundle {
+  body: Buffer;
+  version: string;
+}
 
 // CSV 欄型別（0-based，對應範本 A..BM）：
 //   TEXT_FORCE = 代碼/編號欄。'202605'、'20260501'、客戶代碼這種「長得像數字的代碼」
@@ -66,64 +74,19 @@ function unescapeXml(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
-// RFC 4180：引號欄位可含逗號/換行/雙引號跳脫（Remark備註會有），不能用 split 偷懶。
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  let i = 0;
-  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  while (i < src.length) {
-    const ch = src[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') {
-          field += '"';
-          i += 2;
-          continue;
-        }
-        inQuotes = false;
-        i += 1;
-        continue;
-      }
-      field += ch;
-      i += 1;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = true;
-      i += 1;
-      continue;
-    }
-    if (ch === ",") {
-      row.push(field);
-      field = "";
-      i += 1;
-      continue;
-    }
-    if (ch === "\r") {
-      i += 1;
-      continue;
-    }
-    if (ch === "\n") {
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = "";
-      i += 1;
-      continue;
-    }
-    field += ch;
-    i += 1;
+function replaceElementRef(xml: string, tagName: string, ref: string): string {
+  const pattern = new RegExp(`(<${tagName}\\b[^>]*\\bref=")[^"]*(")`);
+  if (!pattern.test(xml)) {
+    throw new HttpError(
+      500,
+      `分析表範本缺少 ${tagName} ref，範本檔可能毀損。`,
+      "PIVOT_TEMPLATE_BROKEN"
+    );
   }
-  if (field !== "" || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows;
+  return xml.replace(pattern, `$1${ref}$2`);
 }
 
+// RFC 4180：引號欄位可含逗號/換行/雙引號跳脫（Remark備註會有），不能用 split 偷懶。
 function toSerialDate(value: string): number | null {
   const m = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
   if (!m) return null;
@@ -199,6 +162,22 @@ function classifyCsvValue(colIndex: number, value: string): CellValue {
 }
 
 class Form16PivotAnalysisExportService {
+  async loadTemplateBundle(): Promise<Form16PivotTemplateBundle> {
+    try {
+      const body = await readFile(TEMPLATE_PATH);
+      return {
+        body,
+        version: createHash("sha256").update(body).digest("hex"),
+      };
+    } catch {
+      throw new HttpError(
+        500,
+        `找不到分析表範本 ${TEMPLATE_PATH}，請確認部署有帶到 backend/templates/。`,
+        "PIVOT_TEMPLATE_MISSING"
+      );
+    }
+  }
+
   // 灌「應出勤天數」進 3 張機台運轉分析表的 F 欄（A 欄有機台的列才填，總計列跳過）。
   // 這欄是人工月參數（當月工作天數），不在 Ragic 資料裡；不填的話
   // 量產應稼動天數 = 0 − 停機 + 加班，整張表會是負數。
@@ -275,7 +254,9 @@ class Form16PivotAnalysisExportService {
     const sstXml = await readEntry("xl/sharedStrings.xml");
     const sst = parseSharedStrings(sstXml);
 
-    const rows = parseCsv(csvText).filter((row) => row.some((c) => c.trim() !== ""));
+    const rows = parseForm16PublishedCsv(csvText).filter((row) =>
+      row.some((c) => c.trim() !== "")
+    );
     if (rows.length < 2) {
       throw new HttpError(502, "Ragic 發佈網址回的 CSV 沒有資料列。", "PIVOT_CSV_EMPTY");
     }
@@ -339,12 +320,15 @@ class Form16PivotAnalysisExportService {
     const sd = sheetXml.indexOf("<sheetData>") + "<sheetData>".length;
     const row1End = sheetXml.indexOf("</row>", sd) + "</row>".length;
     const sdEnd = sheetXml.indexOf("</sheetData>");
-    const newSheet = sheetXml.slice(0, row1End) + parts.join("") + sheetXml.slice(sdEnd);
-
-    const tableXml = (await readEntry("xl/tables/table1.xml")).replace(
-      /ref="A1:BM\d+"/,
-      `ref="A1:BM${maxRow}"`
+    const dataRef = `A1:BM${maxRow}`;
+    const newSheet = replaceElementRef(
+      sheetXml.slice(0, row1End) + parts.join("") + sheetXml.slice(sdEnd),
+      "dimension",
+      dataRef
     );
+    let tableXml = await readEntry("xl/tables/table1.xml");
+    tableXml = replaceElementRef(tableXml, "table", dataRef);
+    tableXml = replaceElementRef(tableXml, "autoFilter", dataRef);
 
     // 分析表公式用 INDIRECT 動態指向 Ragic列表，純改檔不會更新公式 cached 值；
     // 設 fullCalcOnLoad 讓 Excel 開檔強制全算，否則會顯示範本舊值（全 0）。
@@ -387,16 +371,7 @@ class Form16PivotAnalysisExportService {
       );
     }
 
-    let templateBuf: Buffer;
-    try {
-      templateBuf = await readFile(TEMPLATE_PATH);
-    } catch {
-      throw new HttpError(
-        500,
-        `找不到分析表範本 ${TEMPLATE_PATH}，請確認部署有帶到 backend/templates/。`,
-        "PIVOT_TEMPLATE_MISSING"
-      );
-    }
+    const template = await this.loadTemplateBundle();
 
     let csvText: string;
     try {
@@ -412,7 +387,7 @@ class Form16PivotAnalysisExportService {
       throw new HttpError(502, `抓取 Ragic 發佈網址失敗：${detail}`, "RAGIC_PUBLISHED_FETCH_FAILED");
     }
 
-    const body = await this.buildWorkbook(csvText, templateBuf, attendanceDays);
+    const body = await this.buildWorkbook(csvText, template.body, attendanceDays);
     return {
       filename: "c1-6-analysis.xlsx",
       contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

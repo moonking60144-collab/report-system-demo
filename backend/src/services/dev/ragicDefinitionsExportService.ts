@@ -11,6 +11,10 @@ import {
 import { basename, join, relative, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { parseNuiFieldLine, splitFirstCommas } from "./ragicNuiParser";
+import {
+  buildRagicDefinitionsSnapshotPayload,
+  createRagicDefinitionsSnapshotService,
+} from "./ragicDefinitionsSnapshotService";
 
 interface NuiField {
   kind: string;
@@ -70,6 +74,10 @@ export interface RagicDefinitionsExportResult {
   fields: number;
   formulas: number;
   workflows: number;
+  revision: string;
+  artifactCount: number;
+  compressedBytes: number;
+  warnings: string[];
   namespaces: string;
   outDir: string;
 }
@@ -98,7 +106,7 @@ function maskSecrets(s: string): string {
     .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "***REDACTED-JWT***")
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-***REDACTED***")
     .replace(/AIza[A-Za-z0-9_-]{20,}/g, "AIza***REDACTED***")
-    .replace(/fdtw-ragic-callback-[A-Za-z0-9_-]+/g, "fdtw-ragic-callback-***REDACTED***");
+    .replace(/[A-Za-z0-9_-]+-ragic-callback-[A-Za-z0-9_-]+/g, "demo-ragic-callback-***REDACTED***");
 }
 
 function ensureDir(path: string): void {
@@ -399,7 +407,7 @@ function exportOne(
 export function formatRagicDefinitionsExportMessage(
   result: RagicDefinitionsExportResult
 ): string {
-  return `[ragic-definitions] exported forms=${result.forms} fields=${result.fields} formulas=${result.formulas} workflows=${result.workflows} namespaces=${result.namespaces} out=${result.outDir}`;
+  return `[ragic-definitions] exported revision=${result.revision} forms=${result.forms} fields=${result.fields} formulas=${result.formulas} workflows=${result.workflows} artifacts=${result.artifactCount} compressedBytes=${result.compressedBytes} warnings=${result.warnings.length} namespaces=${result.namespaces} out=${result.outDir}`;
 }
 
 export function exportRagicDefinitions(
@@ -427,7 +435,23 @@ export function exportRagicDefinitions(
   let formulaCount = 0;
   let fieldCount = 0;
   let workflowCount = 0;
+  const warnings: string[] = [];
+  const snapshotService = createRagicDefinitionsSnapshotService({
+    definitionsRoot: outDir,
+  });
   try {
+    if (existsSync(join(outDir, "manifest.json"))) {
+      try {
+        snapshotService.materializeCurrent({ pruneAfter: false });
+      } catch (error) {
+        warnings.push(
+          `既有 definitions 快照無法保留：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
     for (const filePath of files) {
       const result = exportOne(root, tmpOutDir, filePath, params.ragicNuiEncoding);
       formulaCount += result.formulaCount;
@@ -448,18 +472,47 @@ export function exportRagicDefinitions(
         workflows: workflowCount,
       },
     });
+    const snapshotPayload = buildRagicDefinitionsSnapshotPayload(tmpOutDir);
+    writeJson(join(tmpOutDir, "manifest.json"), snapshotPayload.manifest);
+    const preparedSnapshot = snapshotService.preparePayload(snapshotPayload);
     swapExportedDefinitions(outDir, tmpOutDir);
+    let snapshotPublished = false;
+    try {
+      preparedSnapshot.publish({ pruneAfter: false });
+      snapshotPublished = true;
+    } catch (error) {
+      warnings.push(
+        `definitions 快照發布失敗，可由目前 baseline 重新建立：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    if (snapshotPublished) {
+      try {
+        snapshotService.prune(snapshotPayload.revision);
+      } catch (error) {
+        warnings.push(
+          `definitions 快照 retention 清理失敗：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
+    return {
+      forms: files.length,
+      fields: fieldCount,
+      formulas: formulaCount,
+      workflows: workflowCount,
+      revision: snapshotPayload.revision,
+      artifactCount: snapshotPayload.artifactCount,
+      compressedBytes: preparedSnapshot.descriptor.compressedBytes,
+      warnings,
+      namespaces:
+        namespaceFilter.mode === "all" ? "*" : namespaceFilter.namespaces.join(","),
+      outDir,
+    };
   } finally {
     rmSync(tmpOutDir, { recursive: true, force: true });
   }
-
-  return {
-    forms: files.length,
-    fields: fieldCount,
-    formulas: formulaCount,
-    workflows: workflowCount,
-    namespaces:
-      namespaceFilter.mode === "all" ? "*" : namespaceFilter.namespaces.join(","),
-    outDir,
-  };
 }

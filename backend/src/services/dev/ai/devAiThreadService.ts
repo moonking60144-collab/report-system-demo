@@ -1,6 +1,8 @@
 import { env } from "../../../config/env";
 import { createLogger } from "../../../observability/logger";
 import { HttpError } from "../../../utils/httpError";
+import { createKeyedSerialQueue } from "../../../utils/keyedSerialQueue";
+import { createStableJsonFingerprint } from "../../../utils/stableJsonFingerprint";
 import { maskSecrets } from "../ragicFormulaPatchDryRunService";
 import {
   devAiChatService,
@@ -27,6 +29,8 @@ import type {
 } from "@shared-types/ragicDefinitions";
 
 const log = createLogger("dev-ai-thread");
+const CLIENT_MESSAGE_ID_PATTERN = /^[A-Za-z0-9._:-]{8,100}$/;
+const PENDING_REQUEST_STALE_MS = 10 * 60 * 1_000;
 
 export interface DevAiThreadServiceDeps {
   enabled?: boolean;
@@ -102,6 +106,30 @@ function ensureActor(ownerActor: string): string {
   const normalized = ownerActor.trim();
   if (!normalized) throw new HttpError(401, "缺少 Dev 使用者身分", "DEV_ACTOR_MISSING");
   return normalized;
+}
+
+function ensureClientMessageId(value: unknown): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
+    throw new HttpError(
+      400,
+      "缺少 clientMessageId",
+      "DEV_AI_CLIENT_MESSAGE_ID_REQUIRED"
+    );
+  }
+  if (!CLIENT_MESSAGE_ID_PATTERN.test(normalized)) {
+    throw new HttpError(
+      400,
+      "clientMessageId 格式不正確",
+      "DEV_AI_CLIENT_MESSAGE_ID_INVALID"
+    );
+  }
+  return normalized;
+}
+
+function messageRequestErrorCode(error: unknown): string | null {
+  if (error instanceof HttpError) return error.code;
+  return error instanceof Error ? error.name : null;
 }
 
 function buildThreadMemoryPrefix(messages: Array<{ role: string; content: string }>): string {
@@ -250,8 +278,9 @@ export function createDevAiThreadService(
     2,
     deps.summaryAfterMessages ?? env.DEV_AI_THREAD_SUMMARY_AFTER_MESSAGES
   );
+  const messageQueue = createKeyedSerialQueue();
 
-  return {
+  const service: DevAiThreadService = {
     async createThread(ownerActor, request = {}) {
       ensureEnabled(enabled);
       const actor = ensureActor(ownerActor);
@@ -428,6 +457,7 @@ export function createDevAiThreadService(
           mode: intent === "definitions" ? "definitions" : "general",
           speedMode: request.speedMode ?? "fast",
           ...(context.formPath ? { formPath: context.formPath } : {}),
+          ...(context.fieldId ? { fieldId: context.fieldId } : {}),
           includeKnowledge: request.includeKnowledge !== false,
           includeDefinitions: request.includeDefinitions === true || intent === "definitions",
           maxSources: request.speedMode === "deep" ? 10 : request.speedMode === "balanced" ? 8 : 5,
@@ -538,6 +568,122 @@ export function createDevAiThreadService(
       return archived;
     },
   };
+
+  const executeSendMessage = service.sendMessage.bind(service);
+  service.sendMessage = async (ownerActor, threadId, request, options = {}) => {
+    ensureEnabled(enabled);
+    const actor = ensureActor(ownerActor);
+    const clientMessageId = ensureClientMessageId(request.clientMessageId);
+    const normalizedMessage = compactText(request.message, 8_000);
+    if (!normalizedMessage) {
+      throw new HttpError(400, "缺少 message", "DEV_AI_THREAD_MESSAGE_REQUIRED");
+    }
+    const requestFingerprint = createStableJsonFingerprint({
+      message: normalizedMessage,
+      mode: request.mode,
+      speedMode: request.speedMode,
+      context: normalizeContext(request.context),
+      includeKnowledge: request.includeKnowledge,
+      includeDefinitions: request.includeDefinitions,
+    });
+    let result: DevAiSendMessageResult | undefined;
+    await messageQueue.enqueue(
+      JSON.stringify([actor, threadId]),
+      async () => {
+        const thread = await repository.getThread(actor, threadId);
+        if (!thread) {
+          throw new HttpError(404, "找不到 Dev AI 對話", "DEV_AI_THREAD_NOT_FOUND");
+        }
+        const existing = await repository.getMessageRequest({
+          ownerActor: actor,
+          threadId,
+          clientMessageId,
+        });
+        if (existing && existing.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "相同 clientMessageId 已用於不同訊息內容",
+            "DEV_AI_CLIENT_MESSAGE_ID_CONFLICT"
+          );
+        }
+        if (existing?.status === "completed") {
+          if (!existing.result) {
+            throw new HttpError(
+              500,
+              "既有 Dev AI 訊息結果無法讀取",
+              "DEV_AI_MESSAGE_RESULT_INVALID"
+            );
+          }
+          result = existing.result;
+          return;
+        }
+        if (existing?.status === "pending") {
+          const pendingAtMs = Date.parse(existing.updatedAt);
+          if (
+            Number.isFinite(pendingAtMs) &&
+            now().getTime() - pendingAtMs < PENDING_REQUEST_STALE_MS
+          ) {
+            throw new HttpError(
+              409,
+              "這則 Dev AI 訊息仍在處理中",
+              "DEV_AI_MESSAGE_REQUEST_IN_PROGRESS"
+            );
+          }
+        }
+
+        const startedAt = now().toISOString();
+        await repository.startMessageRequest({
+          ownerActor: actor,
+          threadId,
+          clientMessageId,
+          requestFingerprint,
+          now: startedAt,
+        });
+        try {
+          result = await executeSendMessage(actor, threadId, request, options);
+        } catch (error) {
+          try {
+            await repository.failMessageRequest({
+              ownerActor: actor,
+              threadId,
+              clientMessageId,
+              requestFingerprint,
+              errorCode: messageRequestErrorCode(error),
+              now: now().toISOString(),
+            });
+          } catch (persistError) {
+            log.warn({
+              event: "thread-message-request-failure-persist-failed",
+              actor,
+              threadId,
+              clientMessageId,
+              error: persistError instanceof Error ? persistError.message : String(persistError),
+            });
+          }
+          throw error;
+        }
+        await repository.completeMessageRequest({
+          ownerActor: actor,
+          threadId,
+          clientMessageId,
+          requestFingerprint,
+          result,
+          now: now().toISOString(),
+        });
+      },
+      { signal: options.signal }
+    );
+    if (!result) {
+      throw new HttpError(
+        500,
+        "Dev AI 訊息結果遺失",
+        "DEV_AI_MESSAGE_RESULT_MISSING"
+      );
+    }
+    return result;
+  };
+
+  return service;
 
   async function pruneActor(actor: string, currentTime: string): Promise<void> {
     await repository.pruneActorThreads({

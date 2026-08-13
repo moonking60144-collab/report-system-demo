@@ -1,7 +1,5 @@
-import {
-  exportRagicDefinitions,
-  type RagicDefinitionsExportResult,
-} from "./ragicDefinitionsExportService";
+import type { RagicDefinitionsExportResult } from "./ragicDefinitionsExportService";
+import { exportRagicDefinitionsInChildProcess } from "./ragicDefinitionsExportProcess";
 import {
   ragicDefinitionsReadService,
   type RagicDefinitionManifest,
@@ -56,7 +54,7 @@ async function defaultExportDefinitions({
   definitionsRoot: string;
   namespaces: string;
 }): Promise<RagicDefinitionsExportResult> {
-  return exportRagicDefinitions({
+  return exportRagicDefinitionsInChildProcess({
     builderRoot,
     outDir: definitionsRoot,
     namespaces,

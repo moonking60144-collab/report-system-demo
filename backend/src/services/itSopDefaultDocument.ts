@@ -73,7 +73,7 @@ export function createDefaultItSopDocument(documentId: string): ItSopDocument {
         ["確認硬體", "記錄品牌、型號、CPU、RAM、SSD、主機板、序號與 MAC Address。", "用 PowerShell 查詢，並與機殼貼紙 / 採購資料核對。"],
         ["建立資產資料", "在資產或財產系統建立資產編號、位置、使用部門、保管人與設備名稱。", "資產編號與電腦名稱可追溯。"],
         ["決定電腦名稱", "依公司命名規則命名，例如 WK-部門-PC-流水號。", "避免與既有 AD / DNS / DHCP 記錄重複。"],
-        ["準備安裝來源", "把需要提權安裝的檔案先複製到本機 C:\\ProgramData\\FDS\\Installers。", "不要直接用使用者 session 的 L: 路徑提權安裝。"],
+        ["準備安裝來源", "把需要提權安裝的檔案先複製到本機 C:\\ProgramData\\DemoCorp\\Installers。", "不要直接用使用者 session 的 L: 路徑提權安裝。"],
       ]),
       codeSection(
         "asset-commands",
@@ -108,7 +108,7 @@ getmac /v`
         ["項目", "要做什麼", "確認方式"],
         ["IP 配置", "依公司規則設定 DHCP 綁定或固定 IP。", "ipconfig /all 顯示正確 IP、Gateway、DNS。"],
         ["DNS", "DNS 必須指向公司 DNS。", "nslookup / nltest 可找到網域控制站。"],
-        ["加入網域", "加入 fds.local 或公司指定網域後重開。", "用實際網域帳號登入並確認 whoami。"],
+        ["加入網域", "加入 corp.example 或公司指定網域後重開。", "用實際網域帳號登入並確認 whoami。"],
         ["網路連通", "確認檔案伺服器、共用槽、印表機 IP 可達。", "Test-NetConnection 對 445 / 9100 做基本檢查。"],
       ]),
       codeSection(
@@ -116,9 +116,9 @@ getmac /v`
         "第三步指令、網路與網域查驗",
         String.raw`ipconfig /all
 whoami
-nslookup fds.local
-nltest /dsgetdc:fds.local
-nltest /sc_query:fds.local
+nslookup corp.example
+nltest /dsgetdc:corp.example
+nltest /sc_query:corp.example
 Test-NetConnection <檔案伺服器IP> -Port 445
 Test-NetConnection <印表機IP> -Port 9100`
       ),
@@ -126,7 +126,7 @@ Test-NetConnection <印表機IP> -Port 9100`
         ["項目", "要做什麼", "確認方式"],
         ["共用槽清單", "確認部門需要的 K/L/M/Z/U 等磁碟機與 UNC 路徑。", "以 net use 確認掛載結果。"],
         ["SMB 相容性", "舊伺服器若需要 SMB1，只啟用 SMB1 Client。", "不要啟用 SMB1 Server。"],
-        ["linkDisk", "把標準 linkDisk 腳本放到 C:\\ProgramData\\FDS\\Scripts。", "捷徑放 C:\\Users\\Public\\Desktop 供所有使用者使用。"],
+        ["linkDisk", "把標準 linkDisk 腳本放到 C:\\ProgramData\\DemoCorp\\Scripts。", "捷徑放 C:\\Users\\Public\\Desktop 供所有使用者使用。"],
         ["提權限制", "提權後看不到使用者 session 的網路磁碟是正常現象。", "安裝檔優先使用本機路徑或 UNC。"],
       ]),
       codeSection(
@@ -142,12 +142,12 @@ Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol-Client
 Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol-Client -All
 
 # 建立全域 linkDisk 捷徑範例
-New-Item -ItemType Directory -Path "C:\ProgramData\FDS\Scripts" -Force
-Copy-Item "<linkDisk來源路徑>" "C:\ProgramData\FDS\Scripts\=linkDisk.bat" -Force
+New-Item -ItemType Directory -Path "C:\ProgramData\DemoCorp\Scripts" -Force
+Copy-Item "<linkDisk來源路徑>" "C:\ProgramData\DemoCorp\Scripts\=linkDisk.bat" -Force
 $w = New-Object -ComObject WScript.Shell
 $s = $w.CreateShortcut("C:\Users\Public\Desktop\=linkDisk.lnk")
-$s.TargetPath = "C:\ProgramData\FDS\Scripts\=linkDisk.bat"
-$s.WorkingDirectory = "C:\ProgramData\FDS\Scripts"
+$s.TargetPath = "C:\ProgramData\DemoCorp\Scripts\=linkDisk.bat"
+$s.WorkingDirectory = "C:\ProgramData\DemoCorp\Scripts"
 $s.Save()`
       ),
       tableSection("step-5-software", "第五步、必要軟體安裝", [
@@ -230,9 +230,9 @@ echo $env:USERPROFILE
 
 # 網路 / 網域
 ipconfig /all
-nslookup fds.local
-nltest /dsgetdc:fds.local
-nltest /sc_query:fds.local
+nslookup corp.example
+nltest /dsgetdc:corp.example
+nltest /sc_query:corp.example
 
 # 共用槽
 net use

@@ -1258,7 +1258,11 @@ test("POST /api/forms/104/ragic-callback 帶 token 與 entryId 可接受 callbac
       assert.equal(payload.data.eventType, "row-updated");
     });
   } finally {
-    process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    if (originalToken === undefined) {
+      delete process.env.RAGIC_CALLBACK_TOKEN;
+    } else {
+      process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    }
   }
 });
 
@@ -1283,7 +1287,11 @@ test("POST /api/forms/104/ragic-callback token 錯誤會回 403", async () => {
       assert.equal(response.status, 403);
     });
   } finally {
-    process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    if (originalToken === undefined) {
+      delete process.env.RAGIC_CALLBACK_TOKEN;
+    } else {
+      process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    }
   }
 });
 
@@ -1304,10 +1312,15 @@ test("POST /api/forms/104/ragic-callback 缺 entryId 會回 400", async () => {
           eventType: "entry-updated",
         }),
       });
-      assert.equal(response.status, 400);
+      const responseBody = await response.text();
+      assert.equal(response.status, 400, responseBody);
     });
   } finally {
-    process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    if (originalToken === undefined) {
+      delete process.env.RAGIC_CALLBACK_TOKEN;
+    } else {
+      process.env.RAGIC_CALLBACK_TOKEN = originalToken;
+    }
   }
 });
 

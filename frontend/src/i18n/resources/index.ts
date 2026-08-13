@@ -4,6 +4,8 @@ import workReportZhTw from "./zh-TW/workReport";
 import workReportEn from "./en/workReport";
 import itDutyZhTw from "./zh-TW/itDuty";
 import itDutyEn from "./en/itDuty";
+import meetingMinutesZhTw from "./zh-TW/meetingMinutes";
+import meetingMinutesEn from "./en/meetingMinutes";
 
 // NOTE: 新頁面要擴語系時，請在這裡註冊新的 namespace resources。
 export const i18nResources = {
@@ -11,11 +13,13 @@ export const i18nResources = {
     common: commonZhTw,
     workReport: workReportZhTw,
     itDuty: itDutyZhTw,
+    meetingMinutes: meetingMinutesZhTw,
   },
   en: {
     common: commonEn,
     workReport: workReportEn,
     itDuty: itDutyEn,
+    meetingMinutes: meetingMinutesEn,
   },
 } as const;
 

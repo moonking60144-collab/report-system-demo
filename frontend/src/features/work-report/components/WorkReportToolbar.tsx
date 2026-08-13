@@ -14,6 +14,7 @@ import { SystemNoticePanel } from "./SystemNoticePanel";
 import type { NoticeState } from "../types";
 import type { WorkReportSelectableColumnMeta } from "../hooks/workReportColumnDefinitions";
 import { APP_VERSION } from "../../../version";
+import { SubsystemMenu } from "../../subsystems/components/SubsystemMenu";
 import { WorkReportColumnSettingsDrawer } from "./WorkReportColumnSettingsDrawer";
 
 interface WorkReportToolbarProps {
@@ -25,7 +26,6 @@ interface WorkReportToolbarProps {
   currentPageContextLabel: string;
   onOpenLandingPage: (key: WorkReportLandingPageKey) => void;
   onOpenDowntimePage?: () => void;
-  onOpenTechnicalInfoView: () => void;
   onOpenLocalSettingsView: () => void;
   showMobileFilterButton?: boolean;
   onOpenMobileFilters?: () => void;
@@ -55,7 +55,6 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
   currentPageContextLabel,
   onOpenLandingPage,
   onOpenDowntimePage,
-  onOpenTechnicalInfoView,
   onOpenLocalSettingsView,
   showMobileFilterButton = false,
   onOpenMobileFilters,
@@ -115,13 +114,7 @@ export const WorkReportToolbar = memo(function WorkReportToolbar({
                   {t("common:language.en")}
                 </button>
               </div>
-              <button
-                type="button"
-                className="page-view-chip page-view-chip--utility"
-                onClick={onOpenTechnicalInfoView}
-              >
-                {t("workReport:page.views.technicalInfo")}
-              </button>
+              <SubsystemMenu className="page-view-chip page-view-chip--utility" />
             </div>
           </div>
         </div>

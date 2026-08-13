@@ -531,9 +531,9 @@ test("upsertDayNote 記下 updatedByLabel", async () => {
   const created = await repo.upsertDayNote({
     noteDate: "2026-06-01",
     note: "客戶來訪",
-    updatedByLabel: "FD0287",
+    updatedByLabel: "DEMO-IT-01",
   });
-  assert.equal(created.updatedByLabel, "FD0287");
+  assert.equal(created.updatedByLabel, "DEMO-IT-01");
 });
 
 test("getDayNote / listDayNotesInRange 取得既有資料", async () => {

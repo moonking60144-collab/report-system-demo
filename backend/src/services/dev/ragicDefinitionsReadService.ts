@@ -8,6 +8,12 @@ import {
   findRepoRoot,
   normalizeDefinitionsPathspec,
 } from "./ragicDefinitionsPaths";
+import {
+  createRagicDefinitionsSnapshotService,
+  readCurrentRagicDefinitionsSnapshotPublication,
+  type LoadedRagicDefinitionsSnapshot,
+  type MaterializedRagicDefinitionsSnapshot,
+} from "./ragicDefinitionsSnapshotService";
 import { withDefinitionsReadLock } from "./ragicDefinitionsIoLock";
 import type {
   RagicDefinitionManifest,
@@ -18,6 +24,8 @@ import type {
   RagicDefinitionFormula,
   RagicDefinitionWorkflow,
   RagicDefinitionFormDetail,
+  RagicDefinitionFieldReference,
+  RagicDefinitionSearchType,
   RagicDefinitionSearchItem,
 } from "@shared-types/ragicDefinitions";
 
@@ -30,6 +38,8 @@ export type {
   RagicDefinitionFormula,
   RagicDefinitionWorkflow,
   RagicDefinitionFormDetail,
+  RagicDefinitionFieldReference,
+  RagicDefinitionSearchType,
   RagicDefinitionSearchItem,
 };
 
@@ -39,11 +49,18 @@ export interface RagicDefinitionsReadServiceOptions {
   definitionsRoot?: string;
   repoRoot?: string;
   cacheTtlMs?: number;
+  snapshotRoot?: string;
+  snapshotRetainCount?: number;
 }
 
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
+}
+
+interface SnapshotDescriptorCacheEntry {
+  manifestFingerprint: string;
+  value: RagicDefinitionsState["snapshot"];
 }
 
 function isValidFormPath(formPath: string): boolean {
@@ -71,8 +88,57 @@ function matchesQuery(values: Array<string | null | undefined>, q: string): bool
   return values.some((value) => String(value ?? "").toLowerCase().includes(needle));
 }
 
+function matchesDefinitionQuery(
+  values: Array<string | null | undefined>,
+  q: string
+): boolean {
+  if (matchesQuery(values, q)) return true;
+  const haystack = q.toLowerCase();
+  return values.some((value) => {
+    const candidate = String(value ?? "").trim().toLowerCase();
+    return candidate.length >= 2 && haystack.includes(candidate);
+  });
+}
+
+function workflowMatch(
+  workflow: RagicDefinitionWorkflow,
+  q: string,
+  fieldId: string
+): { sourceLine: number; excerpt: string } | null {
+  const needle = (fieldId || q).trim().toLowerCase();
+  if (!needle) {
+    return {
+      sourceLine: 1,
+      excerpt: workflow.content.slice(0, 800),
+    };
+  }
+  const content = workflow.content.toLowerCase();
+  const contentIndex = content.indexOf(needle);
+  const metadataMatched = matchesDefinitionQuery(
+    [workflow.scope, workflow.fileName],
+    needle
+  );
+  if (contentIndex < 0 && !metadataMatched) return null;
+  const matchIndex = Math.max(0, contentIndex);
+  const excerptStart = Math.max(0, matchIndex - 240);
+  const excerptEnd = Math.min(workflow.content.length, matchIndex + needle.length + 560);
+  return {
+    sourceLine: workflow.content.slice(0, matchIndex).split(/\r?\n/).length,
+    excerpt: workflow.content.slice(excerptStart, excerptEnd),
+  };
+}
+
 function workflowScope(fileName: string): string {
   return fileName.replace(/\.js$/i, "");
+}
+
+function linkedSourceFormPath(currentFormPath: string, mvp: string): string | null {
+  const [rawPath, rawForm] = mvp.split("|", 2);
+  const namespace = currentFormPath.split("/")[0] ?? "";
+  const pathParts = rawPath.split("/").filter(Boolean);
+  const formId = rawForm?.split("_", 1)[0]?.trim() ?? "";
+  const candidate = [namespace, ...pathParts, formId].filter(Boolean).join("/");
+  return isValidFormPath(candidate) ? candidate : null;
 }
 
 export function createRagicDefinitionsReadService(
@@ -84,7 +150,15 @@ export function createRagicDefinitionsReadService(
   const cacheTtlMs = Math.max(0, Math.trunc(options.cacheTtlMs ?? 5000));
   let formFilesCache: CacheEntry<string[]> | null = null;
   let formsCache: CacheEntry<RagicDefinitionForm[]> | null = null;
+  let snapshotDescriptorCache: SnapshotDescriptorCacheEntry | null = null;
+  let currentSnapshotLoadInFlight: Promise<LoadedRagicDefinitionsSnapshot> | null =
+    null;
   const formDetailCache = new Map<string, CacheEntry<RagicDefinitionFormDetail>>();
+  const snapshotService = createRagicDefinitionsSnapshotService({
+    definitionsRoot,
+    snapshotRoot: options.snapshotRoot,
+    retainCount: options.snapshotRetainCount,
+  });
 
   function isFresh<T>(entry: CacheEntry<T> | null): entry is CacheEntry<T> {
     return Boolean(entry && entry.expiresAt > Date.now());
@@ -97,7 +171,174 @@ export function createRagicDefinitionsReadService(
   function invalidateCache(): void {
     formFilesCache = null;
     formsCache = null;
+    snapshotDescriptorCache = null;
     formDetailCache.clear();
+  }
+
+  function getSnapshotDescriptorUnlocked(): RagicDefinitionsState["snapshot"] {
+    const publication = readCurrentRagicDefinitionsSnapshotPublication(
+      definitionsRoot
+    );
+    if (!publication) {
+      snapshotDescriptorCache = null;
+      return null;
+    }
+    if (
+      snapshotDescriptorCache?.manifestFingerprint ===
+      publication.manifestFingerprint
+    ) {
+      return snapshotDescriptorCache.value;
+    }
+    snapshotDescriptorCache = {
+      manifestFingerprint: publication.manifestFingerprint,
+      value: publication.descriptor,
+    };
+    return publication.descriptor;
+  }
+
+  async function getSnapshotDescriptor(): Promise<RagicDefinitionsState["snapshot"]> {
+    return withDefinitionsReadLock(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const descriptor = getSnapshotDescriptorUnlocked();
+          if (descriptor || attempt === 2) return descriptor;
+        } catch (error) {
+          snapshotDescriptorCache = null;
+          if (attempt === 2) throw error;
+        }
+        await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+      }
+      return null;
+    });
+  }
+
+  function withCurrentPublishedAt(
+    artifact: MaterializedRagicDefinitionsSnapshot,
+    publishedAt: string | null
+  ): MaterializedRagicDefinitionsSnapshot {
+    return {
+      ...artifact,
+      descriptor: {
+        ...artifact.descriptor,
+        publishedAt,
+      },
+    };
+  }
+
+  async function openCurrentSnapshot(): Promise<MaterializedRagicDefinitionsSnapshot> {
+    return withCurrentSnapshot(async (artifact) => artifact);
+  }
+
+  async function loadCurrentSnapshotInternal(): Promise<LoadedRagicDefinitionsSnapshot> {
+    return withDefinitionsReadLock(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const descriptor = getSnapshotDescriptorUnlocked();
+          if (!descriptor) {
+            if (attempt < 2) {
+              await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+              continue;
+            }
+            throw new Error("RAGIC_DEFINITIONS_SNAPSHOT_NOT_AVAILABLE");
+          }
+          let loaded = await snapshotService.loadVerified(descriptor.revision);
+          if (!loaded) {
+            loaded = await snapshotService.materializeCurrentAsync();
+          }
+          snapshotDescriptorCache = null;
+          const current = getSnapshotDescriptorUnlocked();
+          if (loaded && current?.revision === loaded.descriptor.revision) {
+            return {
+              ...loaded,
+              descriptor: {
+                ...loaded.descriptor,
+                publishedAt: current.publishedAt,
+              },
+            };
+          }
+        } catch (error) {
+          snapshotDescriptorCache = null;
+          if (attempt === 2) throw error;
+        }
+        await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+      }
+      throw new Error("RAGIC_DEFINITIONS_PUBLICATION_CHANGED");
+    });
+  }
+
+  function loadCurrentSnapshot(): Promise<LoadedRagicDefinitionsSnapshot> {
+    if (currentSnapshotLoadInFlight) return currentSnapshotLoadInFlight;
+    const tracked = loadCurrentSnapshotInternal().finally(() => {
+      if (currentSnapshotLoadInFlight === tracked) {
+        currentSnapshotLoadInFlight = null;
+      }
+    });
+    currentSnapshotLoadInFlight = tracked;
+    return tracked;
+  }
+
+  async function withCurrentSnapshot<T>(
+    consume: (artifact: MaterializedRagicDefinitionsSnapshot) => Promise<T>
+  ): Promise<T> {
+    return withDefinitionsReadLock(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const descriptor = getSnapshotDescriptorUnlocked();
+          if (descriptor) {
+            const existing = snapshotService.open(descriptor.revision);
+            if (existing) {
+              return consume(
+                withCurrentPublishedAt(existing, descriptor.publishedAt)
+              );
+            }
+            const materialized = snapshotService.materializeCurrent();
+            snapshotDescriptorCache = null;
+            const current = getSnapshotDescriptorUnlocked();
+            if (current?.revision === materialized.descriptor.revision) {
+              return consume(
+                withCurrentPublishedAt(materialized, current.publishedAt)
+              );
+            }
+          }
+        } catch (error) {
+          snapshotDescriptorCache = null;
+          if (attempt === 2) throw error;
+        }
+        if (attempt < 2) {
+          await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+        }
+      }
+      throw new Error("RAGIC_DEFINITIONS_PUBLICATION_CHANGED");
+    });
+  }
+
+  async function listSnapshots() {
+    return withDefinitionsReadLock(async () => snapshotService.listVerified());
+  }
+
+  async function getSnapshotHistoryDescriptor(revision: string) {
+    return withDefinitionsReadLock(async () => snapshotService.describe(revision));
+  }
+
+  async function openSnapshot(
+    revision: string
+  ): Promise<MaterializedRagicDefinitionsSnapshot | null> {
+    return withSnapshot(revision, async (artifact) => artifact);
+  }
+
+  async function loadSnapshot(revision: string) {
+    return withDefinitionsReadLock(async () =>
+      snapshotService.loadVerified(revision)
+    );
+  }
+
+  async function withSnapshot<T>(
+    revision: string,
+    consume: (artifact: MaterializedRagicDefinitionsSnapshot | null) => Promise<T>
+  ): Promise<T> {
+    return withDefinitionsReadLock(async () =>
+      consume(snapshotService.open(revision))
+    );
   }
 
   async function readManifest(): Promise<RagicDefinitionManifest | null> {
@@ -133,6 +374,7 @@ export function createRagicDefinitionsReadService(
       definitionsRoot,
       exists: existsSync(definitionsRoot),
       manifest: await readManifest(),
+      snapshot: getSnapshotDescriptorUnlocked(),
       gitStatus: await getGitStatus(),
     };
   }
@@ -224,17 +466,71 @@ export function createRagicDefinitionsReadService(
     return withDefinitionsReadLock(() => readFormUnlocked(formPath));
   }
 
+  async function resolveFieldReferences(
+    field: RagicDefinitionField,
+    detail: RagicDefinitionFormDetail
+  ): Promise<RagicDefinitionFieldReference[]> {
+    const references: RagicDefinitionFieldReference[] = [];
+    const linkedFieldId = field.attrs.l?.trim() ?? "";
+    const linkedField = linkedFieldId
+      ? detail.fields.find((candidate) => candidate.fieldId === linkedFieldId) ?? null
+      : null;
+    if (linkedFieldId) {
+      references.push({
+        attribute: "l",
+        fieldId: linkedFieldId,
+        formPath: detail.form.formPath,
+        fieldName: linkedField?.fieldName ?? null,
+        kind: linkedField?.kind ?? null,
+        position: linkedField?.position ?? null,
+      });
+    }
+
+    const mvp = linkedField?.attrs.mvp ?? field.attrs.mvp ?? "";
+    const sourceFormPath = mvp
+      ? linkedSourceFormPath(detail.form.formPath, mvp)
+      : null;
+    let sourceDetail: RagicDefinitionFormDetail | null = null;
+    if (sourceFormPath) {
+      try {
+        sourceDetail = sourceFormPath === detail.form.formPath
+          ? detail
+          : await readFormUnlocked(sourceFormPath);
+      } catch {
+        sourceDetail = null;
+      }
+    }
+
+    for (const attribute of ["vd", "stf"] as const) {
+      const referencedFieldId = field.attrs[attribute]?.trim() ?? "";
+      if (!referencedFieldId) continue;
+      const referencedField = sourceDetail?.fields.find(
+        (candidate) => candidate.fieldId === referencedFieldId
+      ) ?? null;
+      references.push({
+        attribute,
+        fieldId: referencedFieldId,
+        formPath: sourceFormPath,
+        fieldName: referencedField?.fieldName ?? null,
+        kind: referencedField?.kind ?? null,
+        position: referencedField?.position ?? null,
+      });
+    }
+    return references;
+  }
+
   async function searchUnlocked(params: {
     q?: string;
     fieldId?: string;
     formPath?: string;
-    type?: "all" | "field" | "formula";
+    type?: RagicDefinitionSearchType;
     limit?: number;
   }) {
     const q = params.q?.trim() ?? "";
     const fieldId = params.fieldId?.trim() ?? "";
     const type = params.type ?? "all";
     const limit = Math.max(1, Math.trunc(params.limit ?? 200));
+    const revision = getSnapshotDescriptorUnlocked()?.revision ?? null;
     const forms = params.formPath
       ? [(await readFormUnlocked(params.formPath)).form]
       : await readAllForms();
@@ -248,12 +544,12 @@ export function createRagicDefinitionsReadService(
         formulas.map((formula) => [`${formula.fieldId}:${formula.formulaKind}`, formula])
       );
 
-      if (type !== "formula") {
+      if (type === "all" || type === "field") {
         for (const field of fields) {
           if (fieldId && field.fieldId !== fieldId) continue;
           if (
             !fieldId &&
-            !matchesQuery(
+            !matchesDefinitionQuery(
               [
                 form.formPath,
                 form.formName,
@@ -277,21 +573,28 @@ export function createRagicDefinitionsReadService(
             kind: field.kind,
             position: field.position,
             sourceLine: field.sourceLine,
+            attrs: field.attrs,
+            fieldReferences: fieldId
+              ? await resolveFieldReferences(field, detail)
+              : [],
             formulaKind: null,
             nuiFormula: null,
             displayFormula: null,
+            workflowScope: null,
+            workflowFileName: null,
+            workflowExcerpt: null,
           });
           if (data.length > limit) break;
         }
       }
 
       if (data.length > limit) break;
-      if (type !== "field") {
+      if (type === "all" || type === "formula") {
         for (const formula of formulasByKey.values()) {
           if (fieldId && formula.fieldId !== fieldId) continue;
           if (
             !fieldId &&
-            !matchesQuery(
+            !matchesDefinitionQuery(
               [
                 form.formPath,
                 form.formName,
@@ -317,9 +620,45 @@ export function createRagicDefinitionsReadService(
             kind: null,
             position: formula.position,
             sourceLine: formula.sourceLine,
+            attrs: null,
+            fieldReferences: [],
             formulaKind: formula.formulaKind,
             nuiFormula: formula.nuiFormula,
             displayFormula: formula.displayFormula,
+            workflowScope: null,
+            workflowFileName: null,
+            workflowExcerpt: null,
+          });
+          if (data.length > limit) break;
+        }
+      }
+
+      if (data.length > limit) break;
+      if (type === "all" || type === "workflow") {
+        const linkedField = fieldId
+          ? fields.find((field) => field.fieldId === fieldId) ?? null
+          : null;
+        for (const workflow of detail.workflows) {
+          const match = workflowMatch(workflow, q, fieldId);
+          if (!match) continue;
+          data.push({
+            type: "workflow",
+            formPath: form.formPath,
+            formName: form.formName,
+            sourceRelativePath: `forms/${form.formPath}/workflows/${workflow.fileName}`,
+            fieldId: linkedField?.fieldId ?? null,
+            fieldName: linkedField?.fieldName ?? null,
+            kind: null,
+            position: linkedField?.position ?? null,
+            sourceLine: match.sourceLine,
+            attrs: null,
+            fieldReferences: [],
+            formulaKind: null,
+            nuiFormula: null,
+            displayFormula: null,
+            workflowScope: workflow.scope,
+            workflowFileName: workflow.fileName,
+            workflowExcerpt: match.excerpt,
           });
           if (data.length > limit) break;
         }
@@ -338,6 +677,7 @@ export function createRagicDefinitionsReadService(
         fieldId,
         formPath: params.formPath ?? "",
         type,
+        revision,
       },
     };
   }
@@ -346,7 +686,7 @@ export function createRagicDefinitionsReadService(
     q?: string;
     fieldId?: string;
     formPath?: string;
-    type?: "all" | "field" | "formula";
+    type?: RagicDefinitionSearchType;
     limit?: number;
   }) {
     return withDefinitionsReadLock(() => searchUnlocked(params));
@@ -356,6 +696,16 @@ export function createRagicDefinitionsReadService(
     definitionsRoot,
     repoRoot,
     invalidateCache,
+    getSnapshotDescriptorUnlocked,
+    getSnapshotDescriptor,
+    openCurrentSnapshot,
+    loadCurrentSnapshot,
+    withCurrentSnapshot,
+    listSnapshots,
+    getSnapshotHistoryDescriptor,
+    openSnapshot,
+    loadSnapshot,
+    withSnapshot,
     getStateUnlocked,
     getState,
     listForms,

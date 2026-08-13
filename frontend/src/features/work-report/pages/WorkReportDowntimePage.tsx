@@ -80,6 +80,7 @@ import {
 import type { NoticeState, UiLanguage, WorkReportFormId } from "../types";
 import { getApiErrorCode, getErrorMessage } from "../utils/errorUtils";
 import { lastMonthInfo, triggerBlobDownload } from "../utils/exportDownload";
+import { SubsystemMenu } from "../../subsystems/components/SubsystemMenu";
 import { LatestRequestGate } from "../utils/latestRequestGate";
 import {
   applyDowntimeOptimisticMutations,
@@ -1935,15 +1936,7 @@ export function WorkReportDowntimePage() {
                   {t("workReport:page.views.localSettings")}
                 </button>
               </div>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={false}
-                className="page-view-chip page-view-chip--push-right"
-                onClick={() => navigate("/dev")}
-              >
-                {t("workReport:page.views.technicalInfo")}
-              </button>
+              <SubsystemMenu className="page-view-chip page-view-chip--push-right" />
             </div>
           </div>
         </header>

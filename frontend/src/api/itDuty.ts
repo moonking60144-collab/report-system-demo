@@ -1,7 +1,9 @@
 import { createApiClient } from "./apiClient";
 import {
+  encodeTaskActorLabelHeader,
   getOrCreateClientId,
   getOrCreateTabId,
+  readWorkReportDeviceLabel,
 } from "../utils/clientIdentity";
 import { readSystemNoticeAdminToken } from "../utils/systemNoticeAdminSession";
 
@@ -12,11 +14,9 @@ function buildActorHeaders(): Record<string, string> {
     "x-debug-client-id": getOrCreateClientId(),
     "x-debug-tab-id": getOrCreateTabId(),
   };
-  if (typeof window !== "undefined") {
-    const label = window.localStorage.getItem("debug.deviceLabel");
-    if (label && label.trim()) {
-      headers["x-debug-device-label"] = label.trim();
-    }
+  const label = readWorkReportDeviceLabel();
+  if (label) {
+    headers["x-debug-device-label"] = encodeTaskActorLabelHeader(label);
   }
   const token = readSystemNoticeAdminToken();
   if (token) {

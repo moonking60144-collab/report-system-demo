@@ -64,7 +64,6 @@ const testRuntimeDir = mkdtempSync(join(tmpdir(), "ragic-report-backend-tests-")
 const testEnv = {
   ...process.env,
   NODE_ENV: "test",
-  DEMO_MODE: "false",
   RAGIC_PROTOCOL: "http",
   RAGIC_DOMAIN: "127.0.0.1:9",
   RAGIC_API_KEY: "backend-test-only",

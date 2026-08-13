@@ -242,7 +242,7 @@ export function RagicFieldInlineSearch({
           role="img"
           aria-label="使用說明"
           title={
-            "輸入表單名 / 欄位名 / 欄位 ID 即時搜尋\n貼上 Ragic 表單網址（如 https://fdtw.app/default/forms8/104）→ 自動鎖定該表單\n點任何表單可開啟詳細欄位列表，並在裡面再次搜尋"
+            "輸入表單名 / 欄位名 / 欄位 ID 即時搜尋\n貼上 Ragic 表單網址（如 https://demo.local/default/forms8/104）→ 自動鎖定該表單\n點任何表單可開啟詳細欄位列表，並在裡面再次搜尋"
           }
         >
           ⓘ

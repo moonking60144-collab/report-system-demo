@@ -1,0 +1,49 @@
+[
+  {
+    "fieldId": "1001",
+    "fieldName": "Work Order",
+    "kind": "D",
+    "position": "A2",
+    "sourceLine": 10,
+    "attrs": {}
+  },
+  {
+    "fieldId": "1002",
+    "fieldName": "Completed Quantity",
+    "kind": "N",
+    "position": "B2",
+    "sourceLine": 11,
+    "attrs": {}
+  },
+  {
+    "fieldId": "1003",
+    "fieldName": "Machine",
+    "kind": "L",
+    "position": "C2",
+    "sourceLine": 12,
+    "attrs": {
+      "mvp": "/master-data|1_Machines",
+      "stf": "2001"
+    }
+  },
+  {
+    "fieldId": "1004",
+    "fieldName": "Machine Name",
+    "kind": "D",
+    "position": "D2",
+    "sourceLine": 13,
+    "attrs": {
+      "l": "1003",
+      "vd": "2002",
+      "ro": "true"
+    }
+  },
+  {
+    "fieldId": "1005",
+    "fieldName": "Remaining Quantity",
+    "kind": "N",
+    "position": "E2",
+    "sourceLine": 14,
+    "attrs": {}
+  }
+]
