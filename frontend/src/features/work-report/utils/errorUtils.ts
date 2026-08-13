@@ -4,6 +4,7 @@ import i18n from "../../../i18n";
 const ERROR_CODE_TRANSLATION_MAP: Record<string, string> = {
   RAGIC_WRITE_FAILED: "workReport:errors.codes.ragicWriteFailed",
   RAGIC_ACTION_BUTTON_FAILED: "workReport:errors.codes.ragicActionButtonFailed",
+  RAGIC_CIRCUIT_OPEN: "workReport:errors.codes.ragicCircuitOpen",
   REPORT_NOT_FOUND: "workReport:errors.codes.reportNotFound",
   TASK_NOT_FOUND: "workReport:errors.codes.taskNotFound",
   FORM_NOT_SUPPORTED: "workReport:errors.codes.formNotSupported",
@@ -46,6 +47,7 @@ interface WorkReportTaskErrorLike {
 }
 
 const GENERIC_HTTP_STATUS_MESSAGE_PATTERN = /^request failed with status code \d+$/i;
+const ALWAYS_TRANSLATE_ERROR_CODES = new Set(["RAGIC_CIRCUIT_OPEN"]);
 
 export function translateWorkReportErrorCode(errorCode: unknown): string | null {
   if (typeof errorCode !== "string") {
@@ -80,16 +82,32 @@ export function getWorkReportTaskErrorMessage(task: WorkReportTaskErrorLike): st
     normalizeErrorText(task.error?.message) ||
     normalizeErrorText(task.message);
 
-  if (translatedCode && (!rawMessage || GENERIC_HTTP_STATUS_MESSAGE_PATTERN.test(rawMessage))) {
+  if (
+    translatedCode &&
+    (ALWAYS_TRANSLATE_ERROR_CODES.has(String(errorCode ?? "")) ||
+      !rawMessage ||
+      GENERIC_HTTP_STATUS_MESSAGE_PATTERN.test(rawMessage))
+  ) {
     return translatedCode;
   }
   return rawMessage || translatedCode || "";
+}
+
+export function getApiErrorCode(error: unknown): string | null {
+  if (!(error instanceof AxiosError)) {
+    return null;
+  }
+  const errorCode = error.response?.data?.error?.code;
+  return typeof errorCode === "string" ? errorCode : null;
 }
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof AxiosError) {
     const errorCode = error.response?.data?.error?.code;
     const rawMessage = error.response?.data?.error?.message;
+    if (ALWAYS_TRANSLATE_ERROR_CODES.has(String(errorCode ?? ""))) {
+      return translateWorkReportErrorCode(errorCode) ?? error.message;
+    }
     // backend 已附具體原因（如 Ragic 拒絕訊息）時優先顯示；缺訊息或只是通用
     // HTTP 字串才退回錯誤碼翻譯——與 getWorkReportTaskErrorMessage 同一準則
     if (

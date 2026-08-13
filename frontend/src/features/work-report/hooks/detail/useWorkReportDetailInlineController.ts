@@ -40,7 +40,6 @@ import {
 import {
   applyCreateDefaultsToFormState,
   buildInitialFormState,
-  writeRememberedCreateDefaults,
 } from "../../../../components/report-form/formMemory";
 import { maskTimeInputResult } from "../../../../components/report-form/timeUtils";
 import { normalizeShiftTypeValue } from "../../../../components/report-form/form-logic/inference";
@@ -58,6 +57,7 @@ import { calculateDurationMs, createFrontendOperationId } from "../../logging/fr
 import { saveRetryableMutationRecord } from "../../taskRetryStore";
 import { getErrorMessage } from "../../utils";
 import type { WorkReportFormId } from "../../types";
+import type { WorkReportOptimisticMutationInput } from "../../workReportOptimisticMutation";
 import type { DetailTableRow, InlineEditableDetailKey, LinkedPickerFieldKey, LinkedPickerState } from "./types";
 import {
   findOptionByValue,
@@ -111,7 +111,8 @@ interface UseWorkReportDetailInlineControllerArgs {
   registerAcceptedMutationTask: (
     kind: "create" | "update",
     accepted: CreateReportTaskAcceptedResult,
-    rowId?: string
+    rowId?: string,
+    optimisticInput?: WorkReportOptimisticMutationInput
   ) => Promise<void>;
   createClientMutationId: () => string;
   writePendingMutationReplay: (pending: {
@@ -120,7 +121,8 @@ interface UseWorkReportDetailInlineControllerArgs {
     entryId: string;
     rowId?: string;
     payload: ReportMutationPayload;
-    clientMutationId: string;
+      clientMutationId: string;
+      createIdempotencyKey?: string;
     attempts: number;
     createdAt: string;
     editSessionId?: string;
@@ -410,10 +412,18 @@ export function useWorkReportDetailInlineController({
       scrollRoot.scrollTop += elementRect.bottom - rootRect.bottom + padding;
     }
 
+    const stickyActionCell = element
+      .closest("tr")
+      ?.querySelector<HTMLElement>("td.col-actions");
+    const visibleRight =
+      stickyActionCell && !stickyActionCell.contains(element)
+        ? Math.min(rootRect.right - padding, stickyActionCell.getBoundingClientRect().left - padding)
+        : rootRect.right - padding;
+
     if (elementRect.left < rootRect.left + padding) {
       scrollRoot.scrollLeft += elementRect.left - rootRect.left - padding;
-    } else if (elementRect.right > rootRect.right - padding) {
-      scrollRoot.scrollLeft += elementRect.right - rootRect.right + padding;
+    } else if (elementRect.right > visibleRight) {
+      scrollRoot.scrollLeft += elementRect.right - visibleRight;
     }
   }, []);
 
@@ -560,6 +570,9 @@ export function useWorkReportDetailInlineController({
         return;
       }
       if (event.key === "Enter") {
+        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+          return;
+        }
         if (target instanceof HTMLTextAreaElement && event.shiftKey) {
           return;
         }
@@ -658,19 +671,16 @@ export function useWorkReportDetailInlineController({
       const createDraft =
         draftOverride
           ? applyCreateDefaultsToFormState(
-              formId,
               draftOverride,
               record,
               options.machineId ?? [],
               options.operatorId ?? []
             )
           : buildInitialFormState(
-              formId,
               "create",
               null,
               record,
-              options.machineId ?? [],
-              options.operatorId ?? []
+              options.machineId ?? []
             );
       setEditingRowId(rowId);
       setEditingRowDraft(createDraft);
@@ -1138,12 +1148,14 @@ export function useWorkReportDetailInlineController({
           entryId: safeEntryId,
           payload,
           clientMutationId,
+          createIdempotencyKey: clientMutationId,
           expectedEntryLastUpdatedAt,
           attempts: 0,
           createdAt: new Date().toISOString(),
         });
         const accepted = await createReportAccepted(formId, safeEntryId, payload, {
           clientMutationId,
+          createIdempotencyKey: clientMutationId,
           workOrderNo,
           expectedEntryLastUpdatedAt,
         });
@@ -1156,12 +1168,28 @@ export function useWorkReportDetailInlineController({
           workOrderNo,
           payload,
           clientMutationId,
+          createIdempotencyKey: clientMutationId,
           expectedEntryLastUpdatedAt,
           createdAt: new Date().toISOString(),
         });
         clearPendingMutationReplay();
-        writeRememberedCreateDefaults(formId, draft, safeEntryId);
-        await registerAcceptedMutationTask("create", accepted);
+        await registerAcceptedMutationTask("create", accepted, undefined, {
+          mutationId: clientMutationId,
+          operation: "work-report-create",
+          target: {
+            domain: "work-report",
+            formId,
+            entryId: safeEntryId,
+            clientRowKey: clientMutationId,
+          },
+          patch: {
+            kind: "create-rows",
+            rows: [{ clientRowKey: clientMutationId, payload }],
+          },
+          previousSnapshot: null,
+          reconcilePolicy: "replace-target",
+          failurePolicy: "rollback",
+        });
         const endedAt = new Date().toISOString();
         logDetailEvent("task", "inline-create-accepted", "inline 新增已 accepted", {
           rowId,
@@ -1310,7 +1338,24 @@ export function useWorkReportDetailInlineController({
             createdAt: new Date().toISOString(),
           });
           clearPendingMutationReplay();
-          await registerAcceptedMutationTask("update", accepted, row.rowId);
+          await registerAcceptedMutationTask("update", accepted, row.rowId, {
+            mutationId: clientMutationId,
+            operation: "work-report-update",
+            target: {
+              domain: "work-report",
+              formId,
+              entryId: safeEntryId,
+              rowId: row.rowId,
+            },
+            patch: {
+              kind: "update-row",
+              rowId: row.rowId,
+              payload,
+            },
+            previousSnapshot: row,
+            reconcilePolicy: "replace-target",
+            failurePolicy: "rollback",
+          });
           const endedAt = new Date().toISOString();
           logDetailEvent("task", "inline-update-accepted", "inline 更新已 accepted", {
             rowId: row.rowId,

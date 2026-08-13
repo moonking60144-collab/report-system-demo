@@ -5,6 +5,29 @@
 }
 
 @media (max-width: 1366px) {
+  .work-report-workspace-toolbar {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .work-report-workspace-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .work-report-workspace-center {
+    flex: 1 1 380px;
+  }
+
+  .workspace-quick-search {
+    display: grid;
+  }
+
+  .workspace-page-size {
+    padding-left: 0;
+  }
+
   .detail-page-header {
     align-items: stretch;
   }
@@ -153,7 +176,7 @@
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 960px) {
   .ragic-list-shell,
   .ragic-list-shell.is-sidebar-collapsed {
     grid-template-columns: 1fr;
@@ -234,6 +257,7 @@
     align-items: stretch;
   }
 
+  .page-view-toolbar,
   .page-view-switch {
     width: 100%;
   }
@@ -261,6 +285,10 @@
 
   .toolbar-title-actions {
     justify-content: flex-start;
+  }
+
+  .page-current-context {
+    flex-wrap: wrap;
   }
 
   .toolbar-title-side {
@@ -304,13 +332,35 @@
     display: inline-flex;
   }
 
+  .page-view-toolbar,
   .page-view-switch {
     gap: 0.4rem;
-    flex-wrap: wrap;
+  }
+
+  .page-view-toolbar {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .page-view-toolbar::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .page-view-toolbar::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: #aebdcb;
+  }
+
+  .page-view-switch {
+    width: max-content;
+    min-width: 100%;
+    flex-wrap: nowrap;
   }
 
   .page-view-chip {
-    flex: 0 1 auto;
+    flex: none;
+    white-space: nowrap;
   }
 
   .toolbar-title-actions {
@@ -337,6 +387,11 @@
     justify-content: flex-start;
   }
 
+  .system-notice-panel-actions .toolbar-btn {
+    flex: none;
+    white-space: nowrap;
+  }
+
   .filter-row--fields {
     grid-template-columns: 1fr;
     gap: 0.55rem;
@@ -351,6 +406,12 @@
   .filter-field input,
   .filter-field .ant-select {
     min-width: 100%;
+  }
+
+  .filter-field input,
+  .filter-field .ant-select-selection-item,
+  .filter-field .ant-select-selection-placeholder {
+    font-size: 16px;
   }
 
   .filter-row--actions {
@@ -385,6 +446,92 @@
     flex: 1 1 0;
   }
 
+  .work-report-workspace-toolbar {
+    position: static;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    padding: 0.55rem;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .work-report-workspace-context {
+    width: 100%;
+  }
+
+  .work-report-workspace-center {
+    display: flex;
+    flex: none;
+    width: 100%;
+  }
+
+  .work-report-workspace-center .workspace-quick-search {
+    display: grid;
+  }
+
+  .workspace-pager {
+    display: none;
+  }
+
+  .work-report-workspace-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .work-report-workspace-actions .toolbar-btn,
+  .work-report-workspace-actions .toolbar-icon-btn,
+  .workspace-page-size,
+  .workspace-display-mode {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .work-report-workspace-actions .workspace-filter-btn {
+    display: inline-flex;
+  }
+
+  .workspace-display-mode {
+    justify-content: stretch;
+  }
+
+  .workspace-display-mode button {
+    flex: 1 1 0;
+  }
+
+  .workspace-page-size {
+    justify-content: space-between;
+    padding: 0 0.45rem;
+  }
+
+  .workspace-refresh-btn {
+    grid-column: 1 / -1;
+  }
+
+  .work-report-filter-panel-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .work-report-filter-panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .filter-pending-state {
+    align-self: flex-start;
+  }
+
+  .work-report-filter-panel-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .work-report-filter-panel-actions .toolbar-btn {
+    min-height: 44px;
+  }
+
   .filter-row-inline-tools {
     justify-content: space-between;
   }
@@ -416,15 +563,15 @@
   }
 
   .status-summary-strip {
+    flex-wrap: nowrap;
     gap: 0.45rem;
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
 
   .status-summary-item {
-    width: 100%;
-  }
-
-  .status-summary-item + .status-summary-item::before {
-    display: none;
+    width: auto;
+    flex: none;
   }
 
   .subtable-wrap {

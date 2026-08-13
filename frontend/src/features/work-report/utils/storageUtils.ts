@@ -6,11 +6,14 @@ import {
   WORK_REPORT_COLUMN_MODE_STORAGE_KEY,
 } from "../constants";
 import type {
+  ColumnColorOverrides,
   ColumnDisplayMode,
   ColumnKey,
   ColumnWidthOverrides,
   HydrationCachePayload,
   HydrationCacheWriteJob,
+  WorkReportColumnColor,
+  WorkReportTableLayoutPreferences,
 } from "../types";
 import { dedupeRecordsById } from "./recordUtils";
 
@@ -128,7 +131,15 @@ export function readColumnDisplayMode(): ColumnDisplayMode {
     const raw = String(
       window.localStorage.getItem(WORK_REPORT_COLUMN_MODE_STORAGE_KEY) ?? ""
     ).trim();
-    if (raw === "full" || raw === "fit" || raw === "compact") {
+    if (raw === "full") {
+      try {
+        window.localStorage.setItem(WORK_REPORT_COLUMN_MODE_STORAGE_KEY, "fit");
+      } catch {
+        // NOTE: 偏好遷移寫回失敗時仍使用合法的 fit 模式
+      }
+      return "fit";
+    }
+    if (raw === "fit" || raw === "compact") {
       return raw;
     }
     return "compact";
@@ -160,7 +171,151 @@ function getHiddenColumnsStorageKey(formId: string, mode: ColumnDisplayMode): st
   return `work-report:${formId}:hidden-columns:${mode}:v1`;
 }
 
-export function readColumnWidthOverrides(
+function getTableLayoutStorageKey(formId: string, mode: ColumnDisplayMode): string {
+  return `work-report:${formId}:table-layout:${mode}:v2`;
+}
+
+const WORK_REPORT_COLUMN_COLORS = new Set<WorkReportColumnColor>([
+  "none",
+  "gray-soft",
+  "amber-soft",
+  "blue-soft",
+  "cyan-soft",
+  "green-soft",
+  "rose-soft",
+  "violet-soft",
+]);
+
+function reconcileColumnKeys(values: unknown, availableColumnKeys: ColumnKey[]): ColumnKey[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  const available = new Set(availableColumnKeys);
+  return Array.from(
+    new Set(
+      values.filter(
+        (value): value is ColumnKey =>
+          typeof value === "string" && available.has(value)
+      )
+    )
+  );
+}
+
+export function createDefaultWorkReportTableLayout(
+  availableColumnKeys: ColumnKey[]
+): WorkReportTableLayoutPreferences {
+  return {
+    version: 2,
+    hiddenColumnKeys: [],
+    columnOrder: [...availableColumnKeys],
+    columnWidths: {},
+    columnColors: {},
+  };
+}
+
+export function reconcileWorkReportTableLayout(
+  value: unknown,
+  availableColumnKeys: ColumnKey[],
+  legacy: {
+    hiddenColumnKeys?: ColumnKey[];
+    columnWidths?: ColumnWidthOverrides;
+  } = {}
+): WorkReportTableLayoutPreferences {
+  const candidate =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Partial<WorkReportTableLayoutPreferences>)
+      : null;
+  const available = new Set(availableColumnKeys);
+  const savedOrder = reconcileColumnKeys(candidate?.columnOrder, availableColumnKeys);
+  const missingColumnKeys = availableColumnKeys.filter((key) => !savedOrder.includes(key));
+  const rawWidths = candidate?.columnWidths ?? legacy.columnWidths ?? {};
+  const rawColors = candidate?.columnColors ?? {};
+
+  const columnWidths = Object.fromEntries(
+    Object.entries(rawWidths).filter(([key, width]) => {
+      return available.has(key) && typeof width === "number" && Number.isFinite(width) && width >= 48;
+    })
+  ) as ColumnWidthOverrides;
+  const columnColors = Object.fromEntries(
+    Object.entries(rawColors).filter(([key, color]) => {
+      return available.has(key) && WORK_REPORT_COLUMN_COLORS.has(color as WorkReportColumnColor);
+    })
+  ) as ColumnColorOverrides;
+
+  return {
+    version: 2,
+    hiddenColumnKeys: reconcileColumnKeys(
+      candidate?.hiddenColumnKeys ?? legacy.hiddenColumnKeys ?? [],
+      availableColumnKeys
+    ),
+    columnOrder: [...savedOrder, ...missingColumnKeys],
+    columnWidths,
+    columnColors,
+  };
+}
+
+export function readWorkReportTableLayout(
+  formId: string,
+  mode: ColumnDisplayMode,
+  availableColumnKeys: ColumnKey[]
+): WorkReportTableLayoutPreferences {
+  const legacy = {
+    hiddenColumnKeys: readHiddenColumns(formId, mode),
+    columnWidths: readColumnWidthOverrides(formId, mode),
+  };
+  if (typeof window === "undefined") {
+    return reconcileWorkReportTableLayout(null, availableColumnKeys, legacy);
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getTableLayoutStorageKey(formId, mode));
+    return reconcileWorkReportTableLayout(
+      raw ? JSON.parse(raw) : null,
+      availableColumnKeys,
+      legacy
+    );
+  } catch {
+    return reconcileWorkReportTableLayout(null, availableColumnKeys, legacy);
+  }
+}
+
+export function writeWorkReportTableLayout(
+  formId: string,
+  mode: ColumnDisplayMode,
+  layout: WorkReportTableLayoutPreferences,
+  availableColumnKeys: ColumnKey[]
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const normalized = reconcileWorkReportTableLayout(layout, availableColumnKeys);
+    window.localStorage.setItem(
+      getTableLayoutStorageKey(formId, mode),
+      JSON.stringify(normalized)
+    );
+  } catch {
+    // NOTE: localStorage 寫入失敗時不阻塞主流程
+  }
+}
+
+export function resetWorkReportTableLayout(
+  formId: string,
+  mode: ColumnDisplayMode
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(getTableLayoutStorageKey(formId, mode));
+    window.localStorage.removeItem(getColumnWidthOverridesStorageKey(formId, mode));
+    window.localStorage.removeItem(getHiddenColumnsStorageKey(formId, mode));
+  } catch {
+    // NOTE: localStorage 清除失敗時不阻塞主流程
+  }
+}
+
+function readColumnWidthOverrides(
   formId: string,
   mode: ColumnDisplayMode
 ): ColumnWidthOverrides {
@@ -189,33 +344,7 @@ export function readColumnWidthOverrides(
   }
 }
 
-export function writeColumnWidthOverrides(
-  formId: string,
-  mode: ColumnDisplayMode,
-  overrides: ColumnWidthOverrides
-): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    const entries = Object.entries(overrides).filter(([, value]) => {
-      return typeof value === "number" && Number.isFinite(value) && value >= 48;
-    });
-    if (entries.length === 0) {
-      window.localStorage.removeItem(getColumnWidthOverridesStorageKey(formId, mode));
-      return;
-    }
-    window.localStorage.setItem(
-      getColumnWidthOverridesStorageKey(formId, mode),
-      JSON.stringify(Object.fromEntries(entries))
-    );
-  } catch {
-    // NOTE: localStorage 寫入失敗時不阻塞主流程
-  }
-}
-
-export function readHiddenColumns(
+function readHiddenColumns(
   formId: string,
   mode: ColumnDisplayMode
 ): ColumnKey[] {
@@ -235,30 +364,5 @@ export function readHiddenColumns(
     return parsed.filter((value): value is ColumnKey => typeof value === "string" && value.trim().length > 0);
   } catch {
     return [];
-  }
-}
-
-export function writeHiddenColumns(
-  formId: string,
-  mode: ColumnDisplayMode,
-  hiddenColumnKeys: ColumnKey[]
-): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    const next = Array.from(
-      new Set(
-        hiddenColumnKeys.filter((value): value is ColumnKey => typeof value === "string" && value.trim().length > 0)
-      )
-    );
-    if (next.length === 0) {
-      window.localStorage.removeItem(getHiddenColumnsStorageKey(formId, mode));
-      return;
-    }
-    window.localStorage.setItem(getHiddenColumnsStorageKey(formId, mode), JSON.stringify(next));
-  } catch {
-    // NOTE: localStorage 寫入失敗時不阻塞主流程
   }
 }

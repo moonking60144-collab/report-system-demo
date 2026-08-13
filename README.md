@@ -32,7 +32,7 @@ npm run dev
 
 開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看欄位索引、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
 
-本版已同步主系統近期資料流調整：報工新增 / 單筆刪除 / 批次新增 / 批次刪除都會進任務中心追蹤；Form 16 停機新增改成可重送的 queue task；任務 polling 遇到短暫網路錯誤不再由前端自行判定失敗，而是以後端 registry 狀態為準。
+本版已同步主系統近期資料流調整：報工與 Form 16 寫入在 accepted 後先以 optimistic overlay 更新畫面，再由背景 worker、registry 與 read-model projection 確認結果；新增 / 單筆刪除 / 批次新增 / 批次刪除都能在任務中心追蹤與重送。列表也加入精確篩選、欄位設定與 A4 PDF 排程下載，PDF 可調字級並以機台區隔連續排列。
 
 ---
 
@@ -96,11 +96,18 @@ sequenceDiagram
 
 ### 寫入一致性
 - **任務化 mutation**：報工新增、單筆刪除、批次新增、批次刪除都走 accepted task + registry；前端任務中心可看 pending/running/success/failed 與重送提示
+- **Optimistic overlay**：accepted 後立即在列表／明細反映暫存結果；worker 若回 conflict 或 failed，前端依 terminal lifecycle rollback，避免使用者長時間卡在同步 spinner
+- **Mutation / sync 協調**：依 form 隔離寫入與全量同步，寫入期間延後同 form sync；projection 完成後再發布 realtime event，避免另一個分頁看到尚未落入 read model 的資料
 - **Idempotency**：`x-client-mutation-id` 透過 `clientRowKey` 對應上游 rowId，重送同 ID 不會重複建立 — 見 [backend/src/services/workReportService.ts](backend/src/services/workReportService.ts)
 - **Form 16 ↔ Form 104/105 子表連動**：報工列建立在 Form 16 (停機紀錄)，由上游 workflow 自動推回工令子表；mock 在 [backend/src/ragic/mockClient.ts](backend/src/ragic/mockClient.ts) 模擬同樣的 propagation 語意
 - **Write verify**：create 完立刻讀回比對，欄位不一致就自動 DELETE 止血（避免 orphan 種子）
 - **Post-create polling**：拿到 form 16 rowId 後輪詢工令子表確認 row 出現再回應
 - **Form 16 停機 queue**：`/downtime` 新增停機採 `16:downtime:create` 串行 queue，成功寫回 entryId，失敗保留本機 payload 可重送
+
+### 列表與輸出
+- **精確篩選與欄位設定**：常用條件、欄位顯示／色彩／順序與本機偏好分離，套用前保留草稿狀態
+- **PDF 排程**：瀏覽器內直接產生固定 A4 PDF，可調字級；機台區塊連續向下排列，跨頁時重複顯示機台標識
+- **分批 rasterize**：PDF 以小批次 canvas 轉圖並主動釋放暫存 DOM，降低大量排程下載時的主執行緒與記憶體尖峰
 
 ### 即時推送（[backend/src/events/realtimeEventBus.ts](backend/src/events/realtimeEventBus.ts)）
 - Server-Sent Events 全域 bus，每次 mutation 發布 form / row update 事件

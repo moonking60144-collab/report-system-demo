@@ -19,6 +19,10 @@ import {
   replaceRetryableMutationRecord,
 } from "../taskRetryStore";
 import {
+  isCreateMutationWriteIndeterminate,
+  isEntryLevelUpdateWithoutRetryPayload,
+} from "../mutationRetrySemantics";
+import {
   deleteRetryableBatchCreateRecordChain,
   getRetryableBatchCreateRecord,
 } from "../taskBatchRetryStore";
@@ -47,6 +51,7 @@ function collectCreatedRowIds(task: WorkReportQueueTask): string[] {
 
 interface WorkReportTaskQueueDrawerProps {
   open: boolean;
+  context?: "entry" | "list";
   formId: string | null;
   entryId: string | null;
   workOrderNo?: string | null;
@@ -107,9 +112,13 @@ function getTaskScopeQuery(
 }
 
 function getTaskTypeLabel(
-  taskType: WorkReportQueueTaskType,
+  task: WorkReportQueueTask,
   t: (key: string) => string
 ): string {
+  if (task.operationKind === "update-sort-order") {
+    return t("workReport:taskQueue.taskTypes.updateSortOrder");
+  }
+  const taskType = task.taskType;
   if (taskType === "create-report") {
     return t("workReport:taskQueue.taskTypes.create");
   }
@@ -171,6 +180,7 @@ function isRetryableBatchCreateTaskType(taskType: WorkReportQueueTaskType): bool
 
 export function WorkReportTaskQueueDrawer({
   open,
+  context = "entry",
   formId,
   entryId,
   workOrderNo,
@@ -181,7 +191,9 @@ export function WorkReportTaskQueueDrawer({
   const { t } = useTranslation(["workReport", "common"]);
   const navigate = useNavigate();
   const actorClientId = useMemo(() => getOrCreateClientId(), []);
-  const [scope, setScope] = useState<TaskQueueScope>("entry");
+  const [scope, setScope] = useState<TaskQueueScope>(() =>
+    context === "list" ? "mine" : "entry"
+  );
   const [onlyFailed, setOnlyFailed] = useState<boolean>(false);
   const [tasks, setTasks] = useState<WorkReportQueueTask[]>([]);
   const [loading, setLoading] = useState(false);
@@ -234,9 +246,9 @@ export function WorkReportTaskQueueDrawer({
     if (!open) {
       return;
     }
-    setScope("entry");
+    setScope(context === "list" ? "mine" : "entry");
     setOnlyFailed(false);
-  }, [open, entryId]);
+  }, [context, open, entryId]);
 
   const displayedTasks = useMemo(
     () => (onlyFailed ? tasks.filter((task) => task.status === "failed") : tasks),
@@ -284,6 +296,9 @@ export function WorkReportTaskQueueDrawer({
 
   const canRetryTask = useCallback(
     (task: WorkReportQueueTask): boolean => {
+      if (context === "list") {
+        return false;
+      }
       if (task.status !== "failed") {
         return false;
       }
@@ -295,6 +310,12 @@ export function WorkReportTaskQueueDrawer({
       }
       if (isRetryableMutationTaskType(task.taskType)) {
         const retryRecord = getRetryableMutationRecord(task.taskId);
+        if (isEntryLevelUpdateWithoutRetryPayload(task, retryRecord?.rowId)) {
+          return false;
+        }
+        if (isCreateMutationWriteIndeterminate(task)) {
+          return false;
+        }
         return Boolean(retryRecord && !retryRecord.latestRetryTaskId);
       }
       if (isRetryableBatchCreateTaskType(task.taskType)) {
@@ -306,12 +327,15 @@ export function WorkReportTaskQueueDrawer({
       }
       return false;
     },
-    [actorClientId, entryId]
+    [actorClientId, context, entryId]
   );
 
   const getTaskRetryHint = useCallback(
     (task: WorkReportQueueTask): string | null => {
       if (task.status !== "failed") {
+        return null;
+      }
+      if (context === "list") {
         return null;
       }
 
@@ -337,6 +361,12 @@ export function WorkReportTaskQueueDrawer({
 
       if (isRetryableMutationTaskType(task.taskType)) {
         const retryRecord = getRetryableMutationRecord(task.taskId);
+        if (isEntryLevelUpdateWithoutRetryPayload(task, retryRecord?.rowId)) {
+          return t("workReport:taskQueue.retryHints.entryUpdateUnavailable");
+        }
+        if (isCreateMutationWriteIndeterminate(task)) {
+          return t("workReport:taskQueue.retryHints.createIndeterminateUnavailable");
+        }
         if (!retryRecord) {
           return t("workReport:taskQueue.retryHints.missingLocalPayload");
         }
@@ -369,7 +399,7 @@ export function WorkReportTaskQueueDrawer({
 
       return t("workReport:taskQueue.retryHints.unsupported");
     },
-    [actorClientId, entryId, t]
+    [actorClientId, context, entryId, t]
   );
 
   const showRetryConfirmModal = useCallback(
@@ -427,6 +457,10 @@ export function WorkReportTaskQueueDrawer({
       setError(null);
       setActionNotice(null);
       try {
+        if (isCreateMutationWriteIndeterminate(task)) {
+          setError(t("workReport:taskQueue.retryHints.createIndeterminateUnavailable"));
+          return;
+        }
         const clientMutationId = createRetryClientMutationId();
         const accepted =
           retryRecord.kind === "update" && retryRecord.rowId
@@ -449,6 +483,8 @@ export function WorkReportTaskQueueDrawer({
                 retryRecord.payload,
                 {
                   clientMutationId,
+                  createIdempotencyKey:
+                    retryRecord.createIdempotencyKey ?? retryRecord.clientMutationId,
                   workOrderNo: retryRecord.workOrderNo ?? workOrderNo ?? null,
                   expectedEntryLastUpdatedAt: retryRecord.expectedEntryLastUpdatedAt,
                   editSessionId: retryRecord.editSessionId,
@@ -462,6 +498,10 @@ export function WorkReportTaskQueueDrawer({
           retryRootTaskId: retryRecord.retryRootTaskId,
           retriedFromTaskId: task.taskId,
           clientMutationId,
+          createIdempotencyKey:
+            retryRecord.kind === "create"
+              ? retryRecord.createIdempotencyKey ?? retryRecord.clientMutationId
+              : undefined,
           createdAt: new Date().toISOString(),
         });
         await onRetryAccepted?.(
@@ -529,13 +569,15 @@ export function WorkReportTaskQueueDrawer({
     >
       <div className="detail-task-queue-panel">
         <div className="detail-task-queue-scope-group" role="tablist" aria-label={t("workReport:taskQueue.scopeLabel")}>
-          <button
-            type="button"
-            className={scope === "entry" ? "is-active" : ""}
-            onClick={() => setScope("entry")}
-          >
-            {t("workReport:taskQueue.scope.entry")}
-          </button>
+          {context === "entry" ? (
+            <button
+              type="button"
+              className={scope === "entry" ? "is-active" : ""}
+              onClick={() => setScope("entry")}
+            >
+              {t("workReport:taskQueue.scope.entry")}
+            </button>
+          ) : null}
           <button
             type="button"
             className={scope === "mine" ? "is-active" : ""}
@@ -602,7 +644,7 @@ export function WorkReportTaskQueueDrawer({
                   <div className="detail-task-queue-item-head">
                     <div className="detail-task-queue-item-primary">
                       <strong>{task.taskId}</strong>
-                      <span>{getTaskTypeLabel(task.taskType, t)}</span>
+                      <span>{getTaskTypeLabel(task, t)}</span>
                     </div>
                     <span className={`detail-task-queue-status-badge is-${task.status}`}>
                       {getTaskStatusLabel(task.status, t)}

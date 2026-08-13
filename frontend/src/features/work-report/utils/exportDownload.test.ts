@@ -3,6 +3,7 @@ import { lastMonthInfo } from "./exportDownload";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("lastMonthInfo", () => {
@@ -27,6 +28,28 @@ describe("lastMonthInfo", () => {
       year: 2025,
       month: 12,
       weekdays: 23,
+    });
+  });
+
+  it("以 Asia/Taipei 判斷跨月且 weekdays 不讀 browser-local timezone", () => {
+    vi.spyOn(Date.prototype, "getFullYear").mockImplementation(() => {
+      throw new Error("不應讀 browser-local year");
+    });
+    vi.spyOn(Date.prototype, "getMonth").mockImplementation(() => {
+      throw new Error("不應讀 browser-local month");
+    });
+    vi.spyOn(Date.prototype, "getDate").mockImplementation(() => {
+      throw new Error("不應讀 browser-local date");
+    });
+    vi.spyOn(Date.prototype, "getDay").mockImplementation(() => {
+      throw new Error("不應讀 browser-local weekday");
+    });
+
+    expect(lastMonthInfo(new Date("2026-05-31T16:30:00.000Z"))).toEqual({
+      label: "2026-05",
+      year: 2026,
+      month: 5,
+      weekdays: 21,
     });
   });
 });

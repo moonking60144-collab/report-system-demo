@@ -3,6 +3,7 @@ import {
   isDowntimeCreateQueueTask,
   isDowntimeSynchronousMutationRecord,
   isDowntimeTaskRunning,
+  isIndeterminateDowntimeCreateTask,
   isRetryableDowntimeCreateTask,
 } from "./downtimeTaskSemantics";
 
@@ -33,5 +34,47 @@ describe("downtimeTaskSemantics", () => {
       .toBe(false);
     expect(isRetryableDowntimeCreateTask({ taskType: "delete-downtime", status: "failed" }))
       .toBe(false);
+  });
+
+  it("寫入結果不明的 create-downtime 不可直接重送", () => {
+    for (const errorCode of [
+      "FORM16_WRITE_INDETERMINATE",
+      "RAGIC_ACTION_BUTTON_INDETERMINATE",
+      "RAGIC_WRITE_FAILED",
+      "RAGIC_WRITE_GONE",
+      "RAGIC_WRITE_ROLLBACK_DELETED",
+      "RAGIC_WRITE_ROLLBACK_UNCONFIRMED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "ECONNABORTED",
+      "EPIPE",
+    ]) {
+      const task = { taskType: "create-downtime" as const, status: "failed" as const, errorCode };
+      expect(isIndeterminateDowntimeCreateTask(task), errorCode).toBe(true);
+      expect(isRetryableDowntimeCreateTask(task), errorCode).toBe(false);
+    }
+
+    expect(
+      isRetryableDowntimeCreateTask({
+        taskType: "create-downtime",
+        status: "failed",
+        errorCode: "RAGIC_ACTION_BUTTON_FAILED",
+      })
+    ).toBe(true);
+    expect(
+      isIndeterminateDowntimeCreateTask({
+        taskType: "create-downtime",
+        status: "failed",
+        writeIndeterminate: true,
+      })
+    ).toBe(true);
+    expect(
+      isRetryableDowntimeCreateTask({
+        taskType: "create-downtime",
+        status: "failed",
+        writeIndeterminate: false,
+        errorCode: "RAGIC_WRITE_FAILED",
+      })
+    ).toBe(true);
   });
 });

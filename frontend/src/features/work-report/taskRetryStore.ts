@@ -1,6 +1,10 @@
 import { getOrCreateClientId } from "../../utils/clientIdentity";
 import type { ReportMutationPayload } from "../../api/workReport";
 import type { WorkReportFormId, WorkReportMutationTaskKind } from "./types";
+import {
+  isStoredMutationLifecycle,
+  type OptimisticMutationLifecycle,
+} from "./mutationLifecycle";
 
 const WORK_REPORT_RETRYABLE_MUTATION_STORE_KEY =
   "work-report:retryable-mutation-store:v1";
@@ -19,11 +23,13 @@ export interface RetryableMutationRecord {
   workOrderNo?: string | null;
   payload: ReportMutationPayload;
   clientMutationId: string;
+  createIdempotencyKey?: string;
   expectedEntryLastUpdatedAt?: string;
   editSessionId?: string;
   editLockVersion?: number;
   actorClientId: string;
   createdAt: string;
+  lifecycle?: OptimisticMutationLifecycle;
 }
 
 type RetryableMutationStore = Record<string, RetryableMutationRecord>;
@@ -70,8 +76,12 @@ function isRetryableMutationRecord(
     typeof candidate.payload === "object" &&
     candidate.payload !== null &&
     typeof candidate.clientMutationId === "string" &&
+    (candidate.createIdempotencyKey === undefined ||
+      typeof candidate.createIdempotencyKey === "string") &&
     typeof candidate.actorClientId === "string" &&
-    typeof candidate.createdAt === "string"
+    typeof candidate.createdAt === "string" &&
+    (candidate.lifecycle === undefined ||
+      isStoredMutationLifecycle(candidate.lifecycle))
   );
 }
 

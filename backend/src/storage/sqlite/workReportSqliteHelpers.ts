@@ -2,6 +2,7 @@ import type {
   ReportFacetQueryOptions,
   WorkReportRecord,
 } from "../../types/workReport";
+import { parseDateTimeTimestamp } from "../../utils/dateTime";
 export { parseSemanticBooleanToInteger } from "../../utils/semanticBoolean";
 
 export const FACET_BLANK_TOKEN = "__blank__";
@@ -78,15 +79,8 @@ export function toNullableNumber(value: unknown): number | null {
 }
 
 export function toNullableIsoDateTime(value: unknown): string | null {
-  if (value === undefined || value === null) {
-    return null;
-  }
-  const normalized = String(value).trim();
-  if (!normalized) {
-    return null;
-  }
-  const parsed = new Date(normalized.replace(/-/g, "/"));
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  const timestamp = parseDateTimeTimestamp(value);
+  return timestamp === null ? null : new Date(timestamp).toISOString();
 }
 
 export function buildSearchText(record: WorkReportRecord): string | null {

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { WorkReportRecord } from "../../../api/workReport";
 import { COLUMN_TYPE_MAP } from "../constants";
 import type {
+  ColumnColorOverrides,
   ColumnDisplayMode,
   ColumnKey,
   ColumnMenuMeta,
@@ -19,6 +20,7 @@ import {
   type WorkReportColumnsMenuState,
 } from "./useWorkReportColumnMenuContent";
 import { buildFormAwareColumns } from "./workReportColumnDefinitions";
+import { WorkReportSortOrderCell } from "../components/WorkReportSortOrderCell";
 import {
   createHighlightedTextRenderer,
   renderSemanticCheck,
@@ -31,7 +33,9 @@ interface UseWorkReportColumnsArgs {
   currentFormId: WorkReportFormId;
   columnDisplayMode: ColumnDisplayMode;
   columnWidthOverrides: ColumnWidthOverrides;
+  columnOrder: ColumnKey[];
   hiddenColumnKeys: Set<ColumnKey>;
+  columnColors: ColumnColorOverrides;
   onColumnResizeStart: (
     columnKey: ColumnKey,
     currentWidth: number,
@@ -40,6 +44,7 @@ interface UseWorkReportColumnsArgs {
   disableFixedColumns?: boolean;
   uiLanguage: UiLanguage;
   onOpenDetail: (entryId: string) => void;
+  onUpdateSortOrder: (record: WorkReportRecord, sortOrder: number) => Promise<void>;
   globalSearchKeyword: string;
   menuState: WorkReportColumnsMenuState;
   menuActions: WorkReportColumnsMenuActions & {
@@ -53,11 +58,14 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
     currentFormId,
     columnDisplayMode,
     columnWidthOverrides,
+    columnOrder,
     hiddenColumnKeys,
+    columnColors,
     onColumnResizeStart,
     disableFixedColumns = false,
     uiLanguage,
     onOpenDetail,
+    onUpdateSortOrder,
     globalSearchKeyword,
     menuState: {
       columnFilterState,
@@ -232,6 +240,17 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
         </button>
       );
     };
+    const renderSortOrderValue = (
+      value: unknown,
+      record: WorkReportRecord
+    ): ReactNode => (
+      <WorkReportSortOrderCell
+        value={value}
+        record={record}
+        displayValue={renderHighlightedText(value)}
+        onSubmit={onUpdateSortOrder}
+      />
+    );
 
     const formAwareColumns = buildFormAwareColumns({
       currentFormId,
@@ -239,6 +258,7 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
       renderValue,
       renderMachineValue,
       renderWorkOrderValue,
+      renderSortOrderValue,
       renderCheck: renderSemanticCheck,
       toNumber: toColumnSortableNumber,
       toDateValue: toColumnSortableDate,
@@ -251,10 +271,11 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
     columnDisplayMode,
     currentFormId,
     onOpenDetail,
+    onUpdateSortOrder,
   ]);
 
   const columns = useMemo<ColumnsType<WorkReportRecord>>(() => {
-    return baseColumns
+    const visibleBaseColumns = baseColumns
       .filter((column) => {
         const isDataColumn =
           "dataIndex" in column &&
@@ -266,46 +287,88 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
         }
 
         return !hiddenColumnKeys.has(column.dataIndex as ColumnKey);
-      })
+      });
+    const baseDataColumnKeys = visibleBaseColumns
+      .map((column) =>
+        "dataIndex" in column && typeof column.dataIndex === "string"
+          ? (column.dataIndex as ColumnKey)
+          : null
+      )
+      .filter((key): key is ColumnKey => key !== null);
+    const visibleOrder = columnOrder.filter((key) => !hiddenColumnKeys.has(key));
+    const hasCustomOrder =
+      visibleOrder.length === baseDataColumnKeys.length &&
+      visibleOrder.some((key, index) => key !== baseDataColumnKeys[index]);
+    const orderRank = new Map(visibleOrder.map((key, index) => [key, index]));
+
+    return visibleBaseColumns
       .map((column) => {
-      const isDataColumn =
-        "dataIndex" in column &&
-        typeof column.dataIndex === "string" &&
-        String(column.key ?? "") !== "scheduleAction";
+        const isDataColumn =
+          "dataIndex" in column &&
+          typeof column.dataIndex === "string" &&
+          String(column.key ?? "") !== "scheduleAction";
 
-      if (!isDataColumn) {
-        return disableFixedColumns && "fixed" in column
-          ? {
-              ...column,
-              fixed: undefined,
-            }
-          : column;
-      }
+        if (!isDataColumn) {
+          return disableFixedColumns && "fixed" in column
+            ? {
+                ...column,
+                fixed: undefined,
+              }
+            : column;
+        }
 
-      const columnKey = column.dataIndex as string;
-      const titleText = typeof column.title === "string" ? column.title : String(column.dataIndex);
+        const columnKey = column.dataIndex as ColumnKey;
+        const titleText = typeof column.title === "string" ? column.title : String(column.dataIndex);
+        const color = columnColors[columnKey];
+        const toneClassName = color && color !== "none"
+          ? `work-report-column-tone--${color}`
+          : "";
 
-      return {
-        ...column,
-        width:
-          typeof columnWidthOverrides[columnKey] === "number"
-            ? columnWidthOverrides[columnKey]
-            : column.width,
-        fixed: disableFixedColumns ? undefined : column.fixed,
-        title: renderColumnHeaderWithMenu(
-          titleText,
-          columnKey,
-          typeof columnWidthOverrides[columnKey] === "number"
-            ? columnWidthOverrides[columnKey] ?? null
-            : typeof column.width === "number"
-              ? column.width
-              : null
-        ),
-        sorter: false,
-      };
+        return {
+          ...column,
+          className: [column.className, toneClassName].filter(Boolean).join(" ") || undefined,
+          width:
+            typeof columnWidthOverrides[columnKey] === "number"
+              ? columnWidthOverrides[columnKey]
+              : column.width,
+          fixed: disableFixedColumns || hasCustomOrder ? undefined : column.fixed,
+          onHeaderCell: () => ({
+            className: toneClassName || undefined,
+          }),
+          title: renderColumnHeaderWithMenu(
+            titleText,
+            columnKey,
+            typeof columnWidthOverrides[columnKey] === "number"
+              ? columnWidthOverrides[columnKey] ?? null
+              : typeof column.width === "number"
+                ? column.width
+                : null
+          ),
+          sorter: false,
+        };
+      })
+      .sort((left, right) => {
+        const leftKey =
+          "dataIndex" in left && typeof left.dataIndex === "string"
+            ? (left.dataIndex as ColumnKey)
+            : null;
+        const rightKey =
+          "dataIndex" in right && typeof right.dataIndex === "string"
+            ? (right.dataIndex as ColumnKey)
+            : null;
+        if (leftKey === null) {
+          return rightKey === null ? 0 : 1;
+        }
+        if (rightKey === null) {
+          return -1;
+        }
+        return (orderRank.get(leftKey) ?? Number.MAX_SAFE_INTEGER) -
+          (orderRank.get(rightKey) ?? Number.MAX_SAFE_INTEGER);
       });
   }, [
     baseColumns,
+    columnColors,
+    columnOrder,
     columnWidthOverrides,
     disableFixedColumns,
     hiddenColumnKeys,

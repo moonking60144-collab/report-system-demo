@@ -18,6 +18,8 @@ interface CircuitBreakerOptions {
 }
 
 export class CircuitBreakerOpenError extends Error {
+  readonly code = "RAGIC_CIRCUIT_OPEN";
+
   constructor(public readonly name: string, public readonly retryAfterMs: number) {
     super(`circuit breaker [${name}] is OPEN, retry after ${retryAfterMs}ms`);
     this.name = "CircuitBreakerOpenError";

@@ -5,6 +5,11 @@ import { HttpError } from "../../utils/httpError";
 
 export type ProjectionReason = "create" | "update" | "delete";
 export type ProjectionApplyResult = "applied" | "deleted" | "skipped";
+export type SortOrderProjectionResult =
+  | "applied"
+  | "deferred"
+  | "failed"
+  | "not-required";
 
 export interface MutationProjectionSyncState {
   status: string;
@@ -21,6 +26,12 @@ interface WorkReportMutationProjectionServiceDeps {
     reason: ProjectionReason
   ): Promise<number>;
   refreshEntry(formId: string, entryId: string): Promise<WorkReportRecord>;
+  patchSortOrderSnapshot(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    snapshotAt: string
+  ): Promise<{ rowCount: number }>;
   upsertEntrySnapshot(
     formId: string,
     record: WorkReportRecord,
@@ -80,6 +91,85 @@ export class WorkReportMutationProjectionService {
       return;
     }
     await this.applyQueuedProjectionAfterMutation(formId, entryId, reason, enqueuedSeq);
+  }
+
+  async projectSortOrderAfterMutation(
+    formId: string,
+    entryId: string,
+    sortOrder: number
+  ): Promise<SortOrderProjectionResult> {
+    const enqueuedSeq = await this.enqueueEntryAfterMutation(formId, entryId, "update");
+    if (enqueuedSeq <= 0) {
+      return "not-required";
+    }
+    return this.applyQueuedSortOrderAfterMutation(
+      formId,
+      entryId,
+      sortOrder,
+      enqueuedSeq
+    );
+  }
+
+  async applyQueuedSortOrderAfterMutation(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    enqueuedSeq: number
+  ): Promise<SortOrderProjectionResult> {
+    if (!this.deps.shouldProject(formId) || enqueuedSeq <= 0) {
+      return "not-required";
+    }
+    const syncState = await this.deps.getSyncState(formId);
+    if (syncState?.status === "running") {
+      workReportDebugLog("projection", "sort-order-skipped-during-sync", {
+        formId,
+        entryId,
+        reason: "update",
+        seq: enqueuedSeq,
+      });
+      return "deferred";
+    }
+    if (!syncState?.snapshotAt || !isSqliteReadModelVersionCurrent(syncState)) {
+      workReportDebugLog("projection", "sort-order-skipped-no-readable-snapshot", {
+        formId,
+        entryId,
+        reason: "update",
+        seq: enqueuedSeq,
+      });
+      return "deferred";
+    }
+    const snapshotAt = new Date().toISOString();
+    const result = await this.deps.patchSortOrderSnapshot(
+      formId,
+      entryId,
+      sortOrder,
+      snapshotAt
+    );
+    if (result.rowCount <= 0) {
+      workReportDebugLog("projection", "sort-order-skipped-entry-not-cached", {
+        formId,
+        entryId,
+        reason: "update",
+        seq: enqueuedSeq,
+      });
+      return "deferred";
+    }
+    await this.deps.markProjectionEventProcessed(formId, enqueuedSeq, snapshotAt);
+    await this.deps.cleanupProcessedProjectionEvents(formId, enqueuedSeq);
+    await this.deps.touchSyncStateSnapshot(
+      formId,
+      snapshotAt,
+      `entry-projection:update:${entryId}`
+    );
+    this.deps.markRecentlyProjectedEntry?.(formId, entryId, "update", snapshotAt);
+    workReportDebugLog("projection", "sort-order-applied", {
+      formId,
+      entryId,
+      reason: "update",
+      sortOrder,
+      snapshotAt,
+    });
+    return "applied";
   }
 
   async applyQueuedProjectionAfterMutation(

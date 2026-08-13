@@ -11,6 +11,7 @@ import type {
 } from "../../../types/workReport";
 import type { StoredSyncState } from "../../../storage/sqlite/workReportSqliteRepository";
 import { hasReadableSqliteSnapshot, isSqliteSnapshotStale } from "../readModelState";
+import { parseDateTimeTimestamp } from "../../../utils/dateTime";
 import { parseSemanticBoolean } from "../../../utils/semanticBoolean";
 import { normalizeComparableValue, parseNumericValue } from "./valueUtils";
 
@@ -483,14 +484,6 @@ export class WorkReportReadSupport {
   }
 
   private parseTimestamp(value: unknown): number | null {
-    if (value === undefined || value === null) {
-      return null;
-    }
-    const normalized = String(value).trim();
-    if (!normalized) {
-      return null;
-    }
-    const parsed = new Date(normalized.replace(/-/g, "/"));
-    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+    return parseDateTimeTimestamp(value);
   }
 }

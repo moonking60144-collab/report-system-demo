@@ -42,6 +42,7 @@ import {
   updateForm16DowntimeRecord,
   type CreateForm16DowntimePayload,
   type DowntimeQueueTask,
+  type DowntimeTaskAccepted,
   type Form16DowntimeRecord,
   type PlannedIdleMachineSummary,
 } from "../../../api/downtime";
@@ -57,7 +58,6 @@ import type { FormOptionItem } from "../../../api/workReport";
 import { DetailInlinePickerTrigger, DetailLinkedPickerModal } from "../components/DetailLinkedPicker";
 import { WorkReportDowntimeRecordsTable } from "../components/WorkReportDowntimeRecordsTable";
 import { PlannedIdleChart } from "../components/PlannedIdleChart";
-import { useDowntimeMutationTask } from "../hooks/useDowntimeMutationTask";
 import { inferReportTypeFromProcessCode } from "../../../components/report-form/form-logic/inference";
 import {
   buildMachineStatusSuffix,
@@ -74,11 +74,24 @@ import {
 import {
   isDowntimeCreateQueueTask,
   isDowntimeTaskRunning,
+  isIndeterminateDowntimeCreateTask,
   isRetryableDowntimeCreateTask,
 } from "../downtimeTaskSemantics";
 import type { NoticeState, UiLanguage, WorkReportFormId } from "../types";
-import { getErrorMessage } from "../utils/errorUtils";
+import { getApiErrorCode, getErrorMessage } from "../utils/errorUtils";
 import { lastMonthInfo, triggerBlobDownload } from "../utils/exportDownload";
+import { LatestRequestGate } from "../utils/latestRequestGate";
+import {
+  applyDowntimeOptimisticMutations,
+  createDowntimeOptimisticMutation,
+  pruneProjectedDowntimeMutations,
+  readDowntimeOptimisticObservations,
+  reconcileDowntimeOptimisticMutation,
+  writeDowntimeOptimisticObservations,
+  type DowntimeOptimisticTaskObservation,
+} from "../downtimeOptimisticMutation";
+import { resolveTaskMutationLifecycleState } from "../mutationLifecycle";
+import { FORM16_OPTIMISTIC_MUTATIONS_ENABLED } from "../optimisticMutationFeatureFlags";
 
 
 function currentYearMonth(): string {
@@ -126,6 +139,8 @@ const OPTIONAL_OPERATOR_CLEAR_TOKEN = "__downtime-operator-clear__";
 const DOWNTIME_RECORDS_PAGE_SIZE = 20;
 const DOWNTIME_TASK_POLL_INTERVAL_MS = 3000;
 const DOWNTIME_TASK_POLL_TIMEOUT_MS = 180000;
+const CHART_REFRESH_POLL_INTERVAL_MS = 5000;
+const CHART_REFRESH_MAX_ATTEMPTS = 60;
 
 function getTodayInputValue(): string {
   const now = new Date();
@@ -226,20 +241,25 @@ function formatDowntimeTaskTime(value: string | null | undefined): string {
 }
 
 function buildAcceptedDowntimeTask(
-  accepted: { taskId: string; status: DowntimeQueueTask["status"]; createdAt?: string },
+  accepted: DowntimeTaskAccepted,
   actorClientId: string,
-  messageText: string
+  messageText: string,
+  taskType: DowntimeQueueTask["taskType"] = "create-downtime",
+  entryId: string | null = null
 ): DowntimeQueueTask {
   const createdAt = accepted.createdAt ?? new Date().toISOString();
   return {
     taskId: accepted.taskId,
-    taskType: "create-downtime",
+    taskType,
     status: accepted.status,
+    lifecycleState: accepted.lifecycleState,
+    acceptedAt: accepted.acceptedAt ?? createdAt,
+    confirmedAt: accepted.confirmedAt ?? null,
     formId: "16",
     workOrderNo: null,
-    entryId: null,
+    entryId,
     rowId: null,
-    queueKey: "16:downtime:create",
+    queueKey: "16:downtime:mutation",
     createdAt,
     startedAt: null,
     finishedAt: null,
@@ -297,9 +317,14 @@ export function WorkReportDowntimePage() {
   const [chartMachines, setChartMachines] = useState<PlannedIdleMachineSummary[]>([]);
   const [chartResolvedMonth, setChartResolvedMonth] = useState("");
   const [chartLoading, setChartLoading] = useState(false);
+  const [chartRefreshPending, setChartRefreshPending] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
   const [chartCollapsed, setChartCollapsed] = useState(false);
   const [downtimeTasks, setDowntimeTasks] = useState<DowntimeQueueTask[]>([]);
+  const [downtimeOptimisticObservations, setDowntimeOptimisticObservations] = useState<
+    DowntimeOptimisticTaskObservation[]
+  >(() => readDowntimeOptimisticObservations());
+  const downtimeOptimisticObservationsRef = useRef(downtimeOptimisticObservations);
   const [downtimeTasksLoading, setDowntimeTasksLoading] = useState(false);
   const [downtimeTasksError, setDowntimeTasksError] = useState<string | null>(null);
   const [retryingDowntimeTaskId, setRetryingDowntimeTaskId] = useState<string | null>(null);
@@ -308,11 +333,34 @@ export function WorkReportDowntimePage() {
   const refreshPollTimerRef = useRef<number | null>(null);
   const trackingDowntimeTaskIdsRef = useRef<Set<string>>(new Set());
   const downtimeTaskPollingCancelledRef = useRef(false);
+  const chartRequestGateRef = useRef(new LatestRequestGate());
+  const chartRefreshPollTimerRef = useRef<number | null>(null);
+  const chartRefreshPollInFlightRef = useRef(false);
+  const recordsRequestGateRef = useRef(new LatestRequestGate());
+  const updateDowntimeOptimisticObservations = useCallback(
+    (
+      updater: (
+        previous: DowntimeOptimisticTaskObservation[]
+      ) => DowntimeOptimisticTaskObservation[]
+    ) => {
+      setDowntimeOptimisticObservations((previous) => {
+        const next = updater(previous);
+        downtimeOptimisticObservationsRef.current = next;
+        writeDowntimeOptimisticObservations(next);
+        return next;
+      });
+    },
+    []
+  );
   useEffect(() => {
     return () => {
       if (refreshPollTimerRef.current !== null) {
         window.clearInterval(refreshPollTimerRef.current);
         refreshPollTimerRef.current = null;
+      }
+      if (chartRefreshPollTimerRef.current !== null) {
+        window.clearTimeout(chartRefreshPollTimerRef.current);
+        chartRefreshPollTimerRef.current = null;
       }
     };
   }, []);
@@ -338,10 +386,13 @@ export function WorkReportDowntimePage() {
   const handleExportCsv = useCallback(async () => {
     setExporting(true);
     try {
-      const blob = await exportForm16DowntimeMonthlyCsv();
+      const download = await exportForm16DowntimeMonthlyCsv();
       // 後端 proxy 可能回 .csv 或 .xlsx，依實際內容型別決定副檔名
-      const isXlsx = blob.type.includes("sheet") || blob.type.includes("excel");
-      triggerBlobDownload(blob, `c1-6-${lastMonthInfo().label}.${isXlsx ? "xlsx" : "csv"}`);
+      const isXlsx = download.blob.type.includes("sheet") || download.blob.type.includes("excel");
+      triggerBlobDownload(
+        download.blob,
+        download.filename ?? `c1-6-${lastMonthInfo().label}.${isXlsx ? "xlsx" : "csv"}`
+      );
       void message.success(t("workReport:downtimePage.messages.csvExported"));
     } catch (error) {
       void message.error(
@@ -362,9 +413,12 @@ export function WorkReportDowntimePage() {
   const handleExportAnalysis = useCallback(async (attendanceDays?: number) => {
     setExportingAnalysis(true);
     try {
-      const blob = await exportForm16AnalysisXlsx(attendanceDays);
-      // 檔名用「上個月」標記，資料窗跟 CSV 匯出同一條發佈 view
-      triggerBlobDownload(blob, `c1-6-分析表-${lastMonthInfo().label}.xlsx`);
+      const download = await exportForm16AnalysisXlsx(attendanceDays);
+      // backend filename 是資料期間的 authority；瀏覽器月份只在 header 缺失時 fallback。
+      triggerBlobDownload(
+        download.blob,
+        download.filename ?? `c1-6-分析表-${lastMonthInfo().label}.xlsx`
+      );
       void message.success(t("workReport:downtimePage.messages.analysisExported"));
     } catch (error) {
       void message.error(
@@ -379,25 +433,97 @@ export function WorkReportDowntimePage() {
 
   const monthOptions = useMemo(() => buildRecentMonths(6), []);
 
+  const stopChartRefreshPolling = useCallback(() => {
+    if (chartRefreshPollTimerRef.current !== null) {
+      window.clearTimeout(chartRefreshPollTimerRef.current);
+      chartRefreshPollTimerRef.current = null;
+    }
+    chartRefreshPollInFlightRef.current = false;
+    setChartRefreshPending(false);
+  }, []);
+
   const loadChart = useCallback(
     async (month: string, refresh = false) => {
+      stopChartRefreshPolling();
+      const requestId = chartRequestGateRef.current.start();
       setChartLoading(true);
       setChartError(null);
       try {
         const summary = await fetchPlannedIdleSummary(month, refresh);
+        if (!chartRequestGateRef.current.isLatest(requestId)) {
+          return;
+        }
         setChartMachines(summary.machines);
         setChartResolvedMonth(summary.month);
+        if (summary.refreshTriggered) {
+          setChartRefreshPending(true);
+          const baselineSnapshotAt = summary.snapshotAt;
+          let attempts = 0;
+
+          const pollForCommittedSnapshot = async () => {
+            if (
+              !chartRequestGateRef.current.isLatest(requestId) ||
+              chartRefreshPollInFlightRef.current
+            ) {
+              return;
+            }
+            chartRefreshPollInFlightRef.current = true;
+            attempts += 1;
+            try {
+              const current = await fetchPlannedIdleSummary(month, false);
+              if (!chartRequestGateRef.current.isLatest(requestId)) {
+                return;
+              }
+              const snapshotAdvanced =
+                current.snapshotAt !== null && current.snapshotAt !== baselineSnapshotAt;
+              if (snapshotAdvanced) {
+                setChartMachines(current.machines);
+                setChartResolvedMonth(current.month);
+                setChartError(null);
+                stopChartRefreshPolling();
+                return;
+              }
+            } catch {
+              // 單次 polling 失敗不把仍在後端執行的 refresh 誤判為失敗。
+            } finally {
+              chartRefreshPollInFlightRef.current = false;
+            }
+
+            if (!chartRequestGateRef.current.isLatest(requestId)) {
+              return;
+            }
+            if (attempts >= CHART_REFRESH_MAX_ATTEMPTS) {
+              stopChartRefreshPolling();
+              setChartError(i18n.t("workReport:downtimePage.chart.refreshTimeout"));
+              return;
+            }
+            chartRefreshPollTimerRef.current = window.setTimeout(
+              () => void pollForCommittedSnapshot(),
+              CHART_REFRESH_POLL_INTERVAL_MS
+            );
+          };
+
+          chartRefreshPollTimerRef.current = window.setTimeout(
+            () => void pollForCommittedSnapshot(),
+            CHART_REFRESH_POLL_INTERVAL_MS
+          );
+        }
       } catch (error) {
+        if (!chartRequestGateRef.current.isLatest(requestId)) {
+          return;
+        }
         // 用 i18n.t（穩定 reference）而非 t：避免切語言時 loadChart 換身分、effect 重跑、重打一次全表掃的彙總請求
         setChartError(
           i18n.t("workReport:downtimePage.chart.loadFailed", { error: getErrorMessage(error) })
         );
         setChartMachines([]);
       } finally {
-        setChartLoading(false);
+        if (chartRequestGateRef.current.isLatest(requestId)) {
+          setChartLoading(false);
+        }
       }
     },
-    [i18n]
+    [i18n, stopChartRefreshPolling]
   );
 
   useEffect(() => {
@@ -432,6 +558,7 @@ export function WorkReportDowntimePage() {
         refresh?: boolean;
       }
     ) => {
+      const requestId = recordsRequestGateRef.current.start();
       const targetPage = options?.page ?? recordsPage;
       const targetPageSize = options?.pageSize ?? recordsPageSize;
       const offset = (targetPage - 1) * targetPageSize;
@@ -448,9 +575,15 @@ export function WorkReportDowntimePage() {
           offset,
           refresh: options?.refresh ?? false,
         });
+        if (!recordsRequestGateRef.current.isLatest(requestId)) {
+          return;
+        }
         startTransition(() => {
           setRecords(result.records);
           setRecordsTotalCount(result.meta.totalCount);
+          updateDowntimeOptimisticObservations((previous) =>
+            pruneProjectedDowntimeMutations(result.records, previous)
+          );
         });
         setRecordsLoaded(true);
         if (mode === "refresh" && result.meta.refreshed) {
@@ -467,6 +600,9 @@ export function WorkReportDowntimePage() {
           });
         }
       } catch (error) {
+        if (!recordsRequestGateRef.current.isLatest(requestId)) {
+          return;
+        }
         const errorMsg = t("workReport:messages.failedLoadDowntimeRecords", {
           error: getErrorMessage(error),
         });
@@ -475,11 +611,13 @@ export function WorkReportDowntimePage() {
           void message.error(errorMsg);
         }
       } finally {
-        setRecordsLoading(false);
-        setRefreshingRecords(false);
+        if (recordsRequestGateRef.current.isLatest(requestId)) {
+          setRecordsLoading(false);
+          setRefreshingRecords(false);
+        }
       }
     },
-    [recordsPage, recordsPageSize, t]
+    [recordsPage, recordsPageSize, t, updateDowntimeOptimisticObservations]
   );
 
   const upsertDowntimeTaskState = useCallback((task: DowntimeQueueTask) => {
@@ -491,15 +629,49 @@ export function WorkReportDowntimePage() {
     });
   }, []);
 
+  const upsertDowntimeOptimisticObservation = useCallback(
+    (observation: DowntimeOptimisticTaskObservation) => {
+      if (!FORM16_OPTIMISTIC_MUTATIONS_ENABLED) {
+        return;
+      }
+      updateDowntimeOptimisticObservations((previous) => [
+        ...previous.filter((item) => item.taskId !== observation.taskId),
+        observation,
+      ]);
+    },
+    [updateDowntimeOptimisticObservations]
+  );
+
+  const reconcileDowntimeOptimisticTask = useCallback((task: DowntimeQueueTask) => {
+    updateDowntimeOptimisticObservations((previous) =>
+      previous.map((observation) =>
+        observation.taskId === task.taskId
+          ? {
+              ...observation,
+              entryId: task.entryId,
+              optimisticMutation: reconcileDowntimeOptimisticMutation(
+                observation.optimisticMutation,
+                {
+                  lifecycleState: resolveTaskMutationLifecycleState(task),
+                  confirmedAt: task.confirmedAt,
+                }
+              ),
+            }
+          : observation
+      )
+    );
+  }, [updateDowntimeOptimisticObservations]);
+
   const reloadRecordsAfterDowntimeCreate = useCallback(async () => {
     if (recordsPage !== 1) {
       setRecordsPage(1);
-      return;
+      return false;
     }
     await loadRecords("silent", {
       page: 1,
       pageSize: recordsPageSize,
     });
+    return true;
   }, [loadRecords, recordsPage, recordsPageSize]);
 
   const trackDowntimeTask = useCallback(
@@ -528,18 +700,36 @@ export function WorkReportDowntimePage() {
             try {
               const task = await fetchDowntimeTask(taskId);
               upsertDowntimeTaskState(task);
+              reconcileDowntimeOptimisticTask(task);
               if (isDowntimeTaskRunning(task.status)) {
                 continue;
               }
 
               if (task.status === "success") {
-                deleteRetryableDowntimeCreateRecordChain(task.taskId);
-                const successMessage = t("workReport:downtimePage.tasks.success", {
-                  entryId: task.entryId ?? "--",
+                if (task.taskType === "create-downtime") {
+                  deleteRetryableDowntimeCreateRecordChain(task.taskId);
+                }
+                const successMessage =
+                  task.taskType === "update-downtime"
+                    ? t("workReport:downtimePage.messages.recordUpdated")
+                    : task.taskType === "delete-downtime"
+                      ? t("workReport:downtimePage.messages.recordDeleted")
+                      : t("workReport:downtimePage.tasks.success", {
+                          entryId: task.entryId ?? "--",
                 });
                 setNotice({ type: "success", message: successMessage });
                 void message.success(successMessage);
-                await reloadRecordsAfterDowntimeCreate();
+                for (let attempt = 0; attempt < 6; attempt += 1) {
+                  const reloaded = await reloadRecordsAfterDowntimeCreate();
+                  const projectionPending = downtimeOptimisticObservationsRef.current.some(
+                    (observation) => observation.taskId === task.taskId
+                  );
+                  if (!reloaded || !projectionPending) {
+                    break;
+                  }
+                  await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                }
+                void loadChart(chartMonth, true);
                 return;
               }
 
@@ -553,23 +743,66 @@ export function WorkReportDowntimePage() {
               void message.error(failedMessage);
               return;
             } catch (error) {
+              if (getApiErrorCode(error) === "TASK_NOT_FOUND") {
+                updateDowntimeOptimisticObservations((previous) =>
+                  previous.map((observation) =>
+                    observation.taskId === taskId
+                      ? {
+                          ...observation,
+                          optimisticMutation: reconcileDowntimeOptimisticMutation(
+                            observation.optimisticMutation,
+                            { lifecycleState: "unknown" }
+                          ),
+                        }
+                      : observation
+                  )
+                );
+                const unknownMessage = t("workReport:downtimePage.tasks.taskNotFound");
+                setNotice({ type: "warn", message: unknownMessage });
+                void message.warning(unknownMessage);
+                void loadRecords("refresh", { refresh: true });
+                return;
+              }
               lastErrorMessage = getErrorMessage(error);
             }
           }
 
           if (!downtimeTaskPollingCancelledRef.current) {
+            updateDowntimeOptimisticObservations((previous) =>
+              previous.map((observation) =>
+                observation.taskId === taskId
+                  ? {
+                      ...observation,
+                      optimisticMutation: reconcileDowntimeOptimisticMutation(
+                        observation.optimisticMutation,
+                        { lifecycleState: "unknown" }
+                      ),
+                    }
+                  : observation
+              )
+            );
             const timeoutMessage = t("workReport:downtimePage.tasks.pollTimeout", {
               error: lastErrorMessage,
             });
             setNotice({ type: "error", message: timeoutMessage });
             void message.error(timeoutMessage);
+            void loadRecords("refresh", { refresh: true });
           }
         } finally {
           trackingDowntimeTaskIdsRef.current.delete(taskId);
         }
       })();
     },
-    [reloadRecordsAfterDowntimeCreate, t, upsertDowntimeTaskState]
+    [
+      chartMonth,
+      loadChart,
+      loadRecords,
+      reconcileDowntimeOptimisticTask,
+      reloadRecordsAfterDowntimeCreate,
+      t,
+      updateDowntimeOptimisticObservations,
+      upsertDowntimeTaskState,
+    ]
   );
 
   const loadDowntimeTasks = useCallback(async () => {
@@ -577,16 +810,20 @@ export function WorkReportDowntimePage() {
     setDowntimeTasksError(null);
     try {
       const tasks = await fetchDowntimeTasks({
-        taskType: "create-downtime",
         actorClientId,
         limit: 20,
       });
       setDowntimeTasks(tasks);
       for (const task of tasks) {
+        reconcileDowntimeOptimisticTask(task);
         if (isDowntimeTaskRunning(task.status)) {
           trackDowntimeTask(task.taskId);
         }
-        if (task.status === "success" && getRetryableDowntimeCreateRecord(task.taskId)) {
+        if (
+          task.taskType === "create-downtime" &&
+          task.status === "success" &&
+          getRetryableDowntimeCreateRecord(task.taskId)
+        ) {
           deleteRetryableDowntimeCreateRecordChain(task.taskId);
         }
       }
@@ -595,7 +832,7 @@ export function WorkReportDowntimePage() {
     } finally {
       setDowntimeTasksLoading(false);
     }
-  }, [actorClientId, trackDowntimeTask]);
+  }, [actorClientId, reconcileDowntimeOptimisticTask, trackDowntimeTask]);
 
   const refreshDowntimePageData = useCallback(() => {
     void loadOptions();
@@ -643,7 +880,10 @@ export function WorkReportDowntimePage() {
 
   useEffect(() => {
     void loadDowntimeTasks();
-  }, [loadDowntimeTasks]);
+    for (const observation of downtimeOptimisticObservationsRef.current) {
+      trackDowntimeTask(observation.taskId);
+    }
+  }, [loadDowntimeTasks, trackDowntimeTask]);
 
   useEffect(() => {
     if (!notice) return;
@@ -947,8 +1187,17 @@ export function WorkReportDowntimePage() {
     return source.operatorId;
   }, [draft, editingDraft, pickerState]);
 
-  const downtimeUpdateTask = useDowntimeMutationTask();
-  const downtimeDeleteTask = useDowntimeMutationTask();
+  const displayedRecords = useMemo(
+    () =>
+      applyDowntimeOptimisticMutations(records, downtimeOptimisticObservations, {
+        includeCreates: recordsPage === 1,
+      }),
+    [downtimeOptimisticObservations, records, recordsPage]
+  );
+  const displayedRecordsTotalCount = Math.max(
+    0,
+    recordsTotalCount + displayedRecords.length - records.length
+  );
 
   const getDowntimeTaskRetryHint = useCallback(
     (task: DowntimeQueueTask): string | null => {
@@ -957,6 +1206,9 @@ export function WorkReportDowntimePage() {
       }
       if (task.status !== "failed") {
         return null;
+      }
+      if (isIndeterminateDowntimeCreateTask(task)) {
+        return t("workReport:downtimePage.tasks.retryHints.indeterminateUnavailable");
       }
       if (task.actorClientId && task.actorClientId !== actorClientId) {
         return t("workReport:downtimePage.tasks.retryHints.otherDevice");
@@ -1010,12 +1262,48 @@ export function WorkReportDowntimePage() {
       setRetryingDowntimeTaskId(task.taskId);
       try {
         const accepted = await createForm16DowntimeRecord(retryRecord.payload);
+        const acceptedAt =
+          accepted.acceptedAt ?? accepted.createdAt ?? new Date().toISOString();
+        const optimisticMutation = createDowntimeOptimisticMutation({
+          mutationId: retryRecord.payload.clientRowKey,
+          taskId: accepted.taskId,
+          acceptedAt,
+          previousSnapshot: null,
+          patch: {
+            kind: "create",
+            record: {
+              id: `__optimistic__:${retryRecord.payload.clientRowKey}`,
+              snapshotHash: null,
+              date: retryRecord.payload.date,
+              machineId: retryRecord.payload.machineId,
+              processCode: retryRecord.payload.processCode,
+              operatorId: retryRecord.payload.operatorId ?? null,
+              operatorName: retryRecord.payload.operatorId
+                ? operatorOptionMap.get(retryRecord.payload.operatorId)?.label ?? null
+                : null,
+              reportType:
+                inferReportTypeFromProcessCode(retryRecord.payload.processCode) || null,
+              startTime: "08:00",
+              endTime: "17:00",
+              breakTime: "1.00",
+              plannedIdleMinutes: retryRecord.payload.plannedIdleMinutes ?? 480,
+              remark: retryRecord.payload.remark ?? null,
+              workOrderNo: null,
+            },
+          },
+        });
+        upsertDowntimeOptimisticObservation({
+          taskId: accepted.taskId,
+          entryId: accepted.entryId ?? null,
+          optimisticMutation,
+        });
         replaceRetryableDowntimeCreateRecord(task.taskId, {
           taskId: accepted.taskId,
           retryRootTaskId: retryRecord.retryRootTaskId,
           retriedFromTaskId: task.taskId,
           payload: retryRecord.payload,
           createdAt: accepted.createdAt ?? new Date().toISOString(),
+          lifecycle: optimisticMutation.lifecycle,
         });
         upsertDowntimeTaskState(
           buildAcceptedDowntimeTask(
@@ -1046,8 +1334,10 @@ export function WorkReportDowntimePage() {
       canRetryDowntimeTask,
       getDowntimeTaskRetryHint,
       loadDowntimeTasks,
+      operatorOptionMap,
       t,
       trackDowntimeTask,
+      upsertDowntimeOptimisticObservation,
       upsertDowntimeTaskState,
     ]
   );
@@ -1074,11 +1364,44 @@ export function WorkReportDowntimePage() {
       };
       const accepted = await createForm16DowntimeRecord(payload);
       const createdAt = accepted.createdAt ?? new Date().toISOString();
+      const optimisticMutation = createDowntimeOptimisticMutation({
+        mutationId: payload.clientRowKey,
+        taskId: accepted.taskId,
+        acceptedAt: accepted.acceptedAt ?? createdAt,
+        previousSnapshot: null,
+        patch: {
+          kind: "create",
+          record: {
+            id: `__optimistic__:${payload.clientRowKey}`,
+            snapshotHash: null,
+            date: payload.date,
+            machineId: payload.machineId,
+            processCode: payload.processCode,
+            operatorId: payload.operatorId ?? null,
+            operatorName: payload.operatorId
+              ? operatorOptionMap.get(payload.operatorId)?.label ?? null
+              : null,
+            reportType: inferReportTypeFromProcessCode(payload.processCode) || null,
+            startTime: "08:00",
+            endTime: "17:00",
+            breakTime: "1.00",
+            plannedIdleMinutes: payload.plannedIdleMinutes ?? 480,
+            remark: payload.remark ?? null,
+            workOrderNo: null,
+          },
+        },
+      });
+      upsertDowntimeOptimisticObservation({
+        taskId: accepted.taskId,
+        entryId: accepted.entryId ?? null,
+        optimisticMutation,
+      });
       saveRetryableDowntimeCreateRecord({
         taskId: accepted.taskId,
         retryRootTaskId: accepted.taskId,
         payload,
         createdAt,
+        lifecycle: optimisticMutation.lifecycle,
       });
       upsertDowntimeTaskState(
         buildAcceptedDowntimeTask(
@@ -1106,7 +1429,16 @@ export function WorkReportDowntimePage() {
     } finally {
       setSubmitting(false);
     }
-  }, [actorClientId, draft, loadDowntimeTasks, t, trackDowntimeTask, upsertDowntimeTaskState]);
+  }, [
+    actorClientId,
+    draft,
+    loadDowntimeTasks,
+    operatorOptionMap,
+    t,
+    trackDowntimeTask,
+    upsertDowntimeOptimisticObservation,
+    upsertDowntimeTaskState,
+  ]);
 
   const handleOpenPicker = useCallback((key: DowntimePickerKey) => {
     setPickerState({ key, mode: "create", search: "" });
@@ -1226,6 +1558,21 @@ export function WorkReportDowntimePage() {
 
     const minutesRaw = editingDraft.plannedIdleMinutes.trim();
     const plannedIdleMinutes = minutesRaw ? Math.trunc(Number(minutesRaw)) : undefined;
+    const previousSnapshot = records.find((record) => record.id === editingRecordId);
+    if (!previousSnapshot) {
+      void message.error(t("workReport:downtimePage.messages.recordUpdateFailed"));
+      return;
+    }
+    const clientMutationId = createDowntimeClientRowKey();
+    const payload = {
+      date: editingDraft.date.trim(),
+      machineId: editingDraft.machineId.trim(),
+      processCode: editingDraft.processCode.trim(),
+      operatorId: editingDraft.operatorId.trim(),
+      ...(plannedIdleMinutes !== undefined ? { plannedIdleMinutes } : {}),
+      remark: editingDraft.remark,
+      expectedSnapshotHash: editingRecordSnapshotHash,
+    };
 
     setEditBusyRecordId(editingRecordId);
     pushFrontendEvent({
@@ -1238,47 +1585,80 @@ export function WorkReportDowntimePage() {
       meta: { kind: "update" },
     });
     try {
-      const result = await downtimeUpdateTask.run(() =>
-        updateForm16DowntimeRecord(editingRecordId, {
-          date: editingDraft.date.trim(),
-          machineId: editingDraft.machineId.trim(),
-          processCode: editingDraft.processCode.trim(),
-          operatorId: editingDraft.operatorId.trim(),
-          ...(plannedIdleMinutes !== undefined ? { plannedIdleMinutes } : {}),
-          remark: editingDraft.remark,
-          expectedSnapshotHash: editingRecordSnapshotHash,
-        })
+      const accepted = await updateForm16DowntimeRecord(editingRecordId, payload, {
+        async: FORM16_OPTIMISTIC_MUTATIONS_ENABLED,
+        clientMutationId,
+      });
+      const acceptedAt = accepted.acceptedAt ?? accepted.createdAt ?? new Date().toISOString();
+      const optimisticMutation = createDowntimeOptimisticMutation({
+        mutationId: clientMutationId,
+        taskId: accepted.taskId,
+        acceptedAt,
+        previousSnapshot,
+        patch: {
+          kind: "update",
+          record: {
+            ...previousSnapshot,
+            date: payload.date,
+            machineId: payload.machineId,
+            processCode: payload.processCode,
+            operatorId: payload.operatorId || null,
+            operatorName: payload.operatorId
+              ? operatorOptionMap.get(payload.operatorId)?.label ?? null
+              : null,
+            reportType: inferReportTypeFromProcessCode(payload.processCode) || null,
+            ...(plannedIdleMinutes !== undefined ? { plannedIdleMinutes } : {}),
+            remark: payload.remark.trim() || null,
+          },
+        },
+      });
+      upsertDowntimeOptimisticObservation({
+        taskId: accepted.taskId,
+        entryId: editingRecordId,
+        optimisticMutation,
+      });
+      upsertDowntimeTaskState(
+        buildAcceptedDowntimeTask(
+          accepted,
+          actorClientId,
+          t("workReport:downtimePage.tasks.updateAccepted"),
+          "update-downtime",
+          editingRecordId
+        )
       );
-      if (!result.ok) {
-        const errorMessage =
-          result.errorMessage || t("workReport:downtimePage.messages.recordUpdateFailed");
-        pushFrontendEvent({
-          level: "error",
-          category: "api",
-          action: "downtime-mutation-failed",
-          summary: `停機紀錄更新失敗：${errorMessage}`,
-          formId: "16",
-          entryId: editingRecordId,
-          meta: { kind: "update", error: errorMessage },
-        });
-        void message.error(errorMessage);
-        return;
-      }
-      void message.success(t("workReport:downtimePage.messages.recordUpdated"));
+      void message.info(t("workReport:downtimePage.tasks.updateAccepted"));
       setEditingRecordId(null);
       setEditingRecordSnapshotHash(null);
       setEditingDraft(null);
-      await loadRecords("silent", { refresh: true });
+      trackDowntimeTask(accepted.taskId);
+      void loadDowntimeTasks();
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      pushFrontendEvent({
+        level: "error",
+        category: "api",
+        action: "downtime-mutation-failed",
+        summary: `停機紀錄更新失敗：${errorMessage}`,
+        formId: "16",
+        entryId: editingRecordId,
+        meta: { kind: "update", error: errorMessage },
+      });
+      void message.error(errorMessage);
     } finally {
       setEditBusyRecordId(null);
     }
   }, [
-    downtimeUpdateTask,
+    actorClientId,
     editingDraft,
     editingRecordId,
     editingRecordSnapshotHash,
-    loadRecords,
+    loadDowntimeTasks,
+    operatorOptionMap,
+    records,
     t,
+    trackDowntimeTask,
+    upsertDowntimeOptimisticObservation,
+    upsertDowntimeTaskState,
   ]);
 
   const handleDeleteRecord = useCallback(
@@ -1290,10 +1670,7 @@ export function WorkReportDowntimePage() {
         cancelText: t("workReport:downtimePage.actions.deleteConfirmCancel"),
         okButtonProps: { danger: true },
         onOk: async () => {
-          // 樂觀更新：先從本地列表拿掉，失敗再塞回去
-          const snapshot = { records, totalCount: recordsTotalCount };
-          setRecords((previous) => previous.filter((item) => item.id !== record.id));
-          setRecordsTotalCount((previous) => Math.max(0, previous - 1));
+          const clientMutationId = createDowntimeClientRowKey();
           setDeletingRecordId(record.id);
           pushFrontendEvent({
             level: "info",
@@ -1305,38 +1682,63 @@ export function WorkReportDowntimePage() {
             meta: { kind: "delete" },
           });
           try {
-            const result = await downtimeDeleteTask.run(() =>
-              deleteForm16DowntimeRecord(record.id, {
-                expectedSnapshotHash: record.snapshotHash,
-              })
+            const accepted = await deleteForm16DowntimeRecord(record.id, {
+              expectedSnapshotHash: record.snapshotHash,
+              async: FORM16_OPTIMISTIC_MUTATIONS_ENABLED,
+              clientMutationId,
+            });
+            const acceptedAt =
+              accepted.acceptedAt ?? accepted.createdAt ?? new Date().toISOString();
+            const optimisticMutation = createDowntimeOptimisticMutation({
+              mutationId: clientMutationId,
+              taskId: accepted.taskId,
+              acceptedAt,
+              previousSnapshot: record,
+              patch: { kind: "delete", entryId: record.id },
+            });
+            upsertDowntimeOptimisticObservation({
+              taskId: accepted.taskId,
+              entryId: record.id,
+              optimisticMutation,
+            });
+            upsertDowntimeTaskState(
+              buildAcceptedDowntimeTask(
+                accepted,
+                actorClientId,
+                t("workReport:downtimePage.tasks.deleteAccepted"),
+                "delete-downtime",
+                record.id
+              )
             );
-            if (!result.ok) {
-              // rollback
-              setRecords(snapshot.records);
-              setRecordsTotalCount(snapshot.totalCount);
-              const errorMessage =
-                result.errorMessage || t("workReport:downtimePage.messages.recordDeleteFailed");
-              pushFrontendEvent({
-                level: "error",
-                category: "api",
-                action: "downtime-mutation-failed",
-                summary: `停機紀錄刪除失敗：${errorMessage}`,
-                formId: "16",
-                entryId: record.id,
-                meta: { kind: "delete", error: errorMessage },
-              });
-              void message.error(errorMessage);
-              return;
-            }
-            void message.success(t("workReport:downtimePage.messages.recordDeleted"));
-            await loadRecords("silent", { refresh: true });
+            void message.info(t("workReport:downtimePage.tasks.deleteAccepted"));
+            trackDowntimeTask(accepted.taskId);
+            void loadDowntimeTasks();
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            pushFrontendEvent({
+              level: "error",
+              category: "api",
+              action: "downtime-mutation-failed",
+              summary: `停機紀錄刪除失敗：${errorMessage}`,
+              formId: "16",
+              entryId: record.id,
+              meta: { kind: "delete", error: errorMessage },
+            });
+            void message.error(errorMessage);
           } finally {
             setDeletingRecordId(null);
           }
         },
       });
     },
-    [downtimeDeleteTask, loadRecords, records, recordsTotalCount, t]
+    [
+      actorClientId,
+      loadDowntimeTasks,
+      t,
+      trackDowntimeTask,
+      upsertDowntimeOptimisticObservation,
+      upsertDowntimeTaskState,
+    ]
   );
 
   const resolveOperatorDisplay = useCallback(
@@ -1390,6 +1792,8 @@ export function WorkReportDowntimePage() {
       delete: t("workReport:downtimePage.actions.delete"),
       saving: t("workReport:downtimePage.actions.saving"),
       deleting: t("workReport:downtimePage.actions.deleting"),
+      pendingConfirmation: t("workReport:downtimePage.actions.pendingConfirmation"),
+      verificationPending: t("workReport:downtimePage.actions.verificationPending"),
       deleteConfirmTitle: t("workReport:downtimePage.actions.deleteConfirmTitle"),
       deleteConfirmContent: t("workReport:downtimePage.actions.deleteConfirmContent"),
       deleteConfirmOk: t("workReport:downtimePage.actions.deleteConfirmOk"),
@@ -1488,47 +1892,49 @@ export function WorkReportDowntimePage() {
                 </div>
               </div>
             </div>
-            <div className="page-view-switch" role="tablist" aria-label={t("workReport:page.viewSwitchAria")}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={false}
-                className="page-view-chip"
-                onClick={() => navigate("/?landingPage=thread-rolling-104&topView=report")}
-              >
-                {t("workReport:page.views.threadRolling104")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={false}
-                className="page-view-chip"
-                onClick={() => navigate("/?landingPage=heading-105&topView=report")}
-              >
-                {t("workReport:page.views.heading105")}
-              </button>
-              <button type="button" role="tab" aria-selected className="page-view-chip is-active">
-                {t("workReport:page.views.downtime16")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={false}
-                className="page-view-chip"
-                onClick={() => setEfficiencyStatsOpen(true)}
-              >
-                <CsvIcon size="1.05em" />
-                {t("workReport:efficiencyStats.entry")}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={false}
-                className="page-view-chip"
-                onClick={() => navigate("/?topView=local-settings")}
-              >
-                {t("workReport:page.views.localSettings")}
-              </button>
+            <div className="page-view-toolbar">
+              <div className="page-view-switch" role="tablist" aria-label={t("workReport:page.viewSwitchAria")}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  className="page-view-chip"
+                  onClick={() => navigate("/?landingPage=thread-rolling-104&topView=report")}
+                >
+                  {t("workReport:page.views.threadRolling104")}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  className="page-view-chip"
+                  onClick={() => navigate("/?landingPage=heading-105&topView=report")}
+                >
+                  {t("workReport:page.views.heading105")}
+                </button>
+                <button type="button" role="tab" aria-selected className="page-view-chip is-active">
+                  {t("workReport:page.views.downtime16")}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  className="page-view-chip"
+                  onClick={() => setEfficiencyStatsOpen(true)}
+                >
+                  <CsvIcon size="1.05em" />
+                  {t("workReport:efficiencyStats.entry")}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={false}
+                  className="page-view-chip"
+                  onClick={() => navigate("/?topView=local-settings")}
+                >
+                  {t("workReport:page.views.localSettings")}
+                </button>
+              </div>
               <button
                 type="button"
                 role="tab"
@@ -1711,7 +2117,7 @@ export function WorkReportDowntimePage() {
                     <select
                       value={chartMonth}
                       onChange={(event) => setChartMonth(event.target.value)}
-                      disabled={chartLoading}
+                      disabled={chartLoading || chartRefreshPending}
                     >
                       {monthOptions.map((ym) => (
                         <option key={ym} value={ym}>
@@ -1724,9 +2130,13 @@ export function WorkReportDowntimePage() {
                     type="button"
                     className="downtime-chart-refresh-btn"
                     onClick={() => void loadChart(chartMonth, true)}
-                    disabled={chartLoading}
+                    disabled={chartLoading || chartRefreshPending}
                   >
-                    {t("workReport:downtimePage.chart.refresh")}
+                    {t(
+                      chartRefreshPending
+                        ? "workReport:downtimePage.chart.refreshing"
+                        : "workReport:downtimePage.chart.refresh"
+                    )}
                   </button>
                 </div>
                 {chartError ? (
@@ -1762,8 +2172,8 @@ export function WorkReportDowntimePage() {
 
             <WorkReportDowntimeRecordsTable
               loading={initialPageLoading || refreshingRecords}
-              records={records}
-              totalCount={recordsTotalCount}
+              records={displayedRecords}
+              totalCount={displayedRecordsTotalCount}
               page={recordsPage}
               pageSize={recordsPageSize}
               onPageChange={handleRecordsPageChange}

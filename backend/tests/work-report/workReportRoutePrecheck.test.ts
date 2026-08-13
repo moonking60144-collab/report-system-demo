@@ -1,93 +1,99 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { HttpError } from "../../src/utils/httpError";
+import { realtimeEventBus } from "../../src/events/realtimeEventBus";
 import {
-  tryRouteMutationEntryPrecheck,
-  type MutationRequestContext,
+  runPostMutationHooks,
+  runPostSortOrderMutationHooks,
 } from "../../src/routes/workReportMutationRouteHelpers";
 import type { WorkReportRouterDeps } from "../../src/routes/workReportRouterTypes";
 
-test("route 預檢遇到 ENTRY_CONFLICT 會 deferred 給 worker 最終判斷", async () => {
-  const calls: unknown[][] = [];
-  const warnPayloads: unknown[] = [];
+test("Ragic mutation terminal 不等待背景 entry projection", async () => {
+  let releaseProjection!: () => void;
+  let applyStarted = false;
+  const projectionGate = new Promise<void>((resolve) => {
+    releaseProjection = resolve;
+  });
+  const publishedTypes: string[] = [];
   const deps = {
-    assertEntryNotModified: async (...args: unknown[]) => {
-      calls.push(args);
-      throw new HttpError(
-        409,
-        "這筆工令在你編輯期間已被其他人更新，請先刷新後再重新送出。",
-        "ENTRY_CONFLICT"
-      );
+    enqueueSqliteProjectionAfterMutation: async () => 7,
+    applyQueuedSqliteProjectionAfterMutation: async () => {
+      applyStarted = true;
+      await projectionGate;
+      return "applied" as const;
     },
   } as unknown as WorkReportRouterDeps;
-  const ctx: MutationRequestContext = {
-    formId: "104",
-    entryId: "17382",
-    expectedEntryLastUpdatedAt: "2026/07/02 10:43:00",
-    actor: {
-      actorClientId: null,
-      actorTabId: null,
-      actorIp: null,
-      actorLabel: null,
-      workOrderNo: null,
+  const unsubscribe = realtimeEventBus.subscribe((event) => {
+    if (event.formId === "104") {
+      publishedTypes.push(event.type);
+    }
+  });
+
+  try {
+    await runPostMutationHooks(deps, "104", "17382", "update");
+    assert.equal(applyStarted, true);
+    assert.deepEqual(publishedTypes, []);
+
+    releaseProjection();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(publishedTypes, [
+      "work-report-entry-updated",
+      "work-report-form-updated",
+    ]);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("projection enqueue 失敗不改寫已成功的 Ragic mutation", async () => {
+  let applyCalled = false;
+  const warnPayloads: unknown[] = [];
+  const deps = {
+    enqueueSqliteProjectionAfterMutation: async () => {
+      throw new Error("sqlite busy");
     },
-  };
+    applyQueuedSqliteProjectionAfterMutation: async () => {
+      applyCalled = true;
+      return "applied" as const;
+    },
+  } as unknown as WorkReportRouterDeps;
   const originalWarn = console.warn;
   console.warn = (_message?: unknown, payload?: unknown) => {
     warnPayloads.push(payload);
   };
 
   try {
-    const result = await tryRouteMutationEntryPrecheck(deps, ctx);
-    assert.equal(result, "deferred");
-    assert.equal(calls.length, 1);
-    assert.equal(warnPayloads.length, 1);
-    const payload = warnPayloads[0] as {
-      scheduler?: { mutationActive?: number; backgroundActive?: number };
-    };
-    assert.equal(typeof payload.scheduler?.mutationActive, "number");
-    assert.equal(typeof payload.scheduler?.backgroundActive, "number");
+    await runPostMutationHooks(deps, "104", "17382", "update");
+    assert.equal(applyCalled, false);
+    assert.deepEqual(warnPayloads, [
+      {
+        formId: "104",
+        entryId: "17382",
+        reason: "update",
+        error: "sqlite busy",
+      },
+    ]);
   } finally {
     console.warn = originalWarn;
   }
 });
 
-test("route 預檢 timeout deferred log 會帶 scheduler snapshot", async () => {
-  const warnPayloads: unknown[] = [];
+test("排序 projection deferred 時不發布指向舊 SQLite 快照的事件", async () => {
+  const publishedTypes: string[] = [];
   const deps = {
-    assertEntryNotModified: async () => {
-      throw new Error("timeout of 1500ms exceeded");
-    },
+    enqueueSqliteProjectionAfterMutation: async () => 8,
+    applyQueuedSortOrderSqliteAfterMutation: async () => "deferred" as const,
   } as unknown as WorkReportRouterDeps;
-  const ctx: MutationRequestContext = {
-    formId: "104",
-    entryId: "17382",
-    expectedEntryLastUpdatedAt: "2026/07/02 10:43:00",
-    actor: {
-      actorClientId: null,
-      actorTabId: null,
-      actorIp: null,
-      actorLabel: null,
-      workOrderNo: null,
-    },
-  };
-  const originalWarn = console.warn;
-  console.warn = (_message?: unknown, payload?: unknown) => {
-    warnPayloads.push(payload);
-  };
+  const unsubscribe = realtimeEventBus.subscribe((event) => {
+    if (event.formId === "104") {
+      publishedTypes.push(event.type);
+    }
+  });
 
   try {
-    const result = await tryRouteMutationEntryPrecheck(deps, ctx);
-    assert.equal(result, "deferred");
-    assert.equal(warnPayloads.length, 1);
-    const payload = warnPayloads[0] as {
-      error?: string;
-      scheduler?: { mutationPending?: number; backgroundPending?: number };
-    };
-    assert.equal(payload.error, "timeout of 1500ms exceeded");
-    assert.equal(typeof payload.scheduler?.mutationPending, "number");
-    assert.equal(typeof payload.scheduler?.backgroundPending, "number");
+    await runPostSortOrderMutationHooks(deps, "104", "17382", 4);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(publishedTypes, []);
   } finally {
-    console.warn = originalWarn;
+    unsubscribe();
   }
 });

@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Pagination } from "antd";
 import type { Form16DowntimeRecord } from "../../../api/downtime";
+import type { OptimisticForm16DowntimeRecord } from "../downtimeOptimisticMutation";
 import { DetailInlinePickerTrigger } from "./DetailLinkedPicker";
 
 export interface DowntimeEditDraft {
@@ -16,7 +17,7 @@ export type DowntimeEditPickerKey = "machineId" | "processCode" | "operatorId";
 
 interface WorkReportDowntimeRecordsTableProps {
   loading: boolean;
-  records: Form16DowntimeRecord[];
+  records: OptimisticForm16DowntimeRecord[];
   totalCount: number;
   page: number;
   pageSize: number;
@@ -40,6 +41,8 @@ interface WorkReportDowntimeRecordsTableProps {
     delete: string;
     saving: string;
     deleting: string;
+    pendingConfirmation: string;
+    verificationPending: string;
     deleteConfirmTitle: string;
     deleteConfirmContent: string;
     deleteConfirmOk: string;
@@ -118,13 +121,24 @@ export const WorkReportDowntimeRecordsTable = memo(function WorkReportDowntimeRe
               const isEditing = editingRecordId === record.id && editingDraft !== null;
               const isSaving = editBusyRecordId === record.id;
               const isDeleting = deletingRecordId === record.id;
+              const isOptimistic = Boolean(record.__optimisticState);
+              const isFrozen = record.__optimisticState === "frozen";
               const editingOperatorDisplay =
                 isEditing && editingDraft?.operatorId
                   ? resolveOperatorDisplay(editingDraft.operatorId)
                   : "";
 
               return (
-                <tr key={record.id} className={isEditing ? "is-editing" : ""}>
+                <tr
+                  key={record.id}
+                  className={[
+                    isEditing ? "is-editing" : "",
+                    isOptimistic ? "is-optimistic" : "",
+                    isFrozen ? "is-verification-pending" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
                   <td>
                     {isEditing ? (
                       <input
@@ -225,7 +239,13 @@ export const WorkReportDowntimeRecordsTable = memo(function WorkReportDowntimeRe
                       record.remark || "-"
                     )}
                   </td>
-                  <td>{record.id}</td>
+                  <td>
+                    {isOptimistic
+                      ? isFrozen
+                        ? labels.verificationPending
+                        : labels.pendingConfirmation
+                      : record.id}
+                  </td>
                   <td className="downtime-record-actions-cell">
                     {isEditing ? (
                       <>
@@ -259,7 +279,12 @@ export const WorkReportDowntimeRecordsTable = memo(function WorkReportDowntimeRe
                           type="button"
                           className="downtime-record-action-btn"
                           onClick={() => onEditStart(record)}
-                          disabled={editingRecordId !== null || isDeleting || rowActionsDisabled}
+                          disabled={
+                            editingRecordId !== null ||
+                            isDeleting ||
+                            rowActionsDisabled ||
+                            isOptimistic
+                          }
                         >
                           {labels.edit}
                         </button>
@@ -267,7 +292,12 @@ export const WorkReportDowntimeRecordsTable = memo(function WorkReportDowntimeRe
                           type="button"
                           className="downtime-record-action-btn downtime-record-action-btn--danger"
                           onClick={() => onDelete(record)}
-                          disabled={editingRecordId !== null || isDeleting || rowActionsDisabled}
+                          disabled={
+                            editingRecordId !== null ||
+                            isDeleting ||
+                            rowActionsDisabled ||
+                            isOptimistic
+                          }
                         >
                           {isDeleting ? (
                             <>

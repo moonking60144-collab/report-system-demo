@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { ALL_FILTER_VALUE } from "../constants";
 import type { GlobalFilters, WorkReportLandingPageKey, WorkReportListViewState } from "../types";
-import { getInitialGlobalFilters, hasExplicitGlobalFilterParamsInUrl } from "../utils";
+import {
+  getInitialGlobalFilters,
+  hasExplicitGlobalFilterParamsInUrl,
+  writeGlobalFiltersToSearchParams,
+} from "../utils";
 
 interface UseWorkReportViewStateInitialState {
   page?: WorkReportListViewState["page"];
@@ -49,11 +52,11 @@ export function useWorkReportViewState(
     return Number.isFinite(value) && value > 0 ? value : 1;
   });
   const [globalFilterDraft, setGlobalFilterDraft] = useState<GlobalFilters>(() => {
-    if (hasExplicitFilterParamsInUrl) {
-      return getInitialGlobalFilters(initialLandingPageKey);
-    }
     if (initialState.globalFilterDraft) {
       return { ...initialState.globalFilterDraft };
+    }
+    if (hasExplicitFilterParamsInUrl) {
+      return getInitialGlobalFilters(initialLandingPageKey);
     }
     if (initialState.globalFilters) {
       return { ...initialState.globalFilters };
@@ -76,54 +79,7 @@ export function useWorkReportViewState(
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     params.delete("q");
-
-    if (globalFilters.globalKeyword.trim()) {
-      params.set("fGlobal", globalFilters.globalKeyword.trim());
-    } else {
-      params.delete("fGlobal");
-    }
-
-    if (globalFilters.workOrderKeyword.trim()) {
-      params.set("fWorkOrder", globalFilters.workOrderKeyword.trim());
-    } else {
-      params.delete("fWorkOrder");
-    }
-
-    if (globalFilters.customerPartKeyword.trim()) {
-      params.set("fPart", globalFilters.customerPartKeyword.trim());
-    } else {
-      params.delete("fPart");
-    }
-
-    if (globalFilters.machineCode !== ALL_FILTER_VALUE) {
-      params.set("fMachine", globalFilters.machineCode);
-    } else {
-      params.delete("fMachine");
-    }
-
-    if (globalFilters.filterMachineCode !== ALL_FILTER_VALUE) {
-      params.set("fFilterMachine", globalFilters.filterMachineCode);
-    } else {
-      params.delete("fFilterMachine");
-    }
-
-    if (globalFilters.status !== ALL_FILTER_VALUE) {
-      params.set("fStatus", globalFilters.status);
-    } else {
-      params.delete("fStatus");
-    }
-
-    if (globalFilters.siteRunning !== "all") {
-      params.set("fSite", globalFilters.siteRunning);
-    } else {
-      params.delete("fSite");
-    }
-
-    if (globalFilters.startSchedule !== "all") {
-      params.set("fStartSchedule", globalFilters.startSchedule);
-    } else {
-      params.delete("fStartSchedule");
-    }
+    writeGlobalFiltersToSearchParams(params, globalFilters);
 
     params.set("page", String(page));
     params.set("pageSize", String(pageSize));

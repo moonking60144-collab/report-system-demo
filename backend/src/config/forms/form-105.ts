@@ -158,6 +158,7 @@ export const FORM_105_CONFIG: FormConfig = {
     ],
     mainWriteFields: {
       machineCode: "1006031",
+      sortOrder: "1012079",
     },
     subtableWriteFields: {
       date: "1002190",

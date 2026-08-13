@@ -20,6 +20,7 @@ import type {
   FixedFilterPresetId,
   GlobalFilters,
   UiLanguage,
+  WorkReportFormId,
   WorkReportLandingPageKey,
 } from "../types";
 import {
@@ -29,6 +30,7 @@ import {
   buildBackendColumnFilters,
   buildColumnAnalysisSummary,
   buildColumnFacetOptions,
+  buildUpdatedDateRangeQuery,
   buildUnfinishedMachineShortcut,
   compareAlphaNumeric,
   getDefaultSortRulesForCurrentFilters,
@@ -47,6 +49,8 @@ interface UseWorkReportDataPipelineArgs {
   allRecords: WorkReportRecord[];
   records: WorkReportRecord[];
   previewTotalCount: number;
+  displayedPreviewPage: number;
+  displayedPreviewPageSize: number;
   hideTestCustomerPartRecords: boolean;
   shouldUseFullHydrationForList: boolean;
   hasHydratedAllRecords: boolean;
@@ -134,7 +138,29 @@ async function fetchRemoteAnalysisDeduped(
   return task;
 }
 
-function runRecordPipeline(
+export function buildScopedWorkReportRecords(
+  sourceRecords: WorkReportRecord[],
+  options: {
+    enabled?: boolean;
+    currentFormId: WorkReportFormId;
+    pageProdTypeCode: string;
+    hideTestCustomerPartRecords: boolean;
+  }
+): WorkReportRecord[] {
+  if (options.enabled === false) {
+    return [];
+  }
+  const sanitizedRecords = options.hideTestCustomerPartRecords
+    ? sourceRecords.filter(
+        (record) => !normalizeText(record.customerPartNo).includes("test")
+      )
+    : sourceRecords;
+  return options.currentFormId === "105"
+    ? sanitizedRecords
+    : applyPageReportGroupFilter(sanitizedRecords, options.pageProdTypeCode);
+}
+
+export function runWorkReportRecordPipeline(
   sourceRecords: WorkReportRecord[],
   options: {
     isGlobalFilterActive: boolean;
@@ -167,6 +193,8 @@ export function useWorkReportDataPipeline({
   allRecords,
   records,
   previewTotalCount,
+  displayedPreviewPage,
+  displayedPreviewPageSize,
   hideTestCustomerPartRecords,
   shouldUseFullHydrationForList,
   hasHydratedAllRecords,
@@ -186,39 +214,25 @@ export function useWorkReportDataPipeline({
   translateStatusDisplay,
 }: UseWorkReportDataPipelineArgs) {
   const { t } = useTranslation(["workReport", "common"]);
-  const sanitizedAllRecords = useMemo(() => {
-    if (!enabled) {
-      return [] as WorkReportRecord[];
-    }
-    if (!hideTestCustomerPartRecords) {
-      return allRecords;
-    }
-    return allRecords.filter((record) => !normalizeText(record.customerPartNo).includes("test"));
-  }, [allRecords, enabled, hideTestCustomerPartRecords]);
-
-  const sanitizedPreviewRecords = useMemo(() => {
-    if (!enabled) {
-      return [] as WorkReportRecord[];
-    }
-    if (!hideTestCustomerPartRecords) {
-      return records;
-    }
-    return records.filter((record) => !normalizeText(record.customerPartNo).includes("test"));
-  }, [enabled, records, hideTestCustomerPartRecords]);
-
   const groupedAllRecords = useMemo(
     () =>
-      currentFormId === "105"
-        ? sanitizedAllRecords
-        : applyPageReportGroupFilter(sanitizedAllRecords, pageProdTypeCode),
-    [currentFormId, sanitizedAllRecords, pageProdTypeCode]
+      buildScopedWorkReportRecords(allRecords, {
+        enabled,
+        currentFormId,
+        pageProdTypeCode,
+        hideTestCustomerPartRecords,
+      }),
+    [allRecords, currentFormId, enabled, hideTestCustomerPartRecords, pageProdTypeCode]
   );
   const groupedPreviewRecords = useMemo(
     () =>
-      currentFormId === "105"
-        ? sanitizedPreviewRecords
-        : applyPageReportGroupFilter(sanitizedPreviewRecords, pageProdTypeCode),
-    [currentFormId, sanitizedPreviewRecords, pageProdTypeCode]
+      buildScopedWorkReportRecords(records, {
+        enabled,
+        currentFormId,
+        pageProdTypeCode,
+        hideTestCustomerPartRecords,
+      }),
+    [currentFormId, enabled, hideTestCustomerPartRecords, pageProdTypeCode, records]
   );
 
   const effectiveColumnSortRules = useMemo(() => {
@@ -257,7 +271,7 @@ export function useWorkReportDataPipeline({
     if (!shouldUseFullHydrationForList) {
       return [] as WorkReportRecord[];
     }
-    return runRecordPipeline(groupedAllRecords, {
+    return runWorkReportRecordPipeline(groupedAllRecords, {
       isGlobalFilterActive,
       globalFilters,
       columnFilterState,
@@ -276,7 +290,7 @@ export function useWorkReportDataPipeline({
     if (!shouldUseFullHydrationForList || hasHydratedAllRecords) {
       return [] as WorkReportRecord[];
     }
-    return runRecordPipeline(groupedPreviewRecords, {
+    return runWorkReportRecordPipeline(groupedPreviewRecords, {
       isGlobalFilterActive,
       globalFilters,
       columnFilterState,
@@ -343,7 +357,15 @@ export function useWorkReportDataPipeline({
     }
   }, [enabled, page, pageSize, previewTotalCount, setPage, shouldUseFullHydrationForList]);
 
-  const pageFrom = visibleRecords.length === 0 ? 0 : (page - 1) * pageSize + 1;
+  const displayedPage = shouldUseFullHydrationForList && hasHydratedAllRecords
+    ? page
+    : displayedPreviewPage;
+  const displayedPageSize = shouldUseFullHydrationForList && hasHydratedAllRecords
+    ? pageSize
+    : displayedPreviewPageSize;
+  const pageFrom = visibleRecords.length === 0
+    ? 0
+    : (displayedPage - 1) * displayedPageSize + 1;
   const pageTo = visibleRecords.length === 0 ? 0 : pageFrom + visibleRecords.length - 1;
   const hasMoreForPager = shouldUseFullHydrationForList
     ? hasHydratedAllRecords
@@ -379,6 +401,10 @@ export function useWorkReportDataPipeline({
         ? applyGlobalFilters(baseSourceRecords, globalFilters)
         : baseSourceRecords,
     [baseSourceRecords, globalFilters, isGlobalFilterActive]
+  );
+  const updatedDateRangeQuery = useMemo(
+    () => buildUpdatedDateRangeQuery(globalFilters),
+    [globalFilters]
   );
 
   const optionSourceRecords = baseSourceRecords;
@@ -425,8 +451,21 @@ export function useWorkReportDataPipeline({
         },
       ];
     }
+    const configuredMachines =
+      currentFormId === "105"
+        ? RAGIC_UNFINISHED_MACHINE_SHORTCUT_ORDER_105
+        : RAGIC_UNFINISHED_MACHINE_SHORTCUT_ORDER;
     const values = Array.from(
-      new Set(optionSourceRecords.map((record) => String(record.machineCode ?? "").trim()).filter(Boolean))
+      new Set([
+        ...configuredMachines,
+        ...optionSourceRecords
+          .map((record) =>
+            String(
+              (currentFormId === "105" ? record.filterMachineCode : record.machineCode) ?? ""
+            ).trim()
+          )
+          .filter(Boolean),
+      ])
     ).sort(compareAlphaNumeric);
 
     return [
@@ -437,7 +476,7 @@ export function useWorkReportDataPipeline({
       },
       ...values.map((value) => ({ value, label: value, display: value })),
     ];
-  }, [enabled, optionSourceRecords, t]);
+  }, [currentFormId, enabled, optionSourceRecords, t]);
 
   const statusFilterOptions = useMemo(() => {
     if (!enabled) {
@@ -590,6 +629,8 @@ export function useWorkReportDataPipeline({
       filterMachineCode: globalFilters.filterMachineCode,
       siteRunning: globalFilters.siteRunning,
       startSchedule: globalFilters.startSchedule,
+      updatedDateFrom: updatedDateRangeQuery.updatedDateFrom,
+      updatedDateTo: updatedDateRangeQuery.updatedDateTo,
     });
   }, [
     columnMenuOpenKey,
@@ -606,6 +647,8 @@ export function useWorkReportDataPipeline({
     globalFilters.startSchedule,
     globalFilters.status,
     globalFilters.workOrderKeyword,
+    updatedDateRangeQuery.updatedDateFrom,
+    updatedDateRangeQuery.updatedDateTo,
   ]);
   const shouldUseRemoteFacetOptions = remoteFacetQuerySignature !== null;
 
@@ -661,6 +704,8 @@ export function useWorkReportDataPipeline({
             columnFilters: backendColumnFiltersForOpenColumn,
             siteRunning: globalFilters.siteRunning,
             startSchedule: globalFilters.startSchedule,
+            updatedDateFrom: updatedDateRangeQuery.updatedDateFrom,
+            updatedDateTo: updatedDateRangeQuery.updatedDateTo,
           });
           const items = facetMap[columnMenuOpenKey] ?? [];
           return items.map((item) => item.token);
@@ -702,6 +747,8 @@ export function useWorkReportDataPipeline({
     globalFilters.startSchedule,
     globalFilters.status,
     globalFilters.workOrderKeyword,
+    updatedDateRangeQuery.updatedDateFrom,
+    updatedDateRangeQuery.updatedDateTo,
     backendColumnFiltersForOpenColumn,
   ]);
 
@@ -763,6 +810,8 @@ export function useWorkReportDataPipeline({
       filterMachineCode: globalFilters.filterMachineCode,
       siteRunning: globalFilters.siteRunning,
       startSchedule: globalFilters.startSchedule,
+      updatedDateFrom: updatedDateRangeQuery.updatedDateFrom,
+      updatedDateTo: updatedDateRangeQuery.updatedDateTo,
     });
   }, [
     analysisTargetColumnKey,
@@ -779,6 +828,8 @@ export function useWorkReportDataPipeline({
     globalFilters.startSchedule,
     globalFilters.status,
     globalFilters.workOrderKeyword,
+    updatedDateRangeQuery.updatedDateFrom,
+    updatedDateRangeQuery.updatedDateTo,
   ]);
   const shouldUseRemoteAnalysis = remoteAnalysisQuerySignature !== null;
   const remoteAnalysisSummary =
@@ -883,6 +934,8 @@ export function useWorkReportDataPipeline({
                 columnFilters: backendColumnFiltersForAnalysis,
                 siteRunning: globalFilters.siteRunning,
                 startSchedule: globalFilters.startSchedule,
+                updatedDateFrom: updatedDateRangeQuery.updatedDateFrom,
+                updatedDateTo: updatedDateRangeQuery.updatedDateTo,
               }
             )
         );
@@ -922,6 +975,8 @@ export function useWorkReportDataPipeline({
     globalFilters.startSchedule,
     globalFilters.status,
     globalFilters.workOrderKeyword,
+    updatedDateRangeQuery.updatedDateFrom,
+    updatedDateRangeQuery.updatedDateTo,
     backendColumnFiltersForAnalysis,
     hasHydratedAllRecords,
   ]);
@@ -933,6 +988,7 @@ export function useWorkReportDataPipeline({
     processedFullRecords,
     processedPreviewRecords,
     visibleRecords,
+    displayedPage,
     pageFrom,
     pageTo,
     hasMoreForPager,

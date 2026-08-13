@@ -63,9 +63,6 @@ export class WorkReportEntryReadService {
     if (!entryData) {
       throw new HttpError(404, `找不到報工資料：${entryId}`, "REPORT_NOT_FOUND");
     }
-    // linked source fetch 跟著 caller 指定的 lane；同一個使用者 / 背景請求共用同一條 lane。
-    // caller 沒明示時 fallback "user"（跟 ragicClient.getEntry 一致的 default 語意），
-    // 但 prepareLinkedSourceMaps 本身不提供 default 避免別處 silent drop。
     const linkedSources = await this.optionsReadService.prepareLinkedSourceMaps(
       config.linkedFields,
       options.priority ?? "user"

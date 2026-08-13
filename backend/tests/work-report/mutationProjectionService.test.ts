@@ -27,6 +27,7 @@ test("mutation 在 running 狀態只 enqueue，不做即時 projection", async (
       readCalled = true;
       throw new Error("should not read");
     },
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async () => undefined,
     markProjectionEventProcessed: async () => undefined,
@@ -59,6 +60,7 @@ test("mutation 可只 enqueue projection event，不等待即時 refresh", async
       readCalled = true;
       throw new Error("enqueue-only should not refresh entry");
     },
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async () => undefined,
     markProjectionEventProcessed: async () => undefined,
@@ -97,6 +99,7 @@ test("queued projection apply 使用既有 seq，不重複 enqueue", async () =>
       status: "未結案",
       reports: [],
     }),
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async () => undefined,
     markProjectionEventProcessed: async (_formId, seq) => {
@@ -136,6 +139,7 @@ test("mutation 在可讀 snapshot 狀態會即時 projection 並清理 queue", a
       status: "未結案",
       reports: [],
     }),
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async () => undefined,
     markProjectionEventProcessed: async (_formId, seq) => {
@@ -159,6 +163,87 @@ test("mutation 在可讀 snapshot 狀態會即時 projection 並清理 queue", a
   assert.deepEqual(markedRecords, [{ formId: "105", entryId: "E-1", reason: "update" }]);
 });
 
+test("排序 mutation 只 patch SQLite 既有 entry，不再向 Ragic 或 linked source refresh", async () => {
+  let refreshCalled = false;
+  const projectedRecords: unknown[] = [];
+
+  const service = new WorkReportMutationProjectionService({
+    shouldProject: () => true,
+    getSyncState: async () =>
+      ({
+        status: "success",
+        snapshotAt: "2026-03-10T00:00:10.000Z",
+        readModelVersion: READ_MODEL_SCHEMA_VERSION,
+      }) satisfies MutationProjectionSyncState,
+    enqueueProjectionEvent: async () => 23,
+    refreshEntry: async () => {
+      refreshCalled = true;
+      throw new Error("sort order projection 不應重新讀 Ragic");
+    },
+    patchSortOrderSnapshot: async (formId, entryId, sortOrder) => {
+      projectedRecords.push({ formId, entryId, sortOrder });
+      return { rowCount: 1 };
+    },
+    upsertEntrySnapshot: async (_formId, record) => {
+      projectedRecords.push(record);
+      return { rowCount: 0 };
+    },
+    deleteEntrySnapshot: async () => undefined,
+    markProjectionEventProcessed: async () => undefined,
+    cleanupProcessedProjectionEvents: async () => undefined,
+    touchSyncStateSnapshot: async () => undefined,
+    markRecentlyProjectedEntry: () => undefined,
+  });
+
+  const result = await service.projectSortOrderAfterMutation("104", "E-known", 7);
+
+  assert.equal(result, "applied");
+  assert.equal(refreshCalled, false);
+  assert.deepEqual(projectedRecords, [
+    {
+      formId: "104",
+      entryId: "E-known",
+      sortOrder: 7,
+    },
+  ]);
+});
+
+test("排序 mutation 遇到同步進行中回報 deferred，只保留 projection event", async () => {
+  let patchSortOrderSnapshotCalled = false;
+  let upsertCalled = false;
+  const service = new WorkReportMutationProjectionService({
+    shouldProject: () => true,
+    getSyncState: async () => ({
+      status: "running",
+      snapshotAt: "2026-03-10T00:00:10.000Z",
+      readModelVersion: READ_MODEL_SCHEMA_VERSION,
+    }),
+    enqueueProjectionEvent: async () => 24,
+    refreshEntry: async () => {
+      throw new Error("sort order projection 不應重新讀 Ragic");
+    },
+    patchSortOrderSnapshot: async () => {
+      patchSortOrderSnapshotCalled = true;
+      return { rowCount: 0 };
+    },
+    upsertEntrySnapshot: async () => {
+      upsertCalled = true;
+      return { rowCount: 0 };
+    },
+    deleteEntrySnapshot: async () => undefined,
+    markProjectionEventProcessed: async () => undefined,
+    cleanupProcessedProjectionEvents: async () => undefined,
+    touchSyncStateSnapshot: async () => undefined,
+    markRecentlyProjectedEntry: () => undefined,
+  });
+
+  const result = await service.projectSortOrderAfterMutation("104", "E-sync", 8);
+
+  assert.equal(result, "deferred");
+  assert.equal(patchSortOrderSnapshotCalled, false);
+  assert.equal(upsertCalled, false);
+});
+
 test("mutation 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot 並清理 queue", async () => {
   let deletedEntryId = "";
   const processedSeqs: number[] = [];
@@ -176,6 +261,7 @@ test("mutation 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot 並清理
     refreshEntry: async () => {
       throw new HttpError(404, "找不到報工資料：E-404", "REPORT_NOT_FOUND");
     },
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async (_formId, entryId) => {
       deletedEntryId = entryId;
@@ -213,6 +299,7 @@ test("mutation 遇到舊版 read model snapshot 不做即時 projection", async 
       readCalled = true;
       throw new Error("should not read old snapshot");
     },
+    patchSortOrderSnapshot: async () => ({ rowCount: 0 }),
     upsertEntrySnapshot: async () => ({ rowCount: 0 }),
     deleteEntrySnapshot: async () => undefined,
     markProjectionEventProcessed: async () => undefined,

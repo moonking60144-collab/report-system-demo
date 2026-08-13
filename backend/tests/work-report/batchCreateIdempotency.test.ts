@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { open, type Database } from "sqlite";
 import sqlite3 from "sqlite3";
-import { createBatchCreateRowKeyRepository } from "../../src/storage/sqlite/batchCreateRowKeyRepository";
+import {
+  createBatchCreateRowKeyRepository,
+  type BatchCreateRowKeyRepository,
+} from "../../src/storage/sqlite/batchCreateRowKeyRepository";
 import { initializeReadModelSchema } from "../../src/storage/sqlite/readModelSchema";
 import { createRowWithIdempotency } from "../../src/services/work-report/workReportBatchCreateTaskService";
 import { HttpError, UpstreamError } from "../../src/utils/httpError";
@@ -99,6 +102,94 @@ test("同 key 但 formId / entryId 不同 → 拒絕重用，不建立新 row", 
   const mapping = await rowKeyRepo.lookup("shared-key");
   assert.equal(mapping?.entryId, "E-1");
   assert.equal(mapping?.ragicRowId, "R-1");
+});
+
+test("lookup miss 後 reservation 被其他 entry 搶先時拒絕寫入 Ragic", async () => {
+  let createRowCalls = 0;
+  const rowKeyRepo: BatchCreateRowKeyRepository = {
+    lookup: async () => null,
+    reservePending: async () => ({
+      reserved: false,
+      record: {
+        clientRowKey: "raced-key",
+        formId: "104",
+        entryId: "E-other",
+        ragicRowId: "",
+        status: "pending",
+        createdAt: "2026-07-20T00:00:00.000Z",
+        updatedAt: "2026-07-20T00:00:00.000Z",
+      },
+    }),
+    confirm: async () => 0,
+    markIndeterminate: async () => {},
+    markStalePendingIndeterminate: async () => 0,
+    releasePending: async () => 0,
+    record: async () => 0,
+    deleteByRagicRowId: async () => 0,
+    cleanupOlderThan: async () => 0,
+  };
+
+  await assert.rejects(
+    () =>
+      createRowWithIdempotency({
+        row: { payload: { a: 1 }, clientRowKey: "raced-key" },
+        formId: "104",
+        entryId: "E-requested",
+        rowKeyRepo,
+        createRow: async () => {
+          createRowCalls += 1;
+          return { rowId: "R-SHOULD-NOT-EXIST" };
+        },
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "BATCH_CREATE_ROW_KEY_CONFLICT"
+  );
+
+  assert.equal(createRowCalls, 0);
+});
+
+test("Ragic 已建立但 confirm reservation 失去 owner 時回 typed failure", async () => {
+  let createRowCalls = 0;
+  const rowKeyRepo: BatchCreateRowKeyRepository = {
+    lookup: async () => null,
+    reservePending: async () => ({
+      reserved: true,
+      record: {
+        clientRowKey: "lost-owner-key",
+        formId: "104",
+        entryId: "E-1",
+        ragicRowId: "",
+        status: "pending",
+        createdAt: "2026-07-20T00:00:00.000Z",
+        updatedAt: "2026-07-20T00:00:00.000Z",
+      },
+    }),
+    confirm: async () => 0,
+    markIndeterminate: async () => {},
+    markStalePendingIndeterminate: async () => 0,
+    releasePending: async () => 0,
+    record: async () => 0,
+    deleteByRagicRowId: async () => 0,
+    cleanupOlderThan: async () => 0,
+  };
+
+  await assert.rejects(
+    () =>
+      createRowWithIdempotency({
+        row: { payload: { a: 1 }, clientRowKey: "lost-owner-key" },
+        formId: "104",
+        entryId: "E-1",
+        rowKeyRepo,
+        createRow: async () => {
+          createRowCalls += 1;
+          return { rowId: "R-created" };
+        },
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "BATCH_CREATE_ROW_KEY_RECORD_FAILED"
+  );
+
+  assert.equal(createRowCalls, 1);
 });
 
 test("createRow 拋錯 → 不寫入映射，重試時可重新嘗試", async () => {
@@ -367,11 +458,11 @@ test("lookup 本身 throw → fail closed，不寫 Ragic", async () => {
     reservePending: async () => {
       throw new Error("sqlite down");
     },
-    confirm: async () => {},
+    confirm: async () => 1,
     markIndeterminate: async () => {},
     markStalePendingIndeterminate: async () => 0,
     releasePending: async () => 0,
-    record: async () => {},
+    record: async () => 1,
     deleteByRagicRowId: async () => 0,
     cleanupOlderThan: async () => 0,
   };

@@ -825,6 +825,73 @@ class WorkReportSqliteRepository {
     return parseRecordPayload(row.detail_json, entryId);
   }
 
+  async patchEntrySortOrderSnapshot(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    syncedAt: string
+  ): Promise<{ rowCount: number }> {
+    return withWriteTransaction(async (db) => {
+      const generationId = await this.getActiveGenerationIdWithDb(db, formId);
+      if (!generationId) {
+        return { rowCount: 0 };
+      }
+      const row = await db.get<{
+        summary_json: string;
+        detail_json: string;
+      }>(
+        `
+        SELECT summary_json, detail_json
+        FROM work_report_entries
+        WHERE form_id = ? AND generation_id = ? AND entry_id = ?
+        LIMIT 1
+        `,
+        formId,
+        generationId,
+        entryId
+      );
+      const summaryRecord = row?.summary_json
+        ? parseRecordPayload(row.summary_json, entryId)
+        : null;
+      const detailRecord = row?.detail_json
+        ? parseRecordPayload(row.detail_json, entryId)
+        : null;
+      if (!summaryRecord || !detailRecord) {
+        return { rowCount: 0 };
+      }
+      const nextSummaryRecord = {
+        ...summaryRecord,
+        sortOrder,
+      };
+      const nextDetailRecord = {
+        ...detailRecord,
+        sortOrder,
+      };
+      const result = await db.run(
+        `
+        UPDATE work_report_entries
+        SET sort_order = ?,
+            search_text = ?,
+            summary_json = ?,
+            detail_json = ?,
+            synced_at = ?
+        WHERE form_id = ? AND generation_id = ? AND entry_id = ?
+        `,
+        sortOrder,
+        buildSearchText(nextSummaryRecord),
+        JSON.stringify(nextSummaryRecord),
+        JSON.stringify(nextDetailRecord),
+        syncedAt,
+        formId,
+        generationId,
+        entryId
+      );
+      return {
+        rowCount: typeof result.changes === "number" ? result.changes : 0,
+      };
+    });
+  }
+
   async upsertEntrySnapshot(
     formId: string,
     record: WorkReportRecord,

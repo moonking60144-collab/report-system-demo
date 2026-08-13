@@ -152,11 +152,12 @@ export const FORM_104_CONFIG: FormConfig = {
     ],
     mainWriteFields: {
       machineCode: "1006031",
+      sortOrder: "1012079",
     },
     subtableWriteFields: {
-      date: "1002190",
+      date: env.RAGIC_FORM_16_DATE_FIELD_ID,
       plannedIdle: "1012814",
-      processCode: "1002195",
+      processCode: env.RAGIC_FORM_16_PROCESS_FIELD_ID,
       machineId: "1002192",
       operatorId: "1002219",
       operatorName: "1002220",

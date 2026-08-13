@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { env } from "../../config/env";
 import { HttpError } from "../../utils/httpError";
-import { form16ClientRowKeyRepository } from "../../storage/sqlite/form16ClientRowKeyRepository";
+import {
+  form16ClientRowKeyRepository,
+  type Form16ClientRowKeyRecord,
+} from "../../storage/sqlite/form16ClientRowKeyRepository";
 
 /**
  * Form 16 寫入的 idempotency 包裝器。
@@ -10,10 +14,11 @@ import { form16ClientRowKeyRepository } from "../../storage/sqlite/form16ClientR
  * 收斂成「第一次寫 Ragic、之後都回同一筆 entryId」，避免 Form 16 出現重複 entry。
  *
  * 實際 Ragic 寫入流程由 `create` callback 負責（含 post-write verify、action button、
- * rollback 等）。本 service 只處理「查舊映射 / 記新映射」。
+ * rollback 等）。本 service 處理 reservation、confirmed mapping 與 indeterminate 狀態。
  *
  * 失敗語意：
- *   - `create` 拋錯：不記映射，下次 retry 同 clientRowKey 會重新嘗試
+ *   - `create` 確定性失敗：release pending，下次 retry 同 clientRowKey 可重新嘗試
+ *   - `create` 結果不明：mark indeterminate，同 key 不可直接重送
  *   - `create` 回傳 entryId = null：不記映射，下次 retry 會重新嘗試
  *   - 成功（entryId 非 null）：記錄映射，下次同 key 直接回舊 entryId
  *
@@ -23,7 +28,14 @@ import { form16ClientRowKeyRepository } from "../../storage/sqlite/form16ClientR
  * 失敗時等待者收到同一個錯誤，Map 隨即清掉，後續 retry 能重新嘗試。
  */
 
-const inflightByKey = new Map<string, Promise<Form16IdempotencyResult>>();
+const inflightByKey = new Map<
+  string,
+  {
+    source: string;
+    operationFingerprint: string;
+    promise: Promise<Form16IdempotencyResult>;
+  }
+>();
 const INDETERMINATE_WRITE_ERROR_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
@@ -34,6 +46,9 @@ const INDETERMINATE_RAGIC_WRITE_RESULT_CODES = new Set([
   "RAGIC_WRITE_GONE",
   "RAGIC_WRITE_ROLLBACK_DELETED",
   "RAGIC_WRITE_ROLLBACK_UNCONFIRMED",
+  "RAGIC_WRITE_VERIFY_FAILED",
+  "RAGIC_DELETE_INDETERMINATE",
+  "RAGIC_RECALCULATE_INCOMPLETE",
 ]);
 
 export interface Form16IdempotencyCreateResult {
@@ -45,8 +60,10 @@ export interface Form16IdempotencyInput {
   clientRowKey: string | null | undefined;
   /** 來源標記，用於 debug / 稽核，例如 "downtime"、"work-report-104" */
   source: string;
+  /** operation、target 與 canonical payload 的穩定 fingerprint。 */
+  operationFingerprint?: string;
   /** 真正打 Ragic 寫入 + 後續處理的 callback；回 entryId 或 null */
-  create: () => Promise<Form16IdempotencyCreateResult>;
+  create: (reservation?: Form16ClientRowKeyRecord) => Promise<Form16IdempotencyCreateResult>;
 }
 
 export interface Form16IdempotencyResult {
@@ -90,9 +107,13 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function shouldMarkCreateResultIndeterminate(error: unknown): boolean {
+export function isForm16CreateWriteIndeterminateError(error: unknown): boolean {
   const code = getErrorCode(error);
   const message = getErrorMessage(error);
+
+  if (code === "FORM16_WRITE_INDETERMINATE") {
+    return true;
+  }
 
   if (error instanceof HttpError) {
     if (code && INDETERMINATE_RAGIC_WRITE_RESULT_CODES.has(code)) {
@@ -128,6 +149,9 @@ function shouldMarkCreateResultIndeterminate(error: unknown): boolean {
   );
 }
 
+export const isForm16MutationWriteIndeterminateError =
+  isForm16CreateWriteIndeterminateError;
+
 function throwIndeterminateForm16Write(
   status: "pending" | "indeterminate",
   errorMessage?: string
@@ -141,10 +165,32 @@ function throwIndeterminateForm16Write(
   throw new HttpError(409, message, "FORM16_WRITE_INDETERMINATE");
 }
 
+function assertSameIdempotencyIdentity(input: {
+  expectedSource: string;
+  expectedFingerprint: string;
+  actualSource: string;
+  actualFingerprint?: string;
+}): void {
+  const actualFingerprint = String(input.actualFingerprint ?? "").trim();
+  if (
+    input.actualSource !== input.expectedSource ||
+    (input.expectedFingerprint &&
+      actualFingerprint &&
+      actualFingerprint !== input.expectedFingerprint)
+  ) {
+    throw new HttpError(
+      409,
+      "Form 16 idempotency key 已用於不同的來源、目標或 payload，請重新整理後再送出。",
+      "FORM16_IDEMPOTENCY_KEY_CONFLICT"
+    );
+  }
+}
+
 export async function checkOrCreateForm16Entry(
   input: Form16IdempotencyInput
 ): Promise<Form16IdempotencyResult> {
   const key = String(input.clientRowKey ?? "").trim();
+  const operationFingerprint = String(input.operationFingerprint ?? "").trim();
 
   // 沒 clientRowKey 就直接 create。服務仍然可用，只是沒有 idempotency 保護
   // （保留給過渡期或舊 client 沒傳 key 的請求）
@@ -162,7 +208,13 @@ export async function checkOrCreateForm16Entry(
   // 0. 同 key 已有進行中的 create → 等它的結果，不重複打 Ragic
   const inflight = inflightByKey.get(key);
   if (inflight) {
-    const settled = await inflight;
+    assertSameIdempotencyIdentity({
+      expectedSource: input.source,
+      expectedFingerprint: operationFingerprint,
+      actualSource: inflight.source,
+      actualFingerprint: inflight.operationFingerprint,
+    });
+    const settled = await inflight.promise;
     return { entryId: settled.entryId, reused: true };
   }
 
@@ -172,9 +224,19 @@ export async function checkOrCreateForm16Entry(
     const reserveResult = await form16ClientRowKeyRepository.reservePending({
       clientRowKey: key,
       source: input.source,
+      operationFingerprint: operationFingerprint || undefined,
+      reservationToken: randomUUID(),
     });
     if (!reserveResult.reserved) {
       const existing = reserveResult.record;
+      if (existing) {
+        assertSameIdempotencyIdentity({
+          expectedSource: input.source,
+          expectedFingerprint: operationFingerprint,
+          actualSource: existing.source,
+          actualFingerprint: existing.operationFingerprint,
+        });
+      }
       if (existing?.status === "confirmed" && existing.entryId) {
         return { entryId: existing.entryId, reused: true };
       }
@@ -191,9 +253,9 @@ export async function checkOrCreateForm16Entry(
     // 2. 沒映射就真的打 Ragic（create 內部可能再失敗）
     let result: Form16IdempotencyCreateResult;
     try {
-      result = await input.create();
+      result = await input.create(reserveResult.record ?? undefined);
     } catch (error) {
-      if (shouldMarkCreateResultIndeterminate(error)) {
+      if (isForm16CreateWriteIndeterminateError(error)) {
         await form16ClientRowKeyRepository.markIndeterminate({
           clientRowKey: key,
           source: input.source,
@@ -211,11 +273,19 @@ export async function checkOrCreateForm16Entry(
     // 3. 只有 create 實際回了 entryId 才記映射
     //    回 null 時不記，下次同 key 重試能重新嘗試（而不是被空值永久 pin 住）
     if (result.entryId) {
-      await form16ClientRowKeyRepository.confirm({
+      const confirmedCount = await form16ClientRowKeyRepository.confirm({
         clientRowKey: key,
         entryId: result.entryId,
         source: input.source,
+        ...(operationFingerprint ? { operationFingerprint } : {}),
       });
+      if (confirmedCount !== 1) {
+        throw new HttpError(
+          409,
+          `Form 16 已建立 entry ${result.entryId}，但 idempotency reservation 已變更；請先重新整理確認結果。`,
+          "FORM16_WRITE_INDETERMINATE"
+        );
+      }
     } else {
       await form16ClientRowKeyRepository.releasePending({
         clientRowKey: key,
@@ -226,7 +296,11 @@ export async function checkOrCreateForm16Entry(
     return { entryId: result.entryId, reused: false };
   })();
 
-  inflightByKey.set(key, task);
+  inflightByKey.set(key, {
+    source: input.source,
+    operationFingerprint,
+    promise: task,
+  });
   try {
     return await task;
   } finally {

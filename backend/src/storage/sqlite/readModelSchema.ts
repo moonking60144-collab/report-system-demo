@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS form16_downtime_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   snapshot_at TEXT,
   total_records INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 
@@ -105,7 +106,15 @@ CREATE TABLE IF NOT EXISTS form16_planned_idle_state (
   synced_at TEXT,
   oldest_month TEXT,
   total_records INTEGER NOT NULL DEFAULT 0,
+  full_revision INTEGER NOT NULL DEFAULT 0,
+  projection_revision INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS form16_planned_idle_month_state (
+  month_key TEXT PRIMARY KEY,
+  synced_at TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -197,6 +206,8 @@ CREATE TABLE IF NOT EXISTS form16_client_row_keys (
   client_row_key TEXT PRIMARY KEY,
   entry_id TEXT NOT NULL,
   source TEXT NOT NULL,                    -- 'downtime' | 'work-report-104' | 'work-report-105' 等
+  operation_fingerprint TEXT,
+  reservation_token TEXT,
   status TEXT NOT NULL DEFAULT 'confirmed',
   error_message TEXT,
   created_at TEXT NOT NULL,
@@ -257,6 +268,7 @@ export async function initializeReadModelSchema(db: Database): Promise<void> {
   await ensureWorkReportEntriesColumns(db);
   await ensureBatchCreateRowKeyColumns(db);
   await ensureForm16ClientRowKeyColumns(db);
+  await ensureForm16ProjectionRevisionColumns(db);
 }
 
 async function ensureTableColumns(
@@ -524,6 +536,12 @@ async function ensureForm16ClientRowKeyColumns(db: Database): Promise<void> {
   if (!existingColumns.has("error_message")) {
     await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN error_message TEXT");
   }
+  if (!existingColumns.has("operation_fingerprint")) {
+    await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN operation_fingerprint TEXT");
+  }
+  if (!existingColumns.has("reservation_token")) {
+    await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN reservation_token TEXT");
+  }
   if (!existingColumns.has("updated_at")) {
     await db.exec("ALTER TABLE form16_client_row_keys ADD COLUMN updated_at TEXT");
     await db.exec(`
@@ -536,4 +554,29 @@ async function ensureForm16ClientRowKeyColumns(db: Database): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_form16_client_row_keys_status
       ON form16_client_row_keys (status, updated_at)
   `);
+}
+
+async function ensureForm16ProjectionRevisionColumns(db: Database): Promise<void> {
+  await ensureTableColumns(db, "form16_downtime_state", [
+    {
+      name: "revision",
+      sql: "ALTER TABLE form16_downtime_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+    },
+  ]);
+  await ensureTableColumns(db, "form16_planned_idle_state", [
+    {
+      name: "full_revision",
+      sql: "ALTER TABLE form16_planned_idle_state ADD COLUMN full_revision INTEGER NOT NULL DEFAULT 0",
+    },
+    {
+      name: "projection_revision",
+      sql: "ALTER TABLE form16_planned_idle_state ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0",
+    },
+  ]);
+  await ensureTableColumns(db, "form16_planned_idle_month_state", [
+    {
+      name: "revision",
+      sql: "ALTER TABLE form16_planned_idle_month_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+    },
+  ]);
 }

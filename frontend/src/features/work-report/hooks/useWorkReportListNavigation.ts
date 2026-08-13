@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { WorkReportRecord } from "../../../api/workReport";
-import { ALL_FILTER_VALUE } from "../constants";
 import type {
   ColumnFilterState,
   ColumnSortRule,
@@ -13,7 +12,11 @@ import type {
   WorkReportListViewState,
   WorkReportTopView,
 } from "../types";
-import { normalizeListSearch, serializeColumnSortRulesToSearchParam } from "../utils";
+import {
+  normalizeListSearch,
+  serializeColumnSortRulesToSearchParam,
+  writeGlobalFiltersToSearchParams,
+} from "../utils";
 
 const QUICK_VIEW_QUERY_KEY = "fQuick";
 const LANDING_PAGE_QUERY_KEY = "landingPage";
@@ -79,52 +82,7 @@ export function useWorkReportListNavigation({
       params.delete(LANDING_PAGE_QUERY_KEY);
     }
     params.set(TOP_VIEW_QUERY_KEY, activeTopView);
-
-    if (globalFilters.globalKeyword.trim()) {
-      params.set("fGlobal", globalFilters.globalKeyword.trim());
-    } else {
-      params.delete("fGlobal");
-    }
-    if (globalFilters.workOrderKeyword.trim()) {
-      params.set("fWorkOrder", globalFilters.workOrderKeyword.trim());
-    } else {
-      params.delete("fWorkOrder");
-    }
-    if (globalFilters.customerPartKeyword.trim()) {
-      params.set("fPart", globalFilters.customerPartKeyword.trim());
-    } else {
-      params.delete("fPart");
-    }
-    if (globalFilters.machineCode !== ALL_FILTER_VALUE) {
-      params.set("fMachine", globalFilters.machineCode);
-    } else {
-      params.delete("fMachine");
-    }
-    if (globalFilters.filterMachineCode !== ALL_FILTER_VALUE) {
-      params.set("fFilterMachine", globalFilters.filterMachineCode);
-    } else {
-      params.delete("fFilterMachine");
-    }
-    if (globalFilters.status !== ALL_FILTER_VALUE) {
-      params.set("fStatus", globalFilters.status);
-    } else {
-      params.delete("fStatus");
-    }
-    if (globalFilters.ragicUnfinishedStatus !== ALL_FILTER_VALUE) {
-      params.set("fRagicUnfinished", globalFilters.ragicUnfinishedStatus);
-    } else {
-      params.delete("fRagicUnfinished");
-    }
-    if (globalFilters.siteRunning !== "all") {
-      params.set("fSite", globalFilters.siteRunning);
-    } else {
-      params.delete("fSite");
-    }
-    if (globalFilters.startSchedule !== "all") {
-      params.set("fStartSchedule", globalFilters.startSchedule);
-    } else {
-      params.delete("fStartSchedule");
-    }
+    writeGlobalFiltersToSearchParams(params, globalFilters);
     if (activePlaceholderViewId) {
       params.set(QUICK_VIEW_QUERY_KEY, activePlaceholderViewId);
     } else {

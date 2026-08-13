@@ -2,11 +2,20 @@ import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { env } from "../config/env";
+import { HttpError } from "../utils/httpError";
 import {
   workReportTaskRegistryService,
+  type WorkReportQueueTaskOperationKind,
   type WorkReportQueueTaskType,
 } from "./work-report/workReportTaskRegistryService";
 import { workReportEntryMutationQueue } from "./work-report/workReportEntryMutationQueue";
+import { isForm16MutationWriteIndeterminateError } from "./form16/form16IdempotencyService";
+import {
+  isConfirmedMutationLifecycleState,
+  isMutationLifecycleState,
+  resolveMutationLifecycleState,
+  type MutationLifecycleState,
+} from "../types/mutationLifecycle";
 
 const TASK_SNAPSHOT_VERSION = "v1";
 
@@ -23,32 +32,47 @@ export interface CreateReportTaskError {
 
 export interface CreateReportTask {
   taskId: string;
-  taskType?: Extract<WorkReportQueueTaskType, "create-report" | "update-report">;
+  taskType?: Extract<
+    WorkReportQueueTaskType,
+    "create-report" | "update-report" | "update-downtime" | "delete-downtime"
+  >;
   formId: string;
   entryId: string;
   workOrderNo?: string;
   queueKey: string;
   clientMutationId?: string;
+  operationFingerprint?: string;
+  operationKind?: WorkReportQueueTaskOperationKind;
+  writeIndeterminate?: boolean;
   actorClientId?: string;
   actorTabId?: string;
   actorIp?: string;
   actorLabel?: string;
   status: CreateReportTaskStatus;
   createdAt: string;
+  lifecycleState?: MutationLifecycleState;
+  acceptedAt?: string;
+  confirmedAt?: string;
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
   result?: CreateReportTaskResult;
   error?: CreateReportTaskError;
+  runningMessage?: string;
 }
 
 interface EnqueueCreateReportTaskInput {
-  taskType?: Extract<WorkReportQueueTaskType, "create-report" | "update-report">;
+  taskType?: Extract<
+    WorkReportQueueTaskType,
+    "create-report" | "update-report" | "update-downtime" | "delete-downtime"
+  >;
   formId: string;
   entryId: string;
   workOrderNo?: string;
   queueKey: string;
   clientMutationId?: string;
+  operationFingerprint?: string;
+  operationKind?: WorkReportQueueTaskOperationKind;
   actorClientId?: string;
   actorTabId?: string;
   actorIp?: string;
@@ -60,6 +84,31 @@ interface TaskSnapshotPayload {
   version: string;
   savedAt: string;
   tasks: CreateReportTask[];
+}
+
+function resolveTaskBaseMessage(
+  task: Pick<CreateReportTask, "taskType" | "operationKind">
+): string {
+  if (task.taskType === "update-downtime") {
+    return "更新停機紀錄任務";
+  }
+  if (task.taskType === "delete-downtime") {
+    return "刪除停機紀錄任務";
+  }
+  switch (task.operationKind) {
+    case "update-sort-order":
+      return "修改工令排序任務";
+    case "update-main-machine":
+      return "更新主表機台任務";
+    case "close-work-order":
+      return "人工結案工令任務";
+    case "reopen-work-order":
+      return "重新開啟工令任務";
+    default:
+      return task.taskType === "update-report"
+        ? "更新報工背景任務"
+        : "新增報工背景任務";
+  }
 }
 
 class CreateReportTaskService {
@@ -89,14 +138,30 @@ class CreateReportTaskService {
 
   enqueue(input: EnqueueCreateReportTaskInput): CreateReportTask {
     const clientMutationId = String(input.clientMutationId ?? "").trim();
+    const operationFingerprint = String(input.operationFingerprint ?? "").trim();
     if (clientMutationId) {
       const existingTaskId = this.taskIdByClientMutationId.get(clientMutationId);
       if (existingTaskId) {
         const existingTask = this.tasks.get(existingTaskId);
         if (existingTask) {
+          const existingOperationFingerprint = String(
+            existingTask.operationFingerprint ?? ""
+          ).trim();
+          if (
+            operationFingerprint &&
+            existingOperationFingerprint &&
+            existingOperationFingerprint !== operationFingerprint
+          ) {
+            throw new HttpError(
+              409,
+              "x-client-mutation-id 已用於不同的報工操作，請重新整理後再送出。",
+              "CLIENT_MUTATION_ID_CONFLICT"
+            );
+          }
           const canRetryRecoveredTask =
             existingTask.status === "failed" &&
-            existingTask.error?.code === "TASK_RECOVERED_AFTER_RESTART";
+            existingTask.error?.code === "TASK_RECOVERED_AFTER_RESTART" &&
+            existingTask.writeIndeterminate !== true;
           if (!canRetryRecoveredTask) {
             return this.copyTask(existingTask);
           }
@@ -104,6 +169,8 @@ class CreateReportTaskService {
         this.taskIdByClientMutationId.delete(clientMutationId);
       }
     }
+
+    this.queueChainByKey.assertAccepting(input.queueKey);
 
     const taskId = randomUUID();
     const createdAt = new Date().toISOString();
@@ -117,12 +184,16 @@ class CreateReportTaskService {
         : {}),
       queueKey: input.queueKey,
       ...(clientMutationId ? { clientMutationId } : {}),
+      ...(operationFingerprint ? { operationFingerprint } : {}),
+      ...(input.operationKind ? { operationKind: input.operationKind } : {}),
       ...(input.actorClientId ? { actorClientId: input.actorClientId } : {}),
       ...(input.actorTabId ? { actorTabId: input.actorTabId } : {}),
       ...(input.actorIp ? { actorIp: input.actorIp } : {}),
       ...(input.actorLabel ? { actorLabel: input.actorLabel } : {}),
       status: "pending",
       createdAt,
+      lifecycleState: "accepted",
+      acceptedAt: createdAt,
       updatedAt: createdAt,
     };
     this.tasks.set(taskId, task);
@@ -133,8 +204,14 @@ class CreateReportTaskService {
     this.pruneHistory();
     this.schedulePersist();
 
-    void this.queueChainByKey.enqueue(input.queueKey, () =>
-      this.runTask(taskId, input.worker)
+    void this.queueChainByKey.enqueue(
+      input.queueKey,
+      () => this.runTask(taskId, input.worker),
+      {
+        onWaitingForSync: () => {
+          this.markWaitingForSync(taskId);
+        },
+      }
     );
 
     return this.copyTask(task);
@@ -193,11 +270,16 @@ class CreateReportTaskService {
     taskId: string,
     worker: () => Promise<unknown>
   ): Promise<void> {
-    const startedAt = new Date().toISOString();
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return;
+    }
+    const startedAt = task.startedAt ?? new Date().toISOString();
     this.updateTask(taskId, {
       status: "running",
       startedAt,
       updatedAt: startedAt,
+      runningMessage: undefined,
     });
 
     try {
@@ -227,6 +309,7 @@ class CreateReportTaskService {
         finishedAt,
         updatedAt: finishedAt,
         error: normalizedError,
+        writeIndeterminate: isForm16MutationWriteIndeterminateError(error),
       });
     }
   }
@@ -237,22 +320,73 @@ class CreateReportTaskService {
       return;
     }
 
-    this.tasks.set(taskId, {
+    const nextTask: CreateReportTask = {
       ...task,
       ...patch,
+    };
+    nextTask.lifecycleState = resolveMutationLifecycleState({
+      status: nextTask.status,
+      errorCode: nextTask.error?.code,
+      writeIndeterminate: nextTask.writeIndeterminate,
     });
+    if (
+      patch.confirmedAt === undefined &&
+      patch.finishedAt &&
+      isConfirmedMutationLifecycleState(nextTask.lifecycleState)
+    ) {
+      nextTask.confirmedAt = patch.finishedAt;
+    }
+    if (
+      nextTask.lifecycleState === "indeterminate" ||
+      nextTask.lifecycleState === "unknown"
+    ) {
+      delete nextTask.confirmedAt;
+    }
+
+    this.tasks.set(taskId, nextTask);
 
     this.syncTaskToRegistry(this.tasks.get(taskId)!);
     this.pruneHistory();
     this.schedulePersist();
   }
 
+  private markWaitingForSync(taskId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return;
+    }
+    const waitingAt = new Date().toISOString();
+    this.updateTask(taskId, {
+      status: "running",
+      startedAt: task.startedAt ?? waitingAt,
+      updatedAt: waitingAt,
+      runningMessage: "正在等待資料重新整理完成",
+    });
+  }
+
   private copyTask(task: CreateReportTask): CreateReportTask {
+    const normalizedTask = this.normalizeTaskLifecycle(task);
     return {
-      ...task,
-      result: task.result ? { ...task.result } : undefined,
-      error: task.error ? { ...task.error } : undefined,
+      ...normalizedTask,
+      result: normalizedTask.result ? { ...normalizedTask.result } : undefined,
+      error: normalizedTask.error ? { ...normalizedTask.error } : undefined,
     };
+  }
+
+  private normalizeTaskLifecycle(task: CreateReportTask): CreateReportTask {
+    const lifecycleState = resolveMutationLifecycleState({
+      status: task.status,
+      errorCode: task.error?.code,
+      writeIndeterminate: task.writeIndeterminate,
+    });
+    const normalized = {
+      ...task,
+      lifecycleState,
+    };
+    if (lifecycleState === "indeterminate" || lifecycleState === "unknown") {
+      delete normalized.confirmedAt;
+    }
+    return normalized;
   }
 
   private normalizeTaskResult(value: unknown): CreateReportTaskResult {
@@ -278,10 +412,13 @@ class CreateReportTaskService {
       }
 
       for (const task of parsed.tasks) {
-        this.tasks.set(task.taskId, {
-          ...task,
-          taskType: task.taskType ?? "create-report",
-        });
+        this.tasks.set(
+          task.taskId,
+          this.normalizeTaskLifecycle({
+            ...task,
+            taskType: task.taskType ?? "create-report",
+          })
+        );
         if (typeof task.clientMutationId === "string" && task.clientMutationId.trim()) {
           this.taskIdByClientMutationId.set(task.clientMutationId.trim(), task.taskId);
         }
@@ -318,17 +455,24 @@ class CreateReportTaskService {
         continue;
       }
 
+      const writeIndeterminate = task.status === "running";
+      const taskLabel = resolveTaskBaseMessage(task);
       recoveredCount += 1;
-      this.tasks.set(taskId, {
+      const recoveredTask = this.normalizeTaskLifecycle({
         ...task,
         status: "failed",
         updatedAt: recoveredAt,
         finishedAt: recoveredAt,
+        ...(writeIndeterminate ? {} : { confirmedAt: recoveredAt }),
+        writeIndeterminate,
         error: {
           code: "TASK_RECOVERED_AFTER_RESTART",
-          message: "服務重啟，原非完成任務已標記為失敗，請重新送出",
+          message: writeIndeterminate
+            ? `服務重啟時${taskLabel}正在執行，Ragic 寫入結果尚未確認；請先重新整理確認，不可直接重送`
+            : "服務重啟，原排隊任務尚未開始，已標記為失敗，請重新送出",
         },
       });
+      this.tasks.set(taskId, recoveredTask);
     }
 
     if (recoveredCount > 0) {
@@ -407,13 +551,12 @@ class CreateReportTaskService {
 
   private syncTaskToRegistry(task: CreateReportTask): void {
     const taskType = task.taskType ?? "create-report";
-    const baseMessage =
-      taskType === "update-report" ? "更新報工背景任務" : "新增報工背景任務";
+    const baseMessage = resolveTaskBaseMessage(task);
     const message =
       task.status === "pending"
         ? `${baseMessage}排隊中`
         : task.status === "running"
-          ? `${baseMessage}處理中`
+          ? task.runningMessage ?? `${baseMessage}處理中`
           : task.status === "success"
             ? task.result?.rowId
               ? `${baseMessage}完成（rowId: ${task.result.rowId}）`
@@ -432,14 +575,18 @@ class CreateReportTaskService {
       createdAt: task.createdAt,
       startedAt: task.startedAt ?? null,
       finishedAt: task.finishedAt ?? null,
+      acceptedAt: task.acceptedAt ?? null,
+      confirmedAt: task.confirmedAt ?? null,
       updatedAt: task.updatedAt,
       message,
       errorCode: task.error?.code ?? null,
       errorMessage: task.error?.message ?? null,
+      writeIndeterminate: task.writeIndeterminate ?? null,
       actorClientId: task.actorClientId ?? null,
       actorTabId: task.actorTabId ?? null,
       actorIp: task.actorIp ?? null,
       actorLabel: task.actorLabel ?? null,
+      operationKind: task.operationKind ?? null,
     });
   }
 
@@ -473,8 +620,22 @@ class CreateReportTaskService {
       typeof t.formId === "string" &&
       typeof t.entryId === "string" &&
       typeof t.queueKey === "string" &&
-      (t.taskType === undefined || t.taskType === "create-report" || t.taskType === "update-report") &&
+      (t.taskType === undefined ||
+        t.taskType === "create-report" ||
+        t.taskType === "update-report" ||
+        t.taskType === "update-downtime" ||
+        t.taskType === "delete-downtime") &&
       (t.clientMutationId === undefined || typeof t.clientMutationId === "string") &&
+      (t.operationFingerprint === undefined || typeof t.operationFingerprint === "string") &&
+      (t.operationKind === undefined ||
+        t.operationKind === "update-sort-order" ||
+        t.operationKind === "update-main-machine" ||
+        t.operationKind === "close-work-order" ||
+        t.operationKind === "reopen-work-order") &&
+      (t.lifecycleState === undefined || isMutationLifecycleState(t.lifecycleState)) &&
+      (t.acceptedAt === undefined || typeof t.acceptedAt === "string") &&
+      (t.confirmedAt === undefined || typeof t.confirmedAt === "string") &&
+      (t.writeIndeterminate === undefined || typeof t.writeIndeterminate === "boolean") &&
       (t.actorClientId === undefined || typeof t.actorClientId === "string") &&
       (t.actorTabId === undefined || typeof t.actorTabId === "string") &&
       (t.actorIp === undefined || typeof t.actorIp === "string") &&

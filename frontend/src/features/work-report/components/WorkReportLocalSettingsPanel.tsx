@@ -7,7 +7,9 @@ import type { FixedFilterPresetId, WorkReportLocalPreferences } from "../types";
 
 interface WorkReportLocalSettingsPanelProps {
   value: WorkReportLocalPreferences;
+  deviceLabel: string;
   onChange: (next: WorkReportLocalPreferences) => void;
+  onDeviceLabelChange: (next: string) => void;
   onSave: () => void;
   onBackToReport: () => void;
 }
@@ -29,7 +31,9 @@ function getPresetI18nKey(presetId: FixedFilterPresetId): string {
 
 export function WorkReportLocalSettingsPanel({
   value,
+  deviceLabel,
   onChange,
+  onDeviceLabelChange,
   onSave,
   onBackToReport,
 }: WorkReportLocalSettingsPanelProps) {
@@ -94,6 +98,19 @@ export function WorkReportLocalSettingsPanel({
 
       <div className="local-settings-card">
         <div className="local-settings-grid">
+          <label className="local-settings-field">
+            <span>{t("workReport:localSettings.fields.deviceLabel")}</span>
+            <input
+              type="text"
+              value={deviceLabel}
+              maxLength={60}
+              autoComplete="off"
+              placeholder={t("workReport:localSettings.placeholders.deviceLabel")}
+              onChange={(event) => onDeviceLabelChange(event.target.value)}
+            />
+            <small>{t("workReport:localSettings.hints.deviceLabel")}</small>
+          </label>
+
           <label className="local-settings-field">
             <span>{t("workReport:localSettings.fields.defaultLandingPage")}</span>
             <Select

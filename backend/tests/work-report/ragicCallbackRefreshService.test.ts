@@ -9,6 +9,14 @@ import {
   type CallbackTask,
 } from "../../src/services/ragicCallbackRefreshServiceFactory";
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 async function waitForTaskCompletion(
   service: RagicCallbackRefreshService,
   taskId: string
@@ -112,6 +120,8 @@ test("persisted pending/running callback 重啟後會重排 refresh，而不是�
   await service.initialize();
 
   const finishedTask = await waitForTaskCompletion(service, "persisted-callback-1");
+  await service.drain();
+  await service.flush();
   assert.equal(finishedTask.status, "success", finishedTask.error?.message);
   assert.equal(refreshCount, 1);
   assert.equal(publishedEntryId, "E-104");
@@ -614,4 +624,82 @@ test("SQLite 停用時沒有 dedupe 機制，SSE 仍照發（保留原行為）"
   assert.equal(finishedTask.status, "success");
   assert.equal(entryUpdatedPublished, true);
   assert.equal(formUpdatedPublished, true);
+});
+
+test("callback queue 關閉 admission 後拒絕新任務且不留下 ghost task", async () => {
+  const refreshGate = deferred();
+  const refreshStarted = deferred();
+  const service = new RagicCallbackRefreshService({
+    delayMs: 0,
+    dedupeWindowMs: 5_000,
+    taskPersistEnabled: false,
+    shouldUseSqliteReadForForm: () => true,
+    getSyncState: async () => ({ status: "success" }),
+    projectEntryAfterMutation: async () => undefined,
+    refreshEntry: async (_formId, entryId) => {
+      refreshStarted.resolve();
+      await refreshGate.promise;
+      return {
+        id: entryId,
+        workOrderNo: "WO-TEST",
+        customerPartNo: null,
+        erpPartNo: null,
+        status: "未結案",
+        reports: [],
+      };
+    },
+    upsertEntrySnapshot: async () => ({ rowCount: 1 }),
+    touchSyncStateSnapshot: async () => undefined,
+    deleteEntrySnapshot: async () => undefined,
+    publishWorkReportUpdated: () => undefined,
+    publishWorkReportFormUpdated: () => undefined,
+    getRecentMutationProjection: () => null,
+  });
+
+  const acceptedTask = service.enqueue({
+    formId: "104",
+    entryId: "E-TEST",
+    eventType: "entry-updated",
+    source: "test",
+  });
+  await refreshStarted.promise;
+  service.closeAdmission();
+
+  const statsBeforeRejectedEnqueue = service.getQueueStats();
+  assert.deepEqual(statsBeforeRejectedEnqueue, {
+    accepting: false,
+    activeKeyCount: 1,
+    pendingTaskCount: 1,
+  });
+  assert.throws(
+    () =>
+      service.enqueue({
+        formId: "104",
+        entryId: "E-LATE",
+        eventType: "entry-updated",
+        source: "test",
+      }),
+    (error: unknown) =>
+      error instanceof HttpError &&
+      error.statusCode === 503 &&
+      error.code === "RAGIC_CALLBACK_QUEUE_CLOSED"
+  );
+  assert.equal(service.getStats().total, 1);
+  assert.deepEqual(service.getQueueStats(), statsBeforeRejectedEnqueue);
+
+  let drainCompleted = false;
+  const drainPromise = service.drain().then(() => {
+    drainCompleted = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drainCompleted, false);
+
+  refreshGate.resolve();
+  await drainPromise;
+  assert.equal(service.getTask(acceptedTask.taskId)?.status, "success");
+  assert.deepEqual(service.getQueueStats(), {
+    accepting: false,
+    activeKeyCount: 0,
+    pendingTaskCount: 0,
+  });
 });

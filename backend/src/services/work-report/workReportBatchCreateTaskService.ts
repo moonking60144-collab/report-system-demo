@@ -43,6 +43,11 @@ interface WorkReportBatchCreateTask {
   actorLabel?: string;
   retryMode?: "finalize-only";
   retriedFromTaskId?: string;
+  runningMessage?: string;
+}
+
+interface BatchCreateBeforeRunContext {
+  setStatusMessage(message: string): void;
 }
 
 export interface BatchCreateRowInput {
@@ -60,7 +65,7 @@ interface RequestBatchCreateInput {
   actorTabId?: string;
   actorIp?: string;
   actorLabel?: string;
-  beforeRun?: () => Promise<void>;
+  beforeRun?: (context: BatchCreateBeforeRunContext) => Promise<void>;
   createRow: (payload: Record<string, unknown>) => Promise<{ rowId: string }>;
   finalizeAfterCreate?: (summary: {
     formId: string;
@@ -251,7 +256,11 @@ function normalizeRegistryBatchCreatedRowIds(record: WorkReportQueueTaskRecord):
 }
 
 function isIndeterminateBatchCreateRowFailure(item: BatchCreateFailedItem): boolean {
-  return item.stage === "row-create" && item.errorCode === "BATCH_CREATE_ROW_INDETERMINATE";
+  return (
+    item.stage === "row-create" &&
+    (item.errorCode === "BATCH_CREATE_ROW_INDETERMINATE" ||
+      item.errorCode === "BATCH_CREATE_ROW_KEY_RECORD_FAILED")
+  );
 }
 
 /**
@@ -315,8 +324,6 @@ export async function createRowWithIdempotency(input: {
     );
   }
 
-  let reserved: BatchCreateRowKeyRecord | null = null;
-  let reservedByCurrentRequest = false;
   const reserveResult = await rowKeyRepo
     .reservePending({
       clientRowKey,
@@ -337,72 +344,73 @@ export async function createRowWithIdempotency(input: {
       );
     });
 
-  if (reserveResult) {
-    reserved = reserveResult.record;
-    reservedByCurrentRequest = reserveResult.reserved;
-    if (!reservedByCurrentRequest && reserved) {
-      if (isSameBatchCreateTarget(reserved, formId, entryId)) {
-        if (reserved.status !== "confirmed" || !reserved.ragicRowId) {
-          throwIndeterminateBatchCreateRow(reserved);
-        }
-        return reserved.ragicRowId;
-      }
-      if (reserved.status === "indeterminate") {
+  const reserved = reserveResult.record;
+  if (!reserved) {
+    throw new HttpError(
+      503,
+      "批次新增 idempotency reservation 無法確認 owner，已停止寫入。",
+      "BATCH_CREATE_ROW_KEY_STORE_UNAVAILABLE"
+    );
+  }
+  if (!reserveResult.reserved) {
+    if (isSameBatchCreateTarget(reserved, formId, entryId)) {
+      if (reserved.status !== "confirmed" || !reserved.ragicRowId) {
         throwIndeterminateBatchCreateRow(reserved);
       }
-      console.warn("[batch-create][row-key-reserve-conflict]", {
-        key: clientRowKey,
-        existing: reserved,
-        requested: { formId, entryId },
-      });
+      return reserved.ragicRowId;
     }
+    console.warn("[batch-create][row-key-reserve-conflict]", {
+      key: clientRowKey,
+      existing: reserved,
+      requested: { formId, entryId },
+    });
+    throw new HttpError(
+      409,
+      "clientRowKey 已被其他工令先取得 reservation，請重新產生 key 後再送出。",
+      "BATCH_CREATE_ROW_KEY_CONFLICT"
+    );
   }
 
   let result: { rowId: string };
   try {
     result = await createRow(row.payload);
   } catch (error) {
-    if (reservedByCurrentRequest && reserved && isSameBatchCreateTarget(reserved, formId, entryId)) {
-      if (shouldMarkCreateResultIndeterminate(error)) {
-        const errorMessage = getErrorMessage(error);
-        await rowKeyRepo
-          .markIndeterminate({
-            clientRowKey,
-            formId,
-            entryId,
-            errorMessage,
-          })
-          .catch((markError) => {
-            console.warn("[batch-create][row-key-mark-indeterminate-failed]", {
-              key: clientRowKey,
-              formId,
-              entryId,
-              error: markError instanceof Error ? markError.message : String(markError),
-            });
-          });
-        throw new HttpError(
-          409,
-          `批次新增列的 Ragic 寫入結果尚未確認，已暫停同 clientRowKey 重送：${errorMessage}`,
-          "BATCH_CREATE_ROW_INDETERMINATE"
-        );
-      } else {
-        await rowKeyRepo.releasePending({ clientRowKey, formId, entryId }).catch((releaseError) => {
-          console.warn("[batch-create][row-key-release-pending-failed]", {
+    if (shouldMarkCreateResultIndeterminate(error)) {
+      const errorMessage = getErrorMessage(error);
+      await rowKeyRepo
+        .markIndeterminate({
+          clientRowKey,
+          formId,
+          entryId,
+          errorMessage,
+        })
+        .catch((markError) => {
+          console.warn("[batch-create][row-key-mark-indeterminate-failed]", {
             key: clientRowKey,
             formId,
             entryId,
-            error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+            error: markError instanceof Error ? markError.message : String(markError),
           });
         });
-      }
+      throw new HttpError(
+        409,
+        `批次新增列的 Ragic 寫入結果尚未確認，已暫停同 clientRowKey 重送：${errorMessage}`,
+        "BATCH_CREATE_ROW_INDETERMINATE"
+      );
+    } else {
+      await rowKeyRepo.releasePending({ clientRowKey, formId, entryId }).catch((releaseError) => {
+        console.warn("[batch-create][row-key-release-pending-failed]", {
+          key: clientRowKey,
+          formId,
+          entryId,
+          error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+        });
+      });
     }
     throw error;
   }
 
-  const persistMapping = reservedByCurrentRequest
-    ? rowKeyRepo.confirm.bind(rowKeyRepo)
-    : rowKeyRepo.record.bind(rowKeyRepo);
-  await persistMapping({
+  const persistedCount = await rowKeyRepo.confirm({
     clientRowKey,
     formId,
     entryId,
@@ -421,6 +429,13 @@ export async function createRowWithIdempotency(input: {
       "BATCH_CREATE_ROW_KEY_RECORD_FAILED"
     );
   });
+  if (persistedCount !== 1) {
+    throw new HttpError(
+      503,
+      `批次新增列已寫入 Ragic（rowId: ${result.rowId}），但 idempotency reservation 已變更，需人工確認後再重送。`,
+      "BATCH_CREATE_ROW_KEY_RECORD_FAILED"
+    );
+  }
   return result.rowId;
 }
 
@@ -436,6 +451,8 @@ class WorkReportBatchCreateTaskService {
     if (rows.length === 0) {
       throw new HttpError(400, "至少要送出一筆可建立的明細", "BATCH_CREATE_EMPTY");
     }
+
+    this.queueChainByKey.assertAccepting(`${input.formId}:${input.entryId}`);
 
     const taskId = randomUUID();
     const createdAt = new Date().toISOString();
@@ -462,8 +479,14 @@ class WorkReportBatchCreateTaskService {
     this.tasks.set(taskId, task);
     this.syncTaskToRegistry(task);
 
-    void this.queueChainByKey.enqueue(task.queueKey, () =>
-      this.runTask(taskId, rows, input)
+    void this.queueChainByKey.enqueue(
+      task.queueKey,
+      () => this.runTask(taskId, rows, input),
+      {
+        onWaitingForSync: () => {
+          this.markWaitingForSync(taskId);
+        },
+      }
     );
 
     return {
@@ -498,6 +521,8 @@ class WorkReportBatchCreateTaskService {
       );
     }
 
+    this.queueChainByKey.assertAccepting(sourceTask.queueKey);
+
     const taskId = randomUUID();
     const createdAt = new Date().toISOString();
     const retryTask: WorkReportBatchCreateTask = {
@@ -525,8 +550,14 @@ class WorkReportBatchCreateTaskService {
     this.tasks.set(taskId, retryTask);
     this.syncTaskToRegistry(retryTask);
 
-    void this.queueChainByKey.enqueue(retryTask.queueKey, () =>
-      this.runFinalizeRetryTask(taskId, input.finalizeAfterCreate)
+    void this.queueChainByKey.enqueue(
+      retryTask.queueKey,
+      () => this.runFinalizeRetryTask(taskId, input.finalizeAfterCreate),
+      {
+        onWaitingForSync: () => {
+          this.markWaitingForSync(taskId);
+        },
+      }
     );
 
     return {
@@ -590,11 +621,12 @@ class WorkReportBatchCreateTaskService {
       return;
     }
 
-    const startedAt = new Date().toISOString();
+    const startedAt = task.startedAt ?? new Date().toISOString();
     this.patchTask(taskId, {
       status: "running",
       startedAt,
       updatedAt: startedAt,
+      runningMessage: undefined,
     });
 
     const createdRowIds: string[] = [];
@@ -608,7 +640,18 @@ class WorkReportBatchCreateTaskService {
 
     try {
       const beforeRunStartedAt = Date.now();
-      await input.beforeRun?.();
+      await input.beforeRun?.({
+        setStatusMessage: (message) => {
+          this.patchTask(taskId, {
+            runningMessage: message,
+            updatedAt: new Date().toISOString(),
+          });
+        },
+      });
+      this.patchTask(taskId, {
+        runningMessage: undefined,
+        updatedAt: new Date().toISOString(),
+      });
       timings.beforeRunMs = Date.now() - beforeRunStartedAt;
     } catch (error) {
       timings.beforeRunMs = Math.max(0, Date.now() - Date.parse(startedAt));
@@ -753,11 +796,12 @@ class WorkReportBatchCreateTaskService {
       return;
     }
 
-    const startedAt = new Date().toISOString();
+    const startedAt = task.startedAt ?? new Date().toISOString();
     this.patchTask(taskId, {
       status: "running",
       startedAt,
       updatedAt: startedAt,
+      runningMessage: undefined,
     });
 
     const failedItems: BatchCreateFailedItem[] = [];
@@ -804,6 +848,20 @@ class WorkReportBatchCreateTaskService {
     pruneTerminalTaskHistory(this.tasks);
   }
 
+  private markWaitingForSync(taskId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return;
+    }
+    const waitingAt = new Date().toISOString();
+    this.patchTask(taskId, {
+      status: "running",
+      startedAt: task.startedAt ?? waitingAt,
+      updatedAt: waitingAt,
+      runningMessage: "正在等待資料重新整理完成",
+    });
+  }
+
   private syncTaskToRegistry(task: WorkReportBatchCreateTask): void {
     const preconditionFailedItem = task.failedItems.find(
       (item) => item.stage === "precondition"
@@ -820,14 +878,16 @@ class WorkReportBatchCreateTaskService {
         ? task.status === "pending"
           ? `批次新增收尾重試排隊中（已建立 ${task.createdCount}/${task.requestedCount}）`
           : task.status === "running"
-            ? `批次新增收尾重試中（已建立 ${task.createdCount}/${task.requestedCount}）`
+            ? task.runningMessage ??
+              `批次新增收尾重試中（已建立 ${task.createdCount}/${task.requestedCount}）`
             : finalizeFailedItem
               ? `批次新增收尾重試失敗（已建立 ${task.createdCount}/${task.requestedCount}）`
               : `批次新增收尾重試完成（已建立 ${task.createdCount}/${task.requestedCount}）`
         : task.status === "pending"
           ? `批次新增排隊中（0/${task.requestedCount}）`
           : task.status === "running"
-            ? `批次新增進行中（${task.createdCount + task.failedCount}/${task.requestedCount}）`
+            ? task.runningMessage ??
+              `批次新增進行中（${task.createdCount + task.failedCount}/${task.requestedCount}）`
             : preconditionFailedItem
               ? "批次新增前置檢查失敗"
             : finalizeFailedItem

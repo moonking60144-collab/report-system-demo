@@ -17,6 +17,8 @@ import { publishWorkReportFormUpdated, publishWorkReportUpdated } from "../event
 import type { ReportWritePayload } from "../types/workReport";
 import type { CreateReportBatchSharedState } from "../services/work-report/mutation/runCreateReportFlow";
 import { runBackgroundTask } from "../infra/backgroundTaskRunner";
+import { runWorkReportEntryMutationExclusive } from "../services/work-report/workReportEntryMutationQueue";
+import { readWorkReportRowSnapshot } from "../services/audit/recordAuditSnapshotResolver";
 
 function shouldPublishAfterBackgroundProjection(result: ProjectionApplyResult): boolean {
   return result === "applied" || result === "deleted";
@@ -45,6 +47,8 @@ async function enqueueProjectionAfterBatchMutation(
   }
 
   if (projectionSeq <= 0) {
+    publishWorkReportUpdated(formId, entryId);
+    publishWorkReportFormUpdated(formId);
     return;
   }
 
@@ -85,11 +89,10 @@ async function finalizeBatchCreateAndPublish(
   }
   await workReportService.finalizeBatchCreate(formId, entryId, createdRowIds);
   await enqueueProjectionAfterBatchMutation(formId, entryId, "create");
-  publishWorkReportUpdated(formId, entryId);
-  publishWorkReportFormUpdated(formId);
 }
 
 const workReportRouter = createWorkReportRouter({
+  runEntryMutationExclusive: runWorkReportEntryMutationExclusive,
   requestSync: workReportSyncService.requestSync.bind(workReportSyncService),
   listTasks: workReportTaskRegistryService.listTasks.bind(workReportTaskRegistryService),
   getTaskRecord: workReportTaskRegistryService.getTask.bind(workReportTaskRegistryService),
@@ -113,7 +116,7 @@ const workReportRouter = createWorkReportRouter({
       };
       return workReportBatchCreateTaskService.requestBatchCreate({
         ...input,
-        beforeRun: async () => {
+        beforeRun: async (context) => {
           await workReportService.assertEntryEditableBySession({
             formId: input.formId,
             entryId: input.entryId,
@@ -125,6 +128,7 @@ const workReportRouter = createWorkReportRouter({
             editSessionId: input.editSessionId,
             editLockVersion: input.editLockVersion,
           });
+          context.setStatusMessage("正在確認最新工令狀態");
           await workReportService.assertBatchCreateEntryAcceptsReports(
             input.formId,
             input.entryId
@@ -166,12 +170,24 @@ const workReportRouter = createWorkReportRouter({
   requestBatchDelete: async ({ onRowDeleted, ...input }) => {
     const taskResponse = await workReportBatchDeleteTaskService.requestBatchDelete({
       ...input,
-      beforeRun: async () =>
-        workReportService.assertEntryNotModified(
+      beforeRun: async () => {
+        await workReportService.assertEntryLockVersion({
+          formId: input.formId,
+          entryId: input.entryId,
+          ...(input.taskType === "delete-report" && input.rowIds.length === 1
+            ? { rowId: input.rowIds[0] }
+            : {}),
+          editSessionId: input.editSessionId,
+          editLockVersion: input.editLockVersion,
+        });
+        await workReportService.assertEntryNotModified(
           input.formId,
           input.entryId,
           input.expectedEntryLastUpdatedAt
-        ),
+        );
+      },
+      beforeDeleteRow: async (rowId) =>
+        readWorkReportRowSnapshot(input.formId, input.entryId, rowId),
       deleteRow: async (rowId) => {
         await workReportService.assertEntryEditableBySession({
           formId: input.formId,
@@ -185,20 +201,17 @@ const workReportRouter = createWorkReportRouter({
           rowId,
           { skipDeleteRecalculate: true }
         );
-        if (onRowDeleted) {
-          try {
-            await onRowDeleted(rowId, taskResponse?.taskId);
-          } catch (error) {
-            console.warn("[batch-delete][onRowDeleted-failed]", {
-              formId: input.formId,
-              entryId: input.entryId,
-              rowId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
         return result;
       },
+      ...(onRowDeleted
+        ? {
+            onRowDeleted: (
+              rowId: string,
+              taskId: string,
+              beforeSnapshot: unknown | null
+            ) => onRowDeleted(rowId, taskId, beforeSnapshot),
+          }
+        : {}),
       finalizeAfterDelete: async ({ deletedCount, deletedRowIds }) => {
         if (deletedCount <= 0) {
           return;
@@ -208,19 +221,14 @@ const workReportRouter = createWorkReportRouter({
           input.entryId,
           deletedRowIds
         );
-        await workReportMutationProjectionService.projectEntryAfterMutation(
-          input.formId,
-          input.entryId,
-          "delete"
-        );
-        publishWorkReportUpdated(input.formId, input.entryId);
-        publishWorkReportFormUpdated(input.formId);
+        await enqueueProjectionAfterBatchMutation(input.formId, input.entryId, "delete");
       },
     });
     return taskResponse;
   },
   updateReport: workReportService.updateReport.bind(workReportService),
   updateMainMachine: workReportService.updateMainMachine.bind(workReportService),
+  updateSortOrder: workReportService.updateSortOrder.bind(workReportService),
   manualCloseWorkOrder: workReportService.manualCloseWorkOrder.bind(workReportService),
   deleteReport: workReportService.hardDeleteReport.bind(workReportService),
   assertEntryNotModified: workReportService.assertEntryNotModified.bind(workReportService),
@@ -239,8 +247,16 @@ const workReportRouter = createWorkReportRouter({
       createdAt: task.createdAt,
     };
   },
-  projectSqliteAfterMutation:
-    workReportMutationProjectionService.projectEntryAfterMutation.bind(
+  enqueueSqliteProjectionAfterMutation:
+    workReportMutationProjectionService.enqueueEntryAfterMutation.bind(
+      workReportMutationProjectionService
+    ),
+  applyQueuedSqliteProjectionAfterMutation:
+    workReportMutationProjectionService.applyQueuedProjectionAfterMutation.bind(
+      workReportMutationProjectionService
+    ),
+  applyQueuedSortOrderSqliteAfterMutation:
+    workReportMutationProjectionService.applyQueuedSortOrderAfterMutation.bind(
       workReportMutationProjectionService
     ),
 });

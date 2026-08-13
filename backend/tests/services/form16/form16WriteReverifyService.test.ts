@@ -269,6 +269,112 @@ test("Form16 write reverify 確認 downtime orphan 刪除後會清掉 idempotenc
   assert.equal(deleteMappingMock.mock.calls[0]?.arguments[0], ENTRY_ID);
 });
 
+test("Form16 write reverify 以 clientRowKey 清掉 entryId 尚空白的 reservation", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "form16-reverify-"));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const service = new Form16WriteReverifyService({
+    enabled: true,
+    storeFile: join(dir, "tasks.json"),
+    maxAttempts: 1,
+    maxPerRun: 5,
+    timeoutMs: 1000,
+    maxRetries: 0,
+  });
+  await service.enqueue({
+    form16Path: FORM_PATH,
+    entryId: ENTRY_ID,
+    expected: { workOrderNo: "", type: "downtime" },
+    readPriority: "background",
+    errorMessage: "ECONNABORTED",
+    occurredAt: "2026-06-17T00:00:00.000Z",
+    source: "downtime",
+    clientRowKey: "downtime-reverify-key",
+    idempotencySource: "downtime",
+    idempotencyReservationToken: "reservation-old",
+  });
+
+  t.mock.method(ragicClient, "getEntry", async () => buildEntryWith("WO-WRONG", "downtime"));
+  t.mock.method(ragicClient, "deleteEntry", async () => undefined);
+  const deleteByReservationMock = t.mock.method(
+    form16ClientRowKeyRepository,
+    "deleteByReservationIdentity",
+    async () => 1
+  );
+  const deleteByEntryIdMock = t.mock.method(
+    form16ClientRowKeyRepository,
+    "deleteByEntryId",
+    async () => 0
+  );
+
+  assert.deepEqual(await service.runOnce(), {
+    scanned: 1,
+    verified: 0,
+    failed: 1,
+    retryPending: 0,
+  });
+  assert.equal(deleteByReservationMock.mock.callCount(), 1);
+  assert.deepEqual(deleteByReservationMock.mock.calls[0]?.arguments[0], {
+    clientRowKey: "downtime-reverify-key",
+    source: "downtime",
+    reservationToken: "reservation-old",
+    entryId: ENTRY_ID,
+  });
+  assert.equal(deleteByEntryIdMock.mock.callCount(), 0);
+});
+
+test("Form16 write reverify reservation identity 不符時不回退刪除較新的 entry 映射", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "form16-reverify-"));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const service = new Form16WriteReverifyService({
+    enabled: true,
+    storeFile: join(dir, "tasks.json"),
+    maxAttempts: 1,
+    maxPerRun: 5,
+    timeoutMs: 1000,
+    maxRetries: 0,
+  });
+  await service.enqueue({
+    form16Path: FORM_PATH,
+    entryId: ENTRY_ID,
+    expected: { workOrderNo: "", type: "downtime" },
+    readPriority: "background",
+    errorMessage: "ECONNABORTED",
+    occurredAt: "2026-06-17T00:00:00.000Z",
+    source: "downtime",
+    clientRowKey: "downtime-reverify-key",
+    idempotencySource: "downtime",
+    idempotencyReservationToken: "reservation-old",
+  });
+
+  t.mock.method(ragicClient, "getEntry", async () => buildEntryWith("WO-WRONG", "downtime"));
+  t.mock.method(ragicClient, "deleteEntry", async () => undefined);
+  const deleteByReservationMock = t.mock.method(
+    form16ClientRowKeyRepository,
+    "deleteByReservationIdentity",
+    async () => 0
+  );
+  const deleteByEntryIdMock = t.mock.method(
+    form16ClientRowKeyRepository,
+    "deleteByEntryId",
+    async () => 1
+  );
+
+  assert.deepEqual(await service.runOnce(), {
+    scanned: 1,
+    verified: 0,
+    failed: 1,
+    retryPending: 0,
+  });
+  assert.equal(deleteByReservationMock.mock.callCount(), 1);
+  assert.equal(deleteByEntryIdMock.mock.callCount(), 0);
+});
+
 test("Form16 write reverify rollback 刪除未確認時保留 retry 且不清 idempotency 映射", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "form16-reverify-"));
   t.after(async () => {

@@ -62,7 +62,7 @@ export interface BatchCreateRowKeyRepository {
     > & {
       updatedAt?: string;
     }
-  ): Promise<void>;
+  ): Promise<number>;
   markIndeterminate(input: {
     clientRowKey: string;
     formId: string;
@@ -87,7 +87,7 @@ export interface BatchCreateRowKeyRepository {
     > & {
       createdAt?: string;
     }
-  ): Promise<void>;
+  ): Promise<number>;
   deleteByRagicRowId(ragicRowId: string): Promise<number>;
   cleanupOlderThan(thresholdIso: string): Promise<number>;
 }
@@ -143,24 +143,26 @@ export function createBatchCreateRowKeyRepository(
 
     async confirm(input) {
       const trimmed = String(input.clientRowKey ?? "").trim();
-      if (!trimmed) return;
+      if (!trimmed) return 0;
       const updatedAt = input.updatedAt ?? new Date().toISOString();
-      await runSerializedWrite(async (db) => {
-        await db.run(
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
           `UPDATE batch_create_row_keys
-           SET form_id = ?,
-               entry_id = ?,
-               ragic_row_id = ?,
+           SET ragic_row_id = ?,
                status = 'confirmed',
                error_message = NULL,
                updated_at = ?
-           WHERE client_row_key = ?`,
-          input.formId,
-          input.entryId,
+           WHERE client_row_key = ?
+             AND form_id = ?
+             AND entry_id = ?
+             AND status = 'pending'`,
           input.ragicRowId,
           updatedAt,
-          trimmed
+          trimmed,
+          input.formId,
+          input.entryId
         );
+        return typeof result.changes === "number" ? result.changes : 0;
       });
     },
 
@@ -225,11 +227,11 @@ export function createBatchCreateRowKeyRepository(
 
     async record(input) {
       const trimmed = String(input.clientRowKey ?? "").trim();
-      if (!trimmed) return;
+      if (!trimmed) return 0;
       const createdAt = input.createdAt ?? new Date().toISOString();
-      await runSerializedWrite(async (db) => {
+      return runSerializedWrite(async (db) => {
         // ON CONFLICT 只補 pending/indeterminate；已 confirmed 的既有映射不可覆蓋。
-        await db.run(
+        const result = await db.run(
           `INSERT INTO batch_create_row_keys
              (client_row_key, form_id, entry_id, ragic_row_id, status, error_message, created_at, updated_at)
            VALUES (?, ?, ?, ?, 'confirmed', NULL, ?, ?)
@@ -250,6 +252,7 @@ export function createBatchCreateRowKeyRepository(
           createdAt,
           createdAt
         );
+        return typeof result.changes === "number" ? result.changes : 0;
       });
     },
 

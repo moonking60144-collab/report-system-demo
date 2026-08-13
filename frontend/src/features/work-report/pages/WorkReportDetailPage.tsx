@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import "../styles/work-report-detail.css";
 import type {
@@ -13,16 +13,14 @@ import {
   deleteReportsBatchAccepted,
   deleteReport,
   fetchFormOptions,
-  fetchWorkReportQueueTask,
   fetchWorkReportEntry,
   fetchEditingPresence,
   type EditingPresenceSnapshot,
   type FormOptionMap,
   type ReportMutationPayload,
   type WorkReportRecord,
-  type WorkReportQueueTask,
-  closeWorkOrder,
-  reopenWorkOrder,
+  closeWorkOrderAccepted,
+  reopenWorkOrderAccepted,
   updateEditingPresence,
 } from "../../../api/workReport";
 import {
@@ -33,11 +31,7 @@ import {
   buildInitialFormState,
 } from "../../../components/report-form/formMemory";
 import { buildReportMutationPayload } from "../../../components/report-form/formLogic";
-import {
-  CREATE_TASK_POLL_INTERVAL_MS,
-  CREATE_TASK_POLL_TIMEOUT_MS,
-  WORK_REPORT_PENDING_MUTATION_REPLAY_STORAGE_KEY,
-} from "../constants";
+import { WORK_REPORT_PENDING_MUTATION_REPLAY_STORAGE_KEY } from "../constants";
 import type { FormState } from "../../../components/report-form/types";
 import { ReportFormModal } from "../../../components/ReportFormModal";
 import { formatTimeDisplay } from "../../../components/report-form/timeUtils";
@@ -54,16 +48,16 @@ import { useWorkReportDetailInlineController } from "../hooks/detail/useWorkRepo
 import { useWorkReportDetailModalController } from "../hooks/detail/useWorkReportDetailModalController";
 import { useWorkReportDetailPickerController } from "../hooks/detail/useWorkReportDetailPickerController";
 import { useWorkReportDetailRefreshController } from "../hooks/detail/useWorkReportDetailRefreshController";
-import { useWorkReportMainMachineController } from "../hooks/detail/useWorkReportMainMachineController";
+import {
+  resolveEditableMainMachineCode,
+  useWorkReportMainMachineController,
+} from "../hooks/detail/useWorkReportMainMachineController";
 import { useWorkReportDetailStatusController } from "../hooks/detail/useWorkReportDetailStatusController";
 import { useWorkReportDetailTaskController } from "../hooks/detail/useWorkReportDetailTaskController";
 import { INLINE_EDITABLE_DETAIL_KEYS_BY_FORM } from "../hooks/detail/inlineControllerUtils";
 import { useWorkReportClientPresence } from "../hooks/useWorkReportClientPresence";
 import { useWorkReportSessionExpiryGuard } from "../hooks/useWorkReportSessionExpiryGuard";
-import {
-  deleteRetryableBatchCreateRecordChain,
-  saveRetryableBatchCreateRecord,
-} from "../taskBatchRetryStore";
+import { saveRetryableBatchCreateRecord } from "../taskBatchRetryStore";
 import type {
   DetailTableRow,
   InlineEditableDetailKey,
@@ -98,6 +92,11 @@ import {
   type BatchCreateFieldErrorMap,
   type BatchCreateFillDragState,
 } from "./detailBatchCreateUtils";
+import {
+  resolveLatestWorkOrderProductionProgress,
+  resolveWorkOrderProductionProgress,
+} from "../utils/workOrderProductionProgress";
+import { applyWorkReportOptimisticMutations } from "../workReportOptimisticMutation";
 
 interface OrderedDetailColumn {
   key: string;
@@ -160,6 +159,7 @@ interface PendingMutationReplay {
   rowId?: string;
   payload: ReportMutationPayload;
   clientMutationId: string;
+  createIdempotencyKey?: string;
   expectedEntryLastUpdatedAt?: string;
   editSessionId?: string;
   editLockVersion?: number;
@@ -479,7 +479,17 @@ export function WorkReportDetailPage() {
     return listSearch ? `/${listSearch}` : "/";
   }, [listReturnState?.listSearch]);
 
-  const [record, setRecord] = useState<WorkReportRecord | null>(null);
+  const [authoritativeRecord, setAuthoritativeRecord] = useState<WorkReportRecord | null>(null);
+  const record = useMemo(
+    () =>
+      applyWorkReportOptimisticMutations(
+        authoritativeRecord,
+        createTaskMonitors.filter(
+          (task) => task.formId === formId && task.entryId === safeEntryId
+        )
+      ),
+    [authoritativeRecord, createTaskMonitors, formId, safeEntryId]
+  );
   const expectedEntryLastUpdatedAt = resolveExpectedEntryLastUpdatedAt(record);
   const [contextCollapsed, setContextCollapsed] = useState(false); // 工令資訊卡收合 → 表格區吃滿剩餘高
   const [loading, setLoading] = useState(true);
@@ -487,7 +497,6 @@ export function WorkReportDetailPage() {
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [taskQueueDrawerOpen, setTaskQueueDrawerOpen] = useState(false);
-  const [taskQueueRefreshToken, setTaskQueueRefreshToken] = useState(0);
   const batchCreateSubmitInFlightRef = useRef(false);
   const [batchCreateMode, setBatchCreateMode] = useState(false);
   const [batchCreateDraftsByRowId, setBatchCreateDraftsByRowId] = useState<Record<string, FormState>>(
@@ -523,13 +532,10 @@ export function WorkReportDetailPage() {
   const optionsLoadPromiseRef = useRef<
     Partial<Record<WorkReportFormId, Promise<FormOptionMap>>>
   >({});
-  const trackingBatchCreateTaskIdsRef = useRef(new Set<string>());
-  const pendingBatchCreateHighlightRef = useRef<{
-    rowId: string | null;
-    message: string;
-  } | null>(null);
   const [workOrderClosing, setWorkOrderClosing] = useState(false);
+  const workOrderCloseRequestInFlightRef = useRef(false);
   const [workOrderConfirmAction, setWorkOrderConfirmAction] = useState<"close" | "reopen" | null>(null);
+  const [workOrderUnderTargetAcknowledged, setWorkOrderUnderTargetAcknowledged] = useState(false);
   const [entryEditingSummary, setEntryEditingSummary] = useState<EditingPresenceSnapshot | null>(null);
   const [editLockRowId, setEditLockRowId] = useState<string | null>(null);
   const [editLockVersion, setEditLockVersion] = useState<number | null>(null);
@@ -621,7 +627,7 @@ export function WorkReportDetailPage() {
         return;
       }
       setLoadError(null);
-      setRecord(nextRecord);
+      setAuthoritativeRecord(nextRecord);
     } catch (error) {
       if (isStale()) {
         return;
@@ -1075,13 +1081,13 @@ export function WorkReportDetailPage() {
     safeEntryId,
     record,
     editingRowId,
-    hasActiveMutationTask,
+    hasActiveMutationTask: hasActiveMutationTask || hasBlockingMutationTask,
     modalOpen: modalState.open,
     loading,
     refreshing,
     submitting,
     ensureOptionsLoaded,
-    loadEntry,
+    registerAcceptedMutationTask,
     setNotice,
     logDetailEvent,
     t,
@@ -1141,136 +1147,12 @@ export function WorkReportDetailPage() {
     realtimeConnected,
     onForceSessionExpired: expireSession,
   });
-  const canApplyBatchCreateHighlightImmediately = useCallback(() => (
-    !modalState.open &&
-    editingRowId === null &&
-    !submitting &&
-    !loading &&
-    !refreshing &&
-    !workOrderClosing &&
-    !hasActiveMutationTask
-  ), [
-    editingRowId,
-    hasActiveMutationTask,
-    loading,
-    modalState.open,
-    refreshing,
-    submitting,
-    workOrderClosing,
-  ]);
-  const applyBatchCreateHighlight = useCallback(
-    async (payload: { rowId: string | null; message: string }) => {
-      await loadEntry({ mode: "background", forceRefresh: true });
-      if (payload.rowId) {
-        setHighlightedDetailRowId(payload.rowId);
-      }
-      setNotice({
-        type: "success",
-        message: payload.message,
-      });
-    },
-    [loadEntry]
-  );
-  const trackBatchCreateTask = useCallback(
-    (taskId: string) => {
-      if (!formId || !safeEntryId) {
-        return;
-      }
-      if (trackingBatchCreateTaskIdsRef.current.has(taskId)) {
-        return;
-      }
-
-      trackingBatchCreateTaskIdsRef.current.add(taskId);
-      const currentFormId = formId;
-      const currentEntryId = safeEntryId;
-
-      const run = async () => {
-        const startedAt = Date.now();
-        try {
-          while (Date.now() - startedAt <= CREATE_TASK_POLL_TIMEOUT_MS) {
-            const task: WorkReportQueueTask = await fetchWorkReportQueueTask(
-              currentFormId,
-              taskId
-            );
-            if (task.formId !== currentFormId || task.entryId !== currentEntryId) {
-              return;
-            }
-
-            if (task.status === "pending" || task.status === "running") {
-              await new Promise<void>((resolve) => {
-                window.setTimeout(resolve, CREATE_TASK_POLL_INTERVAL_MS);
-              });
-              continue;
-            }
-
-            if (task.status === "success") {
-              // 成功即從 retry store 移除整條 retry 鏈（原始 + 所有 retry 版本）
-              // 避免 badge 還顯示舊的失敗 record
-              deleteRetryableBatchCreateRecordChain(taskId);
-              setTaskQueueRefreshToken((value) => value + 1);
-              const payload = {
-                rowId: task.rowId ?? null,
-                message: task.message ?? t("workReport:messages.realtimeRefreshApplied"),
-              };
-              if (canApplyBatchCreateHighlightImmediately()) {
-                await applyBatchCreateHighlight(payload);
-              } else {
-                pendingBatchCreateHighlightRef.current = payload;
-              }
-              return;
-            }
-
-            setNotice({
-              type: "error",
-              message:
-                task.errorMessage ??
-                task.message ??
-                t("workReport:messages.backgroundProcessingFailedDefault"),
-            });
-            setTaskQueueRefreshToken((value) => value + 1);
-            return;
-          }
-        } catch (error) {
-          setNotice({
-            type: "error",
-            message: getErrorMessage(error),
-          });
-        } finally {
-          trackingBatchCreateTaskIdsRef.current.delete(taskId);
-        }
-      };
-
-      void run();
-    },
-    [
-      applyBatchCreateHighlight,
-      canApplyBatchCreateHighlightImmediately,
-      formId,
-      safeEntryId,
-      t,
-    ]
-  );
-
   useEffect(() => {
     setBatchCreateMode(false);
     setBatchCreateDraftsByRowId({});
     setBatchCreateFieldErrorsByRowId({});
     setBatchCreateFillDrag(null);
   }, [formId, safeEntryId]);
-
-  // 有追蹤中的 batch create task 時，攔截關頁／重新整理，避免使用者沒看到結果就離開
-  useEffect(() => {
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (trackingBatchCreateTaskIdsRef.current.size === 0) return;
-      event.preventDefault();
-      // 現代瀏覽器忽略自訂訊息，但仍會顯示原生「確定要離開嗎？」對話框
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-    };
-  }, []);
 
   useEffect(() => {
     setBatchDeleteMode(false);
@@ -1283,6 +1165,21 @@ export function WorkReportDetailPage() {
   }, [batchCreateMode]);
 
   const detailRows = useMemo(() => record?.reports ?? [], [record]);
+  const workOrderProductionProgress = useMemo(
+    () =>
+      resolveLatestWorkOrderProductionProgress(
+        detailRows,
+        record?.targetQtyPc
+      ),
+    [detailRows, record?.targetQtyPc]
+  );
+  const productionQtyFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(uiLanguage === "en" ? "en-US" : "zh-TW", {
+        maximumFractionDigits: 2,
+      }),
+    [uiLanguage]
+  );
   useEffect(() => {
     if (!batchCreateMode || !editingRowId || !editingRowDraft) {
       return;
@@ -1516,7 +1413,6 @@ export function WorkReportDetailPage() {
           [
             rowId,
             applyCreateDefaultsToFormState(
-              formId,
               draft,
               record,
               formOptions.machineId ?? [],
@@ -1605,6 +1501,22 @@ export function WorkReportDetailPage() {
         editSessionId: currentEditSessionId ?? undefined,
         createdAt: new Date().toISOString(),
       });
+      await registerAcceptedMutationTask("create-batch", accepted, undefined, {
+        mutationId: accepted.taskId,
+        operation: "work-report-batch-create",
+        target: {
+          domain: "work-report",
+          formId,
+          entryId: safeEntryId,
+        },
+        patch: {
+          kind: "create-rows",
+          rows,
+        },
+        previousSnapshot: null,
+        reconcilePolicy: "partial",
+        failurePolicy: "rollback",
+      });
       setNotice({
         type: "success",
         message: t("workReport:detailPage.batchCreateAcceptedTask", { count: draftEntries.length }),
@@ -1615,7 +1527,6 @@ export function WorkReportDetailPage() {
       setBatchCreateMode(false);
       cancelInlineRowEdit();
       setTaskQueueDrawerOpen(true);
-      trackBatchCreateTask(accepted.taskId);
     } finally {
       batchCreateSubmitInFlightRef.current = false;
       setSubmitting(false);
@@ -1634,9 +1545,9 @@ export function WorkReportDetailPage() {
     formOptions.machineId,
     formOptions.operatorId,
     record,
+    registerAcceptedMutationTask,
     safeEntryId,
     submitting,
-    trackBatchCreateTask,
     t,
   ]);
   const updateBatchCreateFillTarget = useCallback(
@@ -1698,12 +1609,10 @@ export function WorkReportDetailPage() {
       const baseDraft =
         batchCreateDraftsByRowId[targetRowId] ??
         buildInitialFormState(
-          formId,
           "create",
           null,
           record,
-          formOptions.machineId ?? [],
-          formOptions.operatorId ?? []
+          formOptions.machineId ?? []
         );
       const nextDraft: FormState = {
         ...baseDraft,
@@ -1734,7 +1643,6 @@ export function WorkReportDetailPage() {
     editingRowId,
     formId,
     formOptions.machineId,
-    formOptions.operatorId,
     record,
     t,
   ]);
@@ -1917,18 +1825,6 @@ export function WorkReportDetailPage() {
       window.clearTimeout(timer);
     };
   }, [detailRows, detailTableScrollRef, highlightedDetailRowId]);
-  useEffect(() => {
-    const pendingPayload = pendingBatchCreateHighlightRef.current;
-    if (!pendingPayload) {
-      return;
-    }
-    if (!canApplyBatchCreateHighlightImmediately()) {
-      return;
-    }
-
-    pendingBatchCreateHighlightRef.current = null;
-    void applyBatchCreateHighlight(pendingPayload);
-  }, [applyBatchCreateHighlight, canApplyBatchCreateHighlightImmediately]);
   useEffect(() => {
     if (!batchCreateMode || activeBatchCreatePlaceholderIndex === null) {
       return;
@@ -2190,7 +2086,7 @@ export function WorkReportDetailPage() {
     formId,
     t,
     formOptions,
-    recordMachineCode: String(record?.machineCode ?? "").trim(),
+    recordMachineCode: resolveEditableMainMachineCode(formId, record),
     linkedPickerState,
     editingRowDraft,
     mainMachineDraft,
@@ -2820,11 +2716,16 @@ export function WorkReportDetailPage() {
     ]
   );
   // 預估 map + signature 一起 memo，避免 Map 新 ref 讓下游 useMemo / effect 失效
+  const predictionEditingState = useMemo(
+    () => ({ editingRowId, editingRowDraft }),
+    [editingRowDraft, editingRowId]
+  );
+  const deferredPredictionEditingState = useDeferredValue(predictionEditingState);
   const { predictedCumulativeMap, predictionSignature } = useMemo(() => {
     const map = computePredictedCumulative({
       detailRows,
-      editingRowId,
-      editingRowDraft,
+      editingRowId: deferredPredictionEditingState.editingRowId,
+      editingRowDraft: deferredPredictionEditingState.editingRowDraft,
       batchCreateDraftsByRowId,
       batchCreateMode,
       displayRows: displayDetailRows,
@@ -2833,7 +2734,7 @@ export function WorkReportDetailPage() {
       .map(([k, v]) => `${k}:${v.cum}:${v.isPredicted ? "1" : "0"}`)
       .join("|");
     return { predictedCumulativeMap: map, predictionSignature: sig };
-  }, [detailRows, editingRowId, editingRowDraft, batchCreateDraftsByRowId, batchCreateMode, displayDetailRows]);
+  }, [detailRows, deferredPredictionEditingState, batchCreateDraftsByRowId, batchCreateMode, displayDetailRows]);
 
   // inline 編輯 draft 的 signature：draft 任一欄位變動就變，用來打破 DetailTableRowView 的 memo。
   // Why: columnKeysSignature/renderContextKey 原本不反映 draft 內容，
@@ -2995,15 +2896,45 @@ export function WorkReportDetailPage() {
             );
           }
 
-          const cumulativeValue = showPredicted ? predicted!.cum : Number(item.cumulativeQty ?? 0);
-          const targetQty = Number(record?.targetQtyPc ?? 0);
-          const progress =
-            Number.isFinite(cumulativeValue) && Number.isFinite(targetQty) && targetQty > 0
-              ? Math.max(0, Math.min(100, (cumulativeValue / targetQty) * 100))
-              : null;
+          const cumulativeValue = showPredicted ? predicted!.cum : item.cumulativeQty;
+          const productionProgress = resolveWorkOrderProductionProgress(
+            cumulativeValue,
+            record?.targetQtyPc
+          );
+          const progressTitle =
+            productionProgress.status === "below-target"
+              ? t("workReport:detailPage.cumulativeBelowTarget", {
+                  current: productionQtyFormatter.format(
+                    productionProgress.cumulativeQty ?? 0
+                  ),
+                  target: productionQtyFormatter.format(
+                    productionProgress.targetQty ?? 0
+                  ),
+                  shortfall: productionQtyFormatter.format(
+                    productionProgress.shortfallQty ?? 0
+                  ),
+                })
+              : productionProgress.status === "target-met"
+                ? t("workReport:detailPage.cumulativeTargetMet", {
+                    current: productionQtyFormatter.format(
+                      productionProgress.cumulativeQty ?? 0
+                    ),
+                    target: productionQtyFormatter.format(
+                      productionProgress.targetQty ?? 0
+                    ),
+                  })
+                : undefined;
 
           return (
-            <div className={`detail-progress-cell${showPredicted ? " detail-progress-cell--predicted" : ""}`}>
+            <div
+              className={`detail-progress-cell${showPredicted ? " detail-progress-cell--predicted" : ""}${
+                productionProgress.status !== "unavailable"
+                  ? ` detail-progress-cell--${productionProgress.status}`
+                  : ""
+              }`}
+              data-production-status={productionProgress.status}
+              title={progressTitle}
+            >
               {showPredicted ? (
                 <span className="detail-cell-predicted-value" title="預估值（儲存後以 Ragic 計算為準）">
                   {predicted!.cum}
@@ -3014,12 +2945,15 @@ export function WorkReportDetailPage() {
               ) : (
                 renderDetailCell(item.cumulativeQty)
               )}
-              {progress !== null && (
+              {productionProgress.progressPercent !== null && (
                 <div
-                  className={`detail-progress-track${showPredicted ? " detail-progress-track--predicted" : ""}`}
+                  className={`detail-progress-track${showPredicted ? " detail-progress-track--predicted" : ""} detail-progress-track--${productionProgress.status}`}
                   aria-hidden="true"
                 >
-                  <div className="detail-progress-fill" style={{ width: `${progress}%` }} />
+                  <div
+                    className="detail-progress-fill"
+                    style={{ width: `${productionProgress.progressPercent}%` }}
+                  />
                 </div>
               )}
             </div>
@@ -3057,6 +2991,7 @@ export function WorkReportDetailPage() {
       batchCreateMode,
       getBatchCreateDraftForRow,
       predictedCumulativeMap,
+      productionQtyFormatter,
       record?.targetQtyPc,
       renderDetailCell,
       renderInlineEditableCell,
@@ -3095,51 +3030,103 @@ export function WorkReportDetailPage() {
   const handleManualCloseWorkOrder = useCallback(
     (action: "close" | "reopen") => {
       if (!record || workOrderClosing) return;
+      setWorkOrderUnderTargetAcknowledged(false);
       setWorkOrderConfirmAction(action);
     },
     [record, workOrderClosing]
   );
 
+  const isUnderTargetCloseWarningStep =
+    workOrderConfirmAction === "close" &&
+    workOrderProductionProgress.status === "below-target" &&
+    !workOrderUnderTargetAcknowledged;
+
   const confirmManualCloseWorkOrder = useCallback(async () => {
     if (!formId || !safeEntryId || !workOrderConfirmAction) return;
+    if (isUnderTargetCloseWarningStep) {
+      setWorkOrderUnderTargetAcknowledged(true);
+      return;
+    }
+    if (workOrderCloseRequestInFlightRef.current) {
+      return;
+    }
+    workOrderCloseRequestInFlightRef.current = true;
     setWorkOrderClosing(true);
     try {
-      if (workOrderConfirmAction === "close") {
-        await closeWorkOrder(formId, safeEntryId, {
-          expectedEntryLastUpdatedAt,
-        });
-      } else {
-        await reopenWorkOrder(formId, safeEntryId, {
-          expectedEntryLastUpdatedAt,
-        });
-      }
+      const action = workOrderConfirmAction;
+      const clientMutationId = createClientMutationId();
+      const accepted = action === "close"
+        ? await closeWorkOrderAccepted(formId, safeEntryId, {
+            clientMutationId,
+            workOrderNo: record?.workOrderNo ?? null,
+            expectedEntryLastUpdatedAt,
+          })
+        : await reopenWorkOrderAccepted(formId, safeEntryId, {
+            clientMutationId,
+            workOrderNo: record?.workOrderNo ?? null,
+            expectedEntryLastUpdatedAt,
+          });
+      await registerAcceptedMutationTask("update", accepted, undefined, {
+        mutationId: clientMutationId,
+        operation: action === "close" ? "work-report-close" : "work-report-reopen",
+        target: {
+          domain: "work-report",
+          formId,
+          entryId: safeEntryId,
+        },
+        patch: {
+          kind: "update-entry",
+          patch: { status: action === "close" ? "已結案" : "未結案" },
+        },
+        previousSnapshot: { status: record?.status ?? null },
+        reconcilePolicy: "refresh-entry",
+        failurePolicy: "rollback",
+      });
       const successKey =
-        workOrderConfirmAction === "close"
+        action === "close"
           ? "workReport:detailPage.manualCloseSuccess"
           : "workReport:detailPage.manualReopenSuccess";
       setWorkOrderConfirmAction(null);
+      setWorkOrderUnderTargetAcknowledged(false);
       setNotice({ type: "success", message: t(successKey) });
-      await loadEntry({ mode: "background", forceRefresh: true });
     } catch (error) {
       setNotice({ type: "error", message: getErrorMessage(error) });
     } finally {
+      workOrderCloseRequestInFlightRef.current = false;
       setWorkOrderClosing(false);
     }
   }, [
     formId,
     expectedEntryLastUpdatedAt,
-    loadEntry,
+    isUnderTargetCloseWarningStep,
+    record?.status,
+    record?.workOrderNo,
+    registerAcceptedMutationTask,
     safeEntryId,
     t,
     workOrderConfirmAction,
   ]);
+
+  const dismissWorkOrderConfirm = useCallback(() => {
+    if (workOrderClosing) {
+      return;
+    }
+    setWorkOrderConfirmAction(null);
+    setWorkOrderUnderTargetAcknowledged(false);
+  }, [workOrderClosing]);
 
   const handleDelete = useCallback(
     async (rowId: string): Promise<void> => {
       if (!formId || !safeEntryId) {
         return;
       }
-      if (loading || refreshing || submitting || hasActiveMutationTask) {
+      if (
+        loading ||
+        refreshing ||
+        submitting ||
+        hasActiveMutationTask ||
+        hasBlockingMutationTask
+      ) {
         return;
       }
       const modal = Modal.confirm({
@@ -3225,7 +3212,21 @@ export function WorkReportDetailPage() {
               endedAt: requestEndedAt,
               durationMs: calculateDurationMs(startedAt, requestEndedAt),
             });
-            await registerAcceptedMutationTask("delete", accepted, rowId);
+            await registerAcceptedMutationTask("delete", accepted, rowId, {
+              mutationId: accepted.taskId,
+              operation: "work-report-delete",
+              target: {
+                domain: "work-report",
+                formId,
+                entryId: safeEntryId,
+                rowId,
+              },
+              patch: { kind: "delete-rows", rowIds: [rowId] },
+              previousSnapshot:
+                record?.reports?.find((item) => String(item.rowId) === rowId) ?? null,
+              reconcilePolicy: "refresh-entry",
+              failurePolicy: "rollback",
+            });
             setNotice({ type: "success", message: t("workReport:messages.detailDeleteQueued") });
             setTaskQueueDrawerOpen(true);
           } catch (error) {
@@ -3263,9 +3264,11 @@ export function WorkReportDetailPage() {
       expectedEntryLastUpdatedAt,
       formId,
       hasActiveMutationTask,
+      hasBlockingMutationTask,
       logDetailEvent,
       loading,
       record?.workOrderNo,
+      record?.reports,
       registerAcceptedMutationTask,
       releaseRowEditLock,
       refreshing,
@@ -3349,7 +3352,13 @@ export function WorkReportDetailPage() {
     if (!formId || !safeEntryId) {
       return;
     }
-    if (loading || refreshing || submitting || hasActiveMutationTask) {
+    if (
+      loading ||
+      refreshing ||
+      submitting ||
+      hasActiveMutationTask ||
+      hasBlockingMutationTask
+    ) {
       return;
     }
     const rowIds = Array.from(selectedBatchDeleteRowIds).filter((rowId) =>
@@ -3376,7 +3385,20 @@ export function WorkReportDetailPage() {
           editSessionId: currentEditSessionId,
           workOrderNo: record?.workOrderNo ?? null,
         });
-        await registerAcceptedMutationTask("delete-batch", accepted);
+        await registerAcceptedMutationTask("delete-batch", accepted, undefined, {
+          mutationId: accepted.taskId,
+          operation: "work-report-batch-delete",
+          target: {
+            domain: "work-report",
+            formId,
+            entryId: safeEntryId,
+          },
+          patch: { kind: "delete-rows", rowIds },
+          previousSnapshot:
+            record?.reports?.filter((item) => rowIds.includes(String(item.rowId))) ?? [],
+          reconcilePolicy: "partial",
+          failurePolicy: "rollback",
+        });
         setNotice({
           type: "success",
           message: t("workReport:messages.batchDeleteAccepted", {
@@ -3394,9 +3416,11 @@ export function WorkReportDetailPage() {
     expectedEntryLastUpdatedAt,
     formId,
     hasActiveMutationTask,
+    hasBlockingMutationTask,
     loading,
     registerAcceptedMutationTask,
     record?.workOrderNo,
+    record?.reports,
     refreshing,
     safeEntryId,
     selectedBatchDeleteRowIds,
@@ -3516,7 +3540,9 @@ export function WorkReportDetailPage() {
                 refreshing ||
                 submitting ||
                 editingRowId !== null ||
-                hasActiveMutationTask
+                hasActiveMutationTask ||
+                hasBlockingMutationTask ||
+                Boolean(item.__optimisticState)
               }
             >
               {t("common:actions.edit")}
@@ -3538,7 +3564,9 @@ export function WorkReportDetailPage() {
                 refreshing ||
                 submitting ||
                 editingRowId !== null ||
-                hasActiveMutationTask
+                hasActiveMutationTask ||
+                hasBlockingMutationTask ||
+                Boolean(item.__optimisticState)
               }
             >
               {t("common:actions.delete")}
@@ -3564,6 +3592,7 @@ export function WorkReportDetailPage() {
       savingRowId,
       submitting,
       hasActiveMutationTask,
+      hasBlockingMutationTask,
       t,
     ]
   );
@@ -3854,7 +3883,6 @@ export function WorkReportDetailPage() {
         formId={formId}
         entryId={safeEntryId || null}
         workOrderNo={record?.workOrderNo ?? null}
-        refreshToken={taskQueueRefreshToken}
         onRetryAccepted={async (kind, accepted, rowId) => {
           await registerAcceptedMutationTask(kind, accepted, rowId);
           setNotice({
@@ -3909,7 +3937,7 @@ export function WorkReportDetailPage() {
                 <span className="detail-main-machine-label">
                   {t("workReport:detailPage.mainMachineDialogCurrent")}
                 </span>
-                <strong>{String(record?.machineCode ?? "").trim() || "-"}</strong>
+                <strong>{resolveEditableMainMachineCode(formId, record) || "-"}</strong>
               </div>
               <label className="modal-field">
                 <span className="modal-field-label detail-main-machine-next-label">
@@ -3994,9 +4022,7 @@ export function WorkReportDetailPage() {
       {workOrderConfirmAction && (
         <div
           className="modal-backdrop"
-          onMouseDown={() => {
-            if (!workOrderClosing) setWorkOrderConfirmAction(null);
-          }}
+          onMouseDown={dismissWorkOrderConfirm}
         >
           <section
             className="modal-panel detail-work-order-confirm-panel"
@@ -4008,7 +4034,9 @@ export function WorkReportDetailPage() {
             <header className="modal-header detail-main-machine-header">
               <h2>
                 {t(
-                  workOrderConfirmAction === "close"
+                  isUnderTargetCloseWarningStep
+                    ? "workReport:detailPage.manualCloseUnderTargetTitle"
+                    : workOrderConfirmAction === "close"
                     ? "workReport:detailPage.manualClose"
                     : "workReport:detailPage.manualReopen"
                 )}
@@ -4016,7 +4044,7 @@ export function WorkReportDetailPage() {
               <button
                 type="button"
                 className="detail-main-machine-close"
-                onClick={() => setWorkOrderConfirmAction(null)}
+                onClick={dismissWorkOrderConfirm}
                 disabled={workOrderClosing}
                 aria-label={t("common:actions.close")}
               >
@@ -4024,21 +4052,60 @@ export function WorkReportDetailPage() {
               </button>
             </header>
             <div className="detail-work-order-confirm-body">
-              <p>
-                {t(
-                  workOrderConfirmAction === "close"
-                    ? "workReport:detailPage.manualCloseConfirm"
-                    : "workReport:detailPage.manualReopenConfirm",
-                  { workOrderNo: String(record?.workOrderNo ?? "").trim() }
-                )}
-              </p>
+              {isUnderTargetCloseWarningStep ? (
+                <div className="detail-work-order-under-target-warning">
+                  <p className="detail-work-order-under-target-message">
+                    {t("workReport:detailPage.manualCloseUnderTargetMessage", {
+                      workOrderNo: String(record?.workOrderNo ?? "").trim(),
+                    })}
+                  </p>
+                  <dl className="detail-work-order-under-target-metrics">
+                    <div>
+                      <dt>{t("workReport:detailPage.currentCumulativeQty")}</dt>
+                      <dd>
+                        {productionQtyFormatter.format(
+                          workOrderProductionProgress.cumulativeQty ?? 0
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{t("workReport:detailPage.targetProductionQty")}</dt>
+                      <dd>
+                        {productionQtyFormatter.format(
+                          workOrderProductionProgress.targetQty ?? 0
+                        )}
+                      </dd>
+                    </div>
+                    <div className="is-shortfall">
+                      <dt>{t("workReport:detailPage.productionShortfallQty")}</dt>
+                      <dd>
+                        {productionQtyFormatter.format(
+                          workOrderProductionProgress.shortfallQty ?? 0
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="detail-work-order-under-target-hint">
+                    {t("workReport:detailPage.manualCloseUnderTargetHint")}
+                  </p>
+                </div>
+              ) : (
+                <p>
+                  {t(
+                    workOrderConfirmAction === "close"
+                      ? "workReport:detailPage.manualCloseConfirm"
+                      : "workReport:detailPage.manualReopenConfirm",
+                    { workOrderNo: String(record?.workOrderNo ?? "").trim() }
+                  )}
+                </p>
+              )}
             </div>
             <div className="modal-footer">
               <div className="modal-actions">
                 <button
                   type="button"
                   className="modal-actions-secondary detail-main-machine-cancel"
-                  onClick={() => setWorkOrderConfirmAction(null)}
+                  onClick={dismissWorkOrderConfirm}
                   disabled={workOrderClosing}
                 >
                   {t("common:actions.cancel")}
@@ -4046,14 +4113,20 @@ export function WorkReportDetailPage() {
                 <button
                   type="button"
                   className={
-                    workOrderConfirmAction === "close"
+                    isUnderTargetCloseWarningStep
+                      ? "detail-page-under-target-continue-btn"
+                      : workOrderConfirmAction === "close"
                       ? "detail-page-close-btn"
                       : "detail-page-reopen-btn"
                   }
                   onClick={() => void confirmManualCloseWorkOrder()}
                   disabled={workOrderClosing}
                 >
-                  {workOrderClosing ? t("common:actions.saving") : t("common:actions.ok")}
+                  {workOrderClosing
+                    ? t("common:actions.saving")
+                    : isUnderTargetCloseWarningStep
+                      ? t("workReport:detailPage.manualCloseUnderTargetContinue")
+                      : t("common:actions.ok")}
                 </button>
               </div>
             </div>

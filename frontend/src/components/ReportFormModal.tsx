@@ -104,7 +104,6 @@ export function ReportFormModal({
     isAutofilledField,
     resetToEmptyForm,
   } = useReportFormModalFormController({
-    formId,
     mode,
     initialValue,
     entryContext,

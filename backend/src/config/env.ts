@@ -1,7 +1,10 @@
 import dotenv from "dotenv";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 
-dotenv.config();
+if (process.env.NODE_ENV !== "test") {
+  dotenv.config();
+}
 
 // Brand-neutral env names (UPSTREAM_*)：demo repo 對外文件避免綁死特定 SaaS 名稱；
 // runtime 仍沿用主系統的 RAGIC_* key，兩者自動互補。
@@ -108,7 +111,8 @@ if (isDemoMode) {
   process.env.DEV_AI_ENABLED ??= "false";
   process.env.DEV_AI_CONVERSATION_HISTORY_ENABLED ??= "false";
   process.env.TRUST_PROXY ??= "1";
-  process.env.CORS_ORIGIN ??= "http://localhost:5173,http://localhost:5174";
+  process.env.CORS_ORIGIN ??=
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174";
 
   if (!process.env.DEMO_RESET_KEY) {
     const generated = randomBytes(16).toString("hex");
@@ -157,6 +161,14 @@ function readRequiredEnv(key: string): string {
     );
   }
   return value;
+}
+
+function resolveSqliteDbFile(): string {
+  const sqliteTestDir = String(process.env.SQLITE_TEST_DB_DIR ?? "").trim();
+  if (process.env.NODE_ENV === "test" && sqliteTestDir) {
+    return path.join(sqliteTestDir, `work-report-read-model.${process.pid}.sqlite3`);
+  }
+  return process.env.SQLITE_DB_FILE ?? "./.cache/work-report-read-model.v1.sqlite3";
 }
 
 function readNumberEnv(key: string, fallback: number): number {
@@ -423,8 +435,7 @@ export const env = {
     0,
     Math.trunc(readNumberEnv("SQLITE_READ_MAX_STALENESS_MS", 2 * 60 * 60 * 1000))
   ),
-  SQLITE_DB_FILE:
-    process.env.SQLITE_DB_FILE ?? "./.cache/work-report-read-model.v1.sqlite3",
+  SQLITE_DB_FILE: resolveSqliteDbFile(),
   SQLITE_SYNC_BATCH_SIZE: Math.max(
     50,
     Math.trunc(readNumberEnv("SQLITE_SYNC_BATCH_SIZE", 500))
@@ -491,10 +502,6 @@ export const env = {
   RAGIC_MUTATION_READ_MAX_RETRIES: Math.max(
     0,
     Math.trunc(readNumberEnv("RAGIC_MUTATION_READ_MAX_RETRIES", 1))
-  ),
-  WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS: Math.max(
-    250,
-    Math.trunc(readNumberEnv("WORK_REPORT_ROUTE_PRECHECK_TIMEOUT_MS", 1_500))
   ),
   // 舊版總預算設定保留為相容欄位；實際 runtime 已拆成 foreground/mutation/background
   // 三個 bucket，避免背景同步或一般 refresh 吃掉 mutation precondition 的 token。
@@ -638,6 +645,10 @@ export const env = {
     5000,
     Math.trunc(readNumberEnv("RUNTIME_HEALTH_LOG_INTERVAL_MS", 60000))
   ),
+  RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS: Math.max(
+    10,
+    Math.trunc(readNumberEnv("RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS", 100))
+  ),
   WORK_REPORT_DEBUG_LOG_ENABLED: readBooleanEnv(
     "WORK_REPORT_DEBUG_LOG_ENABLED",
     process.env.NODE_ENV !== "production"
@@ -703,6 +714,18 @@ export const env = {
   CREATE_TASK_HISTORY_LIMIT: Math.max(
     100,
     Math.trunc(readNumberEnv("CREATE_TASK_HISTORY_LIMIT", 2000))
+  ),
+  WORK_REPORT_MUTATION_MAX_PENDING_TOTAL: Math.max(
+    10,
+    Math.trunc(readNumberEnv("WORK_REPORT_MUTATION_MAX_PENDING_TOTAL", 500))
+  ),
+  WORK_REPORT_MUTATION_MAX_PENDING_PER_KEY: Math.max(
+    2,
+    Math.trunc(readNumberEnv("WORK_REPORT_MUTATION_MAX_PENDING_PER_KEY", 25))
+  ),
+  WORK_REPORT_MUTATION_MAX_QUEUE_AGE_MS: Math.max(
+    60_000,
+    Math.trunc(readNumberEnv("WORK_REPORT_MUTATION_MAX_QUEUE_AGE_MS", 10 * 60 * 1000))
   ),
   WORK_REPORT_BATCH_DELETE_CONCURRENCY: Math.max(
     1,

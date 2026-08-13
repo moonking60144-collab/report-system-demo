@@ -50,6 +50,8 @@ function normalizeGlobalFilters(value: unknown): GlobalFilters | undefined {
       candidate.startSchedule === "yes" || candidate.startSchedule === "no"
         ? candidate.startSchedule
         : "all",
+    updatedDateFrom: String(candidate.updatedDateFrom ?? "").trim(),
+    updatedDateTo: String(candidate.updatedDateTo ?? "").trim(),
   };
 }
 

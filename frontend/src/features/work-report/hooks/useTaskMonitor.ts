@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { message } from "antd";
-import { AxiosError } from "axios";
 import { useTranslation } from "react-i18next";
 import {
   fetchCreateReportTask,
@@ -17,9 +16,16 @@ import {
   WORK_REPORT_TASK_MONITOR_STORAGE_KEY,
 } from "../constants";
 import type { CreateTaskMonitor } from "../types";
-import { getErrorMessage, getWorkReportTaskErrorMessage } from "../utils";
+import { getApiErrorCode, getErrorMessage, getWorkReportTaskErrorMessage } from "../utils";
 import type { WorkReportMutationTaskKind } from "../types";
 import { deleteRetryableMutationRecord } from "../taskRetryStore";
+import { resolveTaskMutationLifecycleState } from "../mutationLifecycle";
+import { deleteRetryableSortOrderMutationByTaskId } from "../sortOrderTaskRetryStore";
+import { deleteRetryableBatchCreateRecordChain } from "../taskBatchRetryStore";
+import {
+  isStoredWorkReportOptimisticMutation,
+  reconcileWorkReportOptimisticMutation,
+} from "../workReportOptimisticMutation";
 
 function isTaskRunning(status: CreateTaskMonitor["status"]): boolean {
   return status === "pending" || status === "running";
@@ -30,15 +36,7 @@ function isMonitorRunning(monitor: CreateTaskMonitor): boolean {
 }
 
 function isQueueTask(kind: WorkReportMutationTaskKind): boolean {
-  return kind === "delete" || kind === "delete-batch";
-}
-
-function getApiErrorCode(error: unknown): string | null {
-  if (!(error instanceof AxiosError)) {
-    return null;
-  }
-  const code = error.response?.data?.error?.code;
-  return typeof code === "string" ? code : null;
+  return kind === "create-batch" || kind === "delete" || kind === "delete-batch";
 }
 
 function isTaskNotFoundError(error: unknown): boolean {
@@ -46,7 +44,7 @@ function isTaskNotFoundError(error: unknown): boolean {
 }
 
 function isWorkReportQueueTask(task: CreateReportTaskResult | WorkReportQueueTask): task is WorkReportQueueTask {
-  return "taskType" in task;
+  return "rowId" in task;
 }
 
 function getTaskRowId(task: CreateReportTaskResult | WorkReportQueueTask): string | undefined {
@@ -60,12 +58,58 @@ function getTaskErrorMessage(task: CreateReportTaskResult | WorkReportQueueTask)
   return getWorkReportTaskErrorMessage(task);
 }
 
+function getDeleteTaskOutcome(
+  task: CreateReportTaskResult | WorkReportQueueTask
+): Pick<
+  CreateTaskMonitor,
+  "deletedCount" | "deleteFinalizeFailed" | "batchCreatedRowIds"
+> {
+  if (!isWorkReportQueueTask(task)) {
+    return {};
+  }
+  return {
+    ...(typeof task.deletedCount === "number"
+      ? { deletedCount: task.deletedCount }
+      : {}),
+    ...(typeof task.deleteFinalizeFailed === "boolean"
+      ? { deleteFinalizeFailed: task.deleteFinalizeFailed }
+      : {}),
+    ...(Array.isArray(task.batchCreatedRowIds)
+      ? { batchCreatedRowIds: task.batchCreatedRowIds }
+      : {}),
+  };
+}
+
+function getFailedTaskMessage(
+  kind: WorkReportMutationTaskKind,
+  task: CreateReportTaskResult | WorkReportQueueTask,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (
+    (kind === "delete" || kind === "delete-batch") &&
+    isWorkReportQueueTask(task) &&
+    (task.deletedCount ?? 0) > 0
+  ) {
+    return (
+      task.message ||
+      t("workReport:messages.deletePartiallyCompleted", {
+        count: task.deletedCount,
+      })
+    );
+  }
+
+  const detail =
+    getTaskErrorMessage(task) ||
+    t("workReport:messages.backgroundProcessingFailedDefault");
+  return t("workReport:messages.backgroundProcessingFailedWithError", { error: detail });
+}
+
 function getRunningTaskMessage(
   kind: WorkReportMutationTaskKind,
   status: CreateTaskMonitor["status"],
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
-  if (kind === "create") {
+  if (kind === "create" || kind === "create-batch") {
     return status === "pending"
       ? t("workReport:messages.createTaskQueuedContinue")
       : t("workReport:messages.createTaskBackgroundRunning");
@@ -86,10 +130,16 @@ function getSuccessTaskMessage(
   rowId: string,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
+  if (kind === "create-batch" && "message" in task && task.message) {
+    return task.message;
+  }
   if ((kind === "delete" || kind === "delete-batch") && "message" in task && task.message) {
     return task.message;
   }
   if (kind === "update") {
+    if (!rowId || rowId === "-") {
+      return t("workReport:messages.taskBackgroundUpdateCompleted");
+    }
     return t("workReport:messages.taskBackgroundUpdatedWithRow", { rowId });
   }
   return t("workReport:messages.taskBackgroundCompletedWithRow", { rowId });
@@ -99,17 +149,101 @@ function getSuccessToastMessage(
   monitor: CreateTaskMonitor,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
+  if (monitor.kind === "create-batch") {
+    return monitor.message;
+  }
   if (monitor.kind === "delete" || monitor.kind === "delete-batch") {
     return monitor.message;
   }
   if (monitor.kind === "update") {
+    if (!monitor.rowId) {
+      return t("workReport:messages.toastEntryUpdateSuccess");
+    }
     return t("workReport:messages.toastUpdateSuccess", {
-      rowId: monitor.rowId ?? "-",
+      rowId: monitor.rowId,
     });
   }
   return t("workReport:messages.toastCreateSuccess", {
     rowId: monitor.rowId ?? "-",
   });
+}
+
+export function resolveTaskMonitorResult(
+  baseMonitor: CreateTaskMonitor,
+  task: CreateReportTaskResult | WorkReportQueueTask,
+  t: (key: string, options?: Record<string, unknown>) => string
+): CreateTaskMonitor {
+  const kind: WorkReportMutationTaskKind = baseMonitor.kind ?? "create";
+  const deleteOutcome = getDeleteTaskOutcome(task);
+  const lifecycleState = resolveTaskMutationLifecycleState({
+    status: task.status,
+    lifecycleState: task.lifecycleState,
+    errorCode: "errorCode" in task ? task.errorCode : task.error?.code,
+    writeIndeterminate: task.writeIndeterminate,
+    batchWriteIndeterminate:
+      "batchWriteIndeterminate" in task ? task.batchWriteIndeterminate : undefined,
+  });
+  const acceptedAt = task.acceptedAt ?? baseMonitor.acceptedAt ?? null;
+  const confirmedAt = task.confirmedAt ?? baseMonitor.confirmedAt ?? null;
+  const optimisticMutation = baseMonitor.optimisticMutation
+    ? reconcileWorkReportOptimisticMutation(baseMonitor.optimisticMutation, {
+        lifecycleState,
+        confirmedAt,
+      })
+    : undefined;
+  if (task.status === "pending" || task.status === "running") {
+    return {
+      ...baseMonitor,
+      kind,
+      status: task.status,
+      lifecycleState,
+      acceptedAt,
+      confirmedAt: null,
+      stale: undefined,
+      message: getRunningTaskMessage(kind, task.status, t),
+      updatedAt: task.updatedAt ?? new Date().toISOString(),
+      ...(optimisticMutation ? { optimisticMutation } : {}),
+      ...deleteOutcome,
+    };
+  }
+
+  if (task.status === "success") {
+    const rowId =
+      getTaskRowId(task) ??
+      baseMonitor.rowId ??
+      (kind === "update" ? undefined : "-");
+    return {
+      ...baseMonitor,
+      kind,
+      status: "success",
+      lifecycleState,
+      acceptedAt,
+      confirmedAt,
+      stale: undefined,
+      ...(rowId ? { rowId } : {}),
+      message: getSuccessTaskMessage(kind, task, rowId ?? "-", t),
+      updatedAt: task.updatedAt ?? new Date().toISOString(),
+      ...(optimisticMutation ? { optimisticMutation } : {}),
+      ...deleteOutcome,
+    };
+  }
+
+  return {
+    ...baseMonitor,
+    kind,
+    status: "failed",
+    lifecycleState,
+    acceptedAt,
+    confirmedAt:
+      lifecycleState === "indeterminate" || lifecycleState === "unknown"
+        ? null
+        : confirmedAt,
+    stale: undefined,
+    message: getFailedTaskMessage(kind, task, t),
+    updatedAt: task.updatedAt ?? new Date().toISOString(),
+    ...(optimisticMutation ? { optimisticMutation } : {}),
+    ...deleteOutcome,
+  };
 }
 
 function readStoredTaskMonitors(): CreateTaskMonitor[] {
@@ -141,12 +275,20 @@ function readStoredTaskMonitors(): CreateTaskMonitor[] {
           typeof candidate.workOrderNo === "string" &&
           typeof candidate.status === "string" &&
           typeof candidate.message === "string" &&
-          typeof candidate.updatedAt === "string"
+          typeof candidate.updatedAt === "string" &&
+          (candidate.optimisticMutation === undefined ||
+            isStoredWorkReportOptimisticMutation(candidate.optimisticMutation))
         );
       })
       .map((item) => ({
         ...item,
         kind: item.kind ?? "create",
+        lifecycleState:
+          item.stale === true
+            ? "unknown"
+            : item.lifecycleState ??
+              resolveTaskMutationLifecycleState({ status: item.status }),
+        ...(item.stale === true ? { confirmedAt: null } : {}),
       }))
       .filter((item) => shouldKeepTaskMonitor(item, now))
       .slice(0, MAX_CREATE_TASK_MONITORS);
@@ -175,7 +317,12 @@ function writeStoredTaskMonitors(monitors: CreateTaskMonitor[]): void {
 }
 
 function shouldKeepTaskMonitor(item: CreateTaskMonitor, now: number): boolean {
-  if (item.stale === true) {
+  if (
+    item.stale === true ||
+    item.lifecycleState === "indeterminate" ||
+    item.lifecycleState === "unknown" ||
+    item.optimisticMutation?.lifecycle.optimisticState === "frozen"
+  ) {
     const updatedAt = Date.parse(item.updatedAt);
     return !Number.isNaN(updatedAt) && now - updatedAt < CREATE_TASK_STALE_AUTO_CLEAR_MS;
   }
@@ -257,11 +404,23 @@ export async function pollCreateTaskMonitor(options: {
         ...currentMonitor,
         kind: currentMonitor.kind ?? "create",
         status: currentMonitor.status,
+        lifecycleState: isTaskNotFoundError(error)
+          ? "unknown"
+          : currentMonitor.lifecycleState,
+        ...(isTaskNotFoundError(error) ? { confirmedAt: null } : {}),
         stale: isTaskNotFoundError(error) ? true : undefined,
         message: isTaskNotFoundError(error)
           ? options.buildTaskNotFoundMessage()
           : options.buildPollingRetryMessage(error),
         updatedAt: nowIso(),
+        ...(currentMonitor.optimisticMutation && isTaskNotFoundError(error)
+          ? {
+              optimisticMutation: reconcileWorkReportOptimisticMutation(
+                currentMonitor.optimisticMutation,
+                { lifecycleState: "unknown" }
+              ),
+            }
+          : {}),
       };
       options.upsertTaskMonitorState(nextMonitor);
       currentMonitor = nextMonitor;
@@ -278,11 +437,21 @@ export async function pollCreateTaskMonitor(options: {
     ...currentMonitor,
     kind: currentMonitor.kind ?? "create",
     status: currentMonitor.status,
+    lifecycleState: "unknown",
+    confirmedAt: null,
     stale: true,
     message: lastPollingError
       ? options.buildPollingUnavailableMessage(lastPollingError)
       : options.buildTimedOutMessage(),
     updatedAt: nowIso(),
+    ...(currentMonitor.optimisticMutation
+      ? {
+          optimisticMutation: reconcileWorkReportOptimisticMutation(
+            currentMonitor.optimisticMutation,
+            { lifecycleState: "unknown" }
+          ),
+        }
+      : {}),
   });
 }
 
@@ -313,44 +482,7 @@ export function useTaskMonitor() {
     (
       baseMonitor: CreateTaskMonitor,
       task: CreateReportTaskResult | WorkReportQueueTask
-    ): CreateTaskMonitor => {
-      const kind: WorkReportMutationTaskKind = baseMonitor.kind ?? "create";
-      if (task.status === "pending" || task.status === "running") {
-        return {
-          ...baseMonitor,
-          kind,
-          status: task.status,
-          stale: undefined,
-          message: getRunningTaskMessage(kind, task.status, t),
-          updatedAt: task.updatedAt ?? new Date().toISOString(),
-        };
-      }
-
-      if (task.status === "success") {
-        const rowId = getTaskRowId(task) ?? baseMonitor.rowId ?? "-";
-        return {
-          ...baseMonitor,
-          kind,
-          status: "success",
-          stale: undefined,
-          rowId,
-          message: getSuccessTaskMessage(kind, task, rowId, t),
-          updatedAt: task.updatedAt ?? new Date().toISOString(),
-        };
-      }
-
-      const detail =
-        getTaskErrorMessage(task) ||
-        t("workReport:messages.backgroundProcessingFailedDefault");
-      return {
-        ...baseMonitor,
-        kind,
-        status: "failed",
-        stale: undefined,
-        message: t("workReport:messages.backgroundProcessingFailedWithError", { error: detail }),
-        updatedAt: task.updatedAt ?? new Date().toISOString(),
-      };
-    },
+    ): CreateTaskMonitor => resolveTaskMonitorResult(baseMonitor, task, t),
     [t]
   );
 
@@ -377,9 +509,28 @@ export function useTaskMonitor() {
             upsertTaskMonitorState,
             onSuccess: (nextMonitor) => {
               deleteRetryableMutationRecord(nextMonitor.taskId);
+              if (nextMonitor.kind === "create-batch") {
+                deleteRetryableBatchCreateRecordChain(nextMonitor.taskId);
+              }
+              if (nextMonitor.optimisticMutation?.lifecycle.operation === "work-report-sort-order") {
+                deleteRetryableSortOrderMutationByTaskId(nextMonitor.taskId);
+              }
               void message.success(getSuccessToastMessage(nextMonitor, t));
             },
             onFailed: (nextMonitor) => {
+              if (
+                nextMonitor.lifecycleState !== "indeterminate" &&
+                nextMonitor.lifecycleState !== "unknown"
+              ) {
+                deleteRetryableSortOrderMutationByTaskId(nextMonitor.taskId);
+              }
+              if (
+                (nextMonitor.kind === "delete" || nextMonitor.kind === "delete-batch") &&
+                (nextMonitor.deletedCount ?? 0) > 0
+              ) {
+                void message.warning(nextMonitor.message);
+                return;
+              }
               void message.error(nextMonitor.message);
             },
             buildPollingRetryMessage: (error) =>

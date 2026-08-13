@@ -120,6 +120,8 @@ export const DEFAULT_GLOBAL_FILTERS: GlobalFilters = {
   ragicUnfinishedStatus: ALL_FILTER_VALUE,
   siteRunning: "all",
   startSchedule: "all",
+  updatedDateFrom: "",
+  updatedDateTo: "",
 };
 
 export const DEFAULT_FIXED_FILTER_PRESET_ID: FixedFilterPresetId = "unfinished-runnable";
@@ -140,6 +142,8 @@ export const FIXED_FILTER_QUERY_KEYS = [
   "fRagicUnfinished",
   "fSite",
   "fStartSchedule",
+  "fUpdatedFrom",
+  "fUpdatedTo",
 ] as const;
 export const FIXED_FILTER_PRESETS: FixedFilterPreset[] = [
   {

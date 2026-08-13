@@ -2,8 +2,14 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 interface DowntimeApiMockOptions {
   handleCreateRecord?: (route: Route) => Promise<void>;
+  handleUpdateRecord?: (route: Route, entryId: string) => Promise<void>;
+  handleDeleteRecord?: (route: Route, entryId: string) => Promise<void>;
+  handleEfficiencyCsvExport?: (route: Route) => Promise<void>;
+  handlePlannedIdleSummary?: (route: Route, url: URL) => Promise<void>;
   getTasks?: () => unknown[];
   getTask?: (taskId: string) => unknown | null;
+  getRecords?: () => unknown[];
+  getEfficiencyReports?: () => unknown[];
   onApiRequest?: (request: {
     method: string;
     pathname: string;
@@ -33,6 +39,9 @@ function createMockTask(
     actorIp: string | null;
     actorLabel: string | null;
     source: string | null;
+    lifecycleState: string;
+    acceptedAt: string | null;
+    confirmedAt: string | null;
   }> = {}
 ) {
   const now = "2026-07-06T00:00:00.000Z";
@@ -44,7 +53,7 @@ function createMockTask(
     workOrderNo: null,
     entryId: null,
     rowId: null,
-    queueKey: "16:downtime:create",
+    queueKey: "16:downtime:mutation",
     createdAt: now,
     startedAt: null,
     finishedAt: null,
@@ -57,6 +66,9 @@ function createMockTask(
     actorIp: "::1",
     actorLabel: null,
     source: null,
+    lifecycleState: "accepted",
+    acceptedAt: now,
+    confirmedAt: null,
     ...patch,
   };
 }
@@ -140,14 +152,15 @@ async function installDowntimeApiMocks(
     }
 
     if (url.pathname === "/api/downtime/records" && method === "GET") {
+      const records = options.getRecords ? options.getRecords() : [];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          data: [],
+          data: records,
           meta: {
-            count: 0,
-            totalCount: 0,
+            count: records.length,
+            totalCount: records.length,
             limit: 20,
             offset: 0,
             hasMore: false,
@@ -157,6 +170,16 @@ async function installDowntimeApiMocks(
           },
         }),
       });
+      return;
+    }
+
+    const recordMutationMatch = url.pathname.match(/^\/api\/downtime\/records\/([^/]+)$/);
+    if (recordMutationMatch && method === "PATCH" && options.handleUpdateRecord) {
+      await options.handleUpdateRecord(route, decodeURIComponent(recordMutationMatch[1]));
+      return;
+    }
+    if (recordMutationMatch && method === "DELETE" && options.handleDeleteRecord) {
+      await options.handleDeleteRecord(route, decodeURIComponent(recordMutationMatch[1]));
       return;
     }
 
@@ -171,18 +194,58 @@ async function installDowntimeApiMocks(
       return;
     }
 
+    if (url.pathname === "/api/downtime/efficiency-reports") {
+      const records = options.getEfficiencyReports ? options.getEfficiencyReports() : [];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: records,
+          meta: {
+            count: records.length,
+            totalCount: records.length,
+            limit: 20,
+            offset: 0,
+            hasMore: false,
+          },
+        }),
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/downtime/export/monthly-csv") {
+      if (options.handleEfficiencyCsvExport) {
+        await options.handleEfficiencyCsvExport(route);
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "text/csv",
+        body: "header\nvalue",
+      });
+      return;
+    }
+
     if (url.pathname.startsWith("/api/downtime/tasks/")) {
       const taskId = decodeURIComponent(url.pathname.split("/").pop() ?? "");
       const task = options.getTask ? options.getTask(taskId) : null;
       await route.fulfill({
         status: task ? 200 : 404,
         contentType: "application/json",
-        body: JSON.stringify(task ? { data: task } : { error: { message: "not found" } }),
+        body: JSON.stringify(
+          task
+            ? { data: task }
+            : { error: { code: "TASK_NOT_FOUND", message: "not found" } }
+        ),
       });
       return;
     }
 
     if (url.pathname === "/api/downtime/planned-idle-summary") {
+      if (options.handlePlannedIdleSummary) {
+        await options.handlePlannedIdleSummary(route, url);
+        return;
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -207,6 +270,131 @@ async function installDowntimeApiMocks(
 }
 
 test.describe("downtime page", () => {
+  test("效率統計可開啟獨立歷史報表並顯示封存版本", async ({ page }) => {
+    await installDowntimeApiMocks(page, {
+      getEfficiencyReports: () => [
+        {
+          id: "snapshot-1",
+          periodMonth: "2026-06",
+          version: 2,
+          status: "ready",
+          sourceHash: "hash-1",
+          sourceRowCount: 12,
+          sourceSizeBytes: 1200,
+          csvRelativePath: "2026-06/v2/source.csv",
+          generatedBy: "client-a",
+          createdAt: "2026-07-13T00:00:00.000Z",
+          finalizedAt: null,
+          artifacts: [],
+        },
+      ],
+    });
+    await page.goto("/downtime");
+
+    await page.getByRole("tab", { name: /效率統計|Efficiency Stats/ }).click();
+    await page
+      .locator(".efficiency-stats-row")
+      .filter({ hasText: /查看歷史報表|View Report History/ })
+      .click();
+
+    const historyModal = page.locator(".efficiency-history-modal");
+    await expect(historyModal).toBeVisible();
+    await expect(historyModal).toContainText("2026-06");
+    await expect(historyModal).toContainText("v2");
+    await expect(historyModal.locator(".efficiency-history-item")).toContainText("12");
+    await expect(
+      historyModal.getByRole("button", { name: /期間 CSV|Period CSV/ })
+    ).toBeVisible();
+  });
+
+  test("效率 CSV 匯出尚未完成時停用歷史入口", async ({ page }) => {
+    let markExportStarted: (() => void) | undefined;
+    const exportStarted = new Promise<void>((resolve) => {
+      markExportStarted = resolve;
+    });
+    let releaseExport: (() => void) | undefined;
+    const exportRelease = new Promise<void>((resolve) => {
+      releaseExport = resolve;
+    });
+    await installDowntimeApiMocks(page, {
+      handleEfficiencyCsvExport: async (route) => {
+        markExportStarted?.();
+        await exportRelease;
+        await route.fulfill({
+          status: 200,
+          contentType: "text/csv",
+          body: "header\nvalue",
+        });
+      },
+    });
+    await page.goto("/downtime");
+    await page.getByRole("tab", { name: /效率統計|Efficiency Stats/ }).click();
+
+    const csvButton = page
+      .locator(".efficiency-stats-row")
+      .filter({ hasText: /下載期間統計 CSV|Download Period Stats CSV/ });
+    const historyButton = page
+      .locator(".efficiency-stats-row")
+      .filter({ hasText: /查看歷史報表|View Report History/ });
+    await csvButton.click();
+    await exportStarted;
+    await expect(historyButton).toBeDisabled();
+
+    releaseExport?.();
+    await expect(historyButton).toBeEnabled();
+  });
+
+  test("計畫停機重新整理立即進入背景狀態並在快照提交後更新圖表", async ({ page }) => {
+    let refreshAccepted = false;
+    await installDowntimeApiMocks(page, {
+      handlePlannedIdleSummary: async (route, url) => {
+        const isRefresh = url.searchParams.get("refresh") === "1";
+        if (isRefresh) {
+          refreshAccepted = true;
+        }
+        const committed = refreshAccepted && !isRefresh;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: [
+              {
+                machineId: committed ? "P20" : "P10",
+                prodType: "TI",
+                totalMinutes: committed ? 480 : 60,
+                totalDays: committed ? 1 : 0.13,
+                count: 1,
+              },
+            ],
+            meta: {
+              month: "2026/07",
+              machineCount: 1,
+              source: "sqlite",
+              refreshed: false,
+              refreshTriggered: isRefresh,
+              snapshotAt: committed
+                ? "2026-07-20T01:00:00.000Z"
+                : "2026-07-20T00:00:00.000Z",
+            },
+          }),
+        });
+      },
+    });
+    await page.goto("/downtime");
+
+    await expect(page.locator(".planned-idle-chart")).toContainText("P10");
+    const refreshButton = page.locator(".downtime-chart-refresh-btn");
+    await refreshButton.click();
+    await expect(refreshButton).toContainText(
+      /背景更新中|Refreshing in background/
+    );
+    await expect(page.locator(".planned-idle-chart")).toContainText("P20", {
+      timeout: 10_000,
+    });
+    await expect(refreshButton).toContainText(/^重新整理$|^Refresh$/);
+    await expect(refreshButton).toBeEnabled();
+  });
+
   test("停機建立任務佇列顯示在右側可收合 sidebar", async ({ page }) => {
     let recordsRefreshRequests = 0;
     let taskListRequests = 0;
@@ -320,6 +508,146 @@ test.describe("downtime page", () => {
     expect(dialogBox!.y).toBeLessThan(viewport!.height * 0.35);
   });
 
+  test("Form16 update/delete 在 accepted 後 2 秒內反映，terminal conflict 會 rollback", async ({ page }) => {
+    let authoritativeRecord = {
+      id: "160001",
+      snapshotHash: "snapshot-1",
+      date: "2026/08/12",
+      machineId: "W1",
+      processCode: "TI01",
+      operatorId: "TR0001",
+      operatorName: "搓牙甲",
+      reportType: "TI搓牙",
+      startTime: "08:00",
+      endTime: "17:00",
+      breakTime: "1.00",
+      plannedIdleMinutes: 480,
+      remark: "before",
+      workOrderNo: null,
+    };
+    let updateSucceeded = false;
+    let deleteFailed = false;
+    const taskMap = new Map<string, ReturnType<typeof createMockTask>>();
+
+    await installDowntimeApiMocks(page, {
+      getRecords: () => [authoritativeRecord],
+      handleUpdateRecord: async (route, entryId) => {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        taskMap.set(
+          "update-task-1",
+          createMockTask({
+            taskId: "update-task-1",
+            taskType: "update-downtime",
+            status: "running",
+            entryId,
+            lifecycleState: "running",
+          })
+        );
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              taskId: "update-task-1",
+              status: "pending",
+              createdAt: "2026-08-12T08:00:00.000Z",
+              acceptedAt: "2026-08-12T08:00:00.000Z",
+              lifecycleState: "accepted",
+              confirmedAt: null,
+              entryId,
+            },
+          }),
+        });
+      },
+      handleDeleteRecord: async (route, entryId) => {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        taskMap.set(
+          "delete-task-1",
+          createMockTask({
+            taskId: "delete-task-1",
+            taskType: "delete-downtime",
+            status: "running",
+            entryId,
+            lifecycleState: "running",
+          })
+        );
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              taskId: "delete-task-1",
+              status: "pending",
+              createdAt: "2026-08-12T08:00:01.000Z",
+              acceptedAt: "2026-08-12T08:00:01.000Z",
+              lifecycleState: "accepted",
+              confirmedAt: null,
+              entryId,
+            },
+          }),
+        });
+      },
+      getTasks: () => Array.from(taskMap.values()),
+      getTask: (taskId) => {
+        const task = taskMap.get(taskId);
+        if (!task) return null;
+        if (taskId === "update-task-1" && updateSucceeded) {
+          authoritativeRecord = { ...authoritativeRecord, remark: "after" };
+          return {
+            ...task,
+            status: "success",
+            lifecycleState: "success",
+            confirmedAt: "2026-08-12T08:00:02.000Z",
+          };
+        }
+        if (taskId === "delete-task-1" && deleteFailed) {
+          return {
+            ...task,
+            status: "failed",
+            lifecycleState: "conflict",
+            errorCode: "DOWNTIME_RECORD_STALE",
+            errorMessage: "snapshot conflict",
+            confirmedAt: "2026-08-12T08:00:03.000Z",
+          };
+        }
+        return task;
+      },
+    });
+
+    await page.goto("/downtime");
+    const tableRows = page.locator(".downtime-record-table tbody tr");
+    await expect(tableRows).toHaveCount(1);
+    const row = tableRows.first();
+    await row.getByRole("button", { name: /^編輯$|^Edit$/ }).click();
+    await row.locator('input[type="text"]').fill("after");
+
+    const updateStartedAt = Date.now();
+    await row.getByRole("button", { name: /^儲存$|^Save$/ }).click();
+    await expect(row).toContainText("after", { timeout: 2_000 });
+    await expect(row).toContainText(/待確認|Pending/);
+    expect(Date.now() - updateStartedAt).toBeLessThan(2_000);
+
+    updateSucceeded = true;
+    await expect(row).not.toHaveClass(/is-optimistic/, { timeout: 10_000 });
+    await expect(row).toContainText("after");
+
+    await row.getByRole("button", { name: /^刪除$|^Delete$/ }).click();
+    const deleteStartedAt = Date.now();
+    await page
+      .locator(".ant-modal-confirm")
+      .getByRole("button", { name: /^刪除$|^Delete$/ })
+      .click();
+    await expect(tableRows).toHaveCount(0, { timeout: 2_000 });
+    expect(Date.now() - deleteStartedAt).toBeLessThan(2_000);
+
+    deleteFailed = true;
+    await expect(tableRows).toHaveCount(1, { timeout: 10_000 });
+    await expect(tableRows.first()).toContainText("after");
+    await expect(page.locator(".downtime-task-message.is-error")).toContainText(
+      "snapshot conflict"
+    );
+  });
+
   test("新增停機排隊失敗後可用同一個 clientRowKey 重送", async ({ page }) => {
     const terminalTasks = new Map<string, ReturnType<typeof createMockTask>>();
     const postedClientRowKeys: string[] = [];
@@ -332,7 +660,8 @@ test.describe("downtime page", () => {
         const actorClientId = request.headers()["x-debug-client-id"] ?? null;
         createCount += 1;
         const taskId = `downtime-task-${createCount}`;
-        const createdAt = `2026-07-06T00:00:0${createCount}.000Z`;
+        const createdAt = new Date(Date.now() - 1_000 + createCount).toISOString();
+        const finishedAt = new Date(Date.parse(createdAt) + 500).toISOString();
 
         postedClientRowKeys.push(String(payload.clientRowKey ?? ""));
         terminalTasks.set(
@@ -342,8 +671,8 @@ test.describe("downtime page", () => {
                 taskId,
                 status: "failed",
                 createdAt,
-                finishedAt: "2026-07-06T00:00:03.000Z",
-                updatedAt: "2026-07-06T00:00:03.000Z",
+                finishedAt,
+                updatedAt: finishedAt,
                 errorCode: "CREATE_DOWNTIME_FAILED",
                 errorMessage: "Ragic validation failed",
                 actorClientId,
@@ -353,8 +682,8 @@ test.describe("downtime page", () => {
                 status: "success",
                 entryId: "16-1001",
                 createdAt,
-                finishedAt: "2026-07-06T00:00:05.000Z",
-                updatedAt: "2026-07-06T00:00:05.000Z",
+                finishedAt,
+                updatedAt: finishedAt,
                 message: "created",
                 actorClientId,
               })

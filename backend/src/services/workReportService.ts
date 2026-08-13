@@ -1,8 +1,8 @@
 import { env, resolveWritePath, shouldUseSqliteReadForForm } from "../config/env";
 import { getFormConfig } from "../config/forms";
-import { ragicClient } from "../ragic/client";
+import { ragicClient, type RagicRecord } from "../ragic/client";
 import type { ReportWritePayload, WorkReportRecord } from "../types/workReport";
-import { HttpError } from "../utils/httpError";
+import { HttpError, UpstreamError } from "../utils/httpError";
 import { workReportSqliteRepository } from "../storage/sqlite/workReportSqliteRepository";
 import { reportFullSnapshotService } from "./reportFullSnapshotService";
 import { hasReadableSqliteSnapshot } from "./work-report/readModelState";
@@ -39,14 +39,50 @@ import { workReportReadService } from "./work-report/workReportReadService";
 import { workReportEditingPresenceService } from "./workReportEditingPresenceService";
 import type { RagicReadPriority } from "../infra/ragicRequestScheduler";
 import { isRetryableReadError } from "../infra/ragicReadRetry";
+import { resolveCandidateFieldKeys } from "./work-report/queries/rowTransform";
+import { getFirstFieldValue } from "./work-report/shared/subtableUtils";
 
 const ENTRY_CONFLICT_IGNORED_KEYS = new Set(["lastUpdatedAt", "filterLastUpdatedAt"]);
 const CLOSED_WORK_ORDER_STATUS = "已結案";
+
+function parseStoredSortOrder(value: unknown): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
 
 interface EntryConflictPreconditionOptions {
   priority?: RagicReadPriority;
   timeoutMs?: number;
   maxRetries?: number;
+}
+
+export async function reconcileHardDeleteWriteFailure(
+  writeError: unknown,
+  verifyRowStillExists: () => Promise<void>
+): Promise<void> {
+  try {
+    await verifyRowStillExists();
+  } catch (verifyError) {
+    if (
+      verifyError instanceof HttpError &&
+      verifyError.code === "REPORT_NOT_FOUND"
+    ) {
+      return;
+    }
+    throw new UpstreamError(
+      "Ragic 刪除回應未確認，且無法讀回明細判定最終結果；請先重新整理再決定是否重送。",
+      "RAGIC_DELETE_INDETERMINATE",
+      {
+        writeError: writeError instanceof Error ? writeError.message : String(writeError),
+        verifyError: verifyError instanceof Error ? verifyError.message : String(verifyError),
+      }
+    );
+  }
+
+  throw writeError;
 }
 
 function resolveRecordLastUpdatedAt(record: WorkReportRecord | null | undefined): string {
@@ -100,18 +136,25 @@ class WorkReportService {
     payload: ReportWritePayload,
     options: CreateReportFlowOptions = {}
   ): Promise<{ rowId: string }> {
-    // Idempotency：reuse clientMutationId 當 Form 16 寫入的 key。
+    const durableCreateKey = options.createIdempotencyKey ?? options.clientMutationId;
+    // Idempotency：task attempt ID 與跨 retry 的 create key 分離；舊 caller fallback 到 clientMutationId。
     // 同 key 命中既有映射就直接回舊 rowId、跳過 runCreateReportFlow（不再打 Ragic write /
     // polling / action button），擋 backend restart 或 worker crash 後 retry 產生的重複 entry。
     const idempotencyResult = await checkOrCreateForm16Entry({
-      clientRowKey: options.clientMutationId,
+      clientRowKey: durableCreateKey,
       source: `work-report-${formId}`,
-      create: async () => {
+      operationFingerprint: options.clientMutationFingerprint,
+      create: async (reservation) => {
         const flowResult = await runCreateReportFlow({
           formId,
           entryId,
           payload,
-          options,
+          options: {
+            ...options,
+            ...(reservation?.reservationToken
+              ? { idempotencyReservationToken: reservation.reservationToken }
+              : {}),
+          },
           deps: {
             assertEntryNotModified: this.assertEntryNotModified.bind(this),
             validateReportPayload,
@@ -144,6 +187,7 @@ class WorkReportService {
         formId,
         entryId,
         clientMutationId: options.clientMutationId,
+        createIdempotencyKey: durableCreateKey,
         rowId: idempotencyResult.entryId,
       });
     }
@@ -182,7 +226,25 @@ class WorkReportService {
     };
 
     await writeToRagic(formId, config, entryId, writeBody);
-    await triggerUpdateRecalculateFlow(entryId, normalizedRowId);
+    try {
+      await triggerUpdateRecalculateFlow(entryId, normalizedRowId);
+    } catch (error) {
+      throw new UpstreamError(
+        `報工內容已寫入 Ragic，但後續回算尚未完成：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "RAGIC_RECALCULATE_INCOMPLETE",
+        {
+          formId,
+          entryId,
+          rowId: normalizedRowId,
+          causeCode:
+            typeof (error as { code?: unknown })?.code === "string"
+              ? String((error as { code?: unknown }).code)
+              : undefined,
+        }
+      );
+    }
     this.markReportFullCacheDirty(formId);
     return { rowId: normalizedRowId };
   }
@@ -207,43 +269,28 @@ class WorkReportService {
     await getExistingSubtableRow(config, entryId, normalizedRowId);
 
     const normalizedSubtableId = config.writeConfig.subtableId.replace(/^_subtable_/, "");
-    const deleteKeyCandidates = [
-      `_DELSUB_${normalizedSubtableId}`,
-      `_DELSUB_${config.writeConfig.subtableId}`,
-    ];
+    const deleteKey = `_DELSUB_${normalizedSubtableId}`;
     const parsedRowId = Number(normalizedRowId);
     const deleteList = Number.isFinite(parsedRowId) ? [parsedRowId] : [normalizedRowId];
-    let deleted = false;
-    let lastError: unknown;
-
-    for (const deleteKey of deleteKeyCandidates) {
-      try {
-        const writeBody = {
-          [deleteKey]: deleteList,
-        };
-        await writeToRagic(
-          formId,
-          config,
-          entryId,
-          writeBody,
-          !options.skipDeleteRecalculate,
-          "PATCH",
-          options.skipDeleteRecalculate
-            ? undefined
-            : {
-                doFormula: true,
-                doLinkLoad: "all",
-              }
-        );
-        deleted = true;
-        break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    if (!deleted && lastError) {
-      throw lastError;
+    try {
+      await writeToRagic(
+        formId,
+        config,
+        entryId,
+        { [deleteKey]: deleteList },
+        !options.skipDeleteRecalculate,
+        "PATCH",
+        options.skipDeleteRecalculate
+          ? undefined
+          : {
+              doFormula: true,
+              doLinkLoad: "all",
+            }
+      );
+    } catch (error) {
+      await reconcileHardDeleteWriteFailure(error, async () => {
+        await getExistingSubtableRow(config, entryId, normalizedRowId);
+      });
     }
 
     this.markReportFullCacheDirty(formId);
@@ -355,6 +402,162 @@ class WorkReportService {
     return { machineCode: normalizedMachineCode };
   }
 
+  async updateSortOrder(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    options: {
+      expectedEntryLastUpdatedAt?: string;
+      editSessionId?: string;
+      editLockVersion?: number;
+    } = {}
+  ): Promise<{
+    sortOrder: number;
+    previousSortOrder: number | null;
+    changed: boolean;
+  }> {
+    const totalStartedAt = Date.now();
+    if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+      throw new HttpError(
+        400,
+        "sortOrder 必須是大於或等於 0 的整數",
+        "INVALID_PAYLOAD"
+      );
+    }
+
+    const config = getFormConfig(formId);
+    const sortOrderFieldId = config.writeConfig.mainWriteFields?.sortOrder?.trim() ?? "";
+    if (!sortOrderFieldId) {
+      throw new HttpError(503, "主表排序欄位尚未設定", "FORM_NOT_CONFIGURED");
+    }
+
+    const writePath = resolveWritePath(formId, config.ragicPath);
+    if (!writePath) {
+      throw new HttpError(
+        503,
+        "寫入路徑未設定（請確認 RAGIC_WRITE_TARGET 與 TEST_PATH）",
+        "FORM_NOT_CONFIGURED"
+      );
+    }
+
+    const fieldCandidates = Array.from(
+      new Set([
+        sortOrderFieldId,
+        ...resolveCandidateFieldKeys(
+          config.mainFields.sortOrder ?? "",
+          config.mainFieldFallbacks?.sortOrder
+        ),
+      ])
+    ).filter(Boolean);
+    const lastUpdatedAtFieldCandidates = resolveCandidateFieldKeys(
+      config.mainFields.lastUpdatedAt ?? "",
+      config.mainFieldFallbacks?.lastUpdatedAt
+    );
+    const expectedLastUpdatedAt = String(
+      options.expectedEntryLastUpdatedAt ?? ""
+    ).trim();
+    const currentReadStartedAt = Date.now();
+    const currentEntry = await ragicClient.getEntry(writePath, entryId, false, {
+      priority: "mutation",
+    });
+    if (!currentEntry) {
+      throw new HttpError(404, `找不到工令：${entryId}`, "REPORT_NOT_FOUND");
+    }
+    const previousSortOrder = parseStoredSortOrder(
+      getFirstFieldValue(currentEntry, fieldCandidates)
+    );
+    const currentLastUpdatedAt = String(
+      getFirstFieldValue(currentEntry, lastUpdatedAtFieldCandidates) ?? ""
+    ).trim();
+    if (
+      expectedLastUpdatedAt &&
+      currentLastUpdatedAt !== expectedLastUpdatedAt
+    ) {
+      console.info("[work-report-sort-order][entry-timestamp-drift-ignored]", {
+        formId,
+        entryId,
+        expectedEntryLastUpdatedAt: expectedLastUpdatedAt,
+        currentEntryLastUpdatedAt: currentLastUpdatedAt,
+        reason: "sort-order-is-field-level-and-entry-queue-is-serial",
+      });
+    }
+    const currentReadMs = Date.now() - currentReadStartedAt;
+    if (previousSortOrder === sortOrder) {
+      console.info("[work-report-sort-order][timing]", {
+        formId,
+        entryId,
+        changed: false,
+        currentReadMs,
+        writeMs: 0,
+        verifyMs: 0,
+        totalMs: Date.now() - totalStartedAt,
+      });
+      return {
+        sortOrder,
+        previousSortOrder,
+        changed: false,
+      };
+    }
+
+    const writeStartedAt = Date.now();
+    await writeToRagic(
+      formId,
+      config,
+      entryId,
+      { [sortOrderFieldId]: sortOrder },
+      false,
+      "PATCH",
+      {
+        doFormula: false,
+      }
+    );
+    const writeMs = Date.now() - writeStartedAt;
+    this.markReportFullCacheDirty(formId);
+
+    const verifyStartedAt = Date.now();
+    const confirmedEntry = await ragicClient.getEntry(writePath, entryId, false, {
+      priority: "mutation",
+    });
+    if (!confirmedEntry) {
+      throw new UpstreamError(
+        "Ragic 已回應排序碼更新，但無法回讀工令；請重新整理確認。",
+        "RAGIC_WRITE_VERIFY_FAILED",
+        { formId, entryId, expectedSortOrder: sortOrder }
+      );
+    }
+    const confirmedSortOrder = parseStoredSortOrder(
+      getFirstFieldValue(confirmedEntry, fieldCandidates)
+    );
+    if (confirmedSortOrder !== sortOrder) {
+      throw new UpstreamError(
+        "Ragic 已回應排序碼更新，但回讀值不一致；請重新整理確認。",
+        "RAGIC_WRITE_VERIFY_FAILED",
+        {
+          formId,
+          entryId,
+          expectedSortOrder: sortOrder,
+          confirmedSortOrder,
+        }
+      );
+    }
+    const verifyMs = Date.now() - verifyStartedAt;
+    console.info("[work-report-sort-order][timing]", {
+      formId,
+      entryId,
+      changed: true,
+      currentReadMs,
+      writeMs,
+      verifyMs,
+      totalMs: Date.now() - totalStartedAt,
+    });
+
+    return {
+      sortOrder,
+      previousSortOrder,
+      changed: true,
+    };
+  }
+
   async manualCloseWorkOrder(
     formId: string,
     entryId: string,
@@ -423,9 +626,26 @@ class WorkReportService {
       return;
     }
 
-    let latestRecord: WorkReportRecord;
+    const latestRecord = await this.readLatestEntryForConflictCheck(
+      formId,
+      entryId,
+      options
+    );
+    await this.assertLatestEntryMatchesExpected(
+      formId,
+      entryId,
+      expected,
+      latestRecord
+    );
+  }
+
+  private async readLatestEntryForConflictCheck(
+    formId: string,
+    entryId: string,
+    options: EntryConflictPreconditionOptions = {}
+  ): Promise<WorkReportRecord> {
     try {
-      latestRecord = await workReportReadService.getReportByEntryId(formId, entryId, {
+      return await workReportReadService.getReportByEntryId(formId, entryId, {
         refresh: true,
         priority: options.priority ?? "mutation",
         ragicReadTimeoutMs: options.timeoutMs ?? env.RAGIC_MUTATION_READ_TIMEOUT_MS,
@@ -441,6 +661,14 @@ class WorkReportService {
       }
       throw error;
     }
+  }
+
+  private async assertLatestEntryMatchesExpected(
+    formId: string,
+    entryId: string,
+    expected: string,
+    latestRecord: WorkReportRecord
+  ): Promise<void> {
     const latestUpdatedAt = resolveRecordLastUpdatedAt(latestRecord);
     if (latestUpdatedAt === expected) {
       return;
@@ -524,15 +752,18 @@ class WorkReportService {
   async assertCreateEntryAcceptsReports(
     formId: string,
     entryId: string
-  ): Promise<void> {
-    let record: WorkReportRecord;
+  ): Promise<RagicRecord> {
+    const config = getFormConfig(formId);
+    let entry: RagicRecord | null;
     try {
-      record = await workReportReadService.getReportByEntryId(formId, entryId, {
-        refresh: true,
+      entry = await ragicClient.getEntry(config.ragicPath, entryId, false, {
         priority: "mutation",
-        ragicReadTimeoutMs: env.RAGIC_MUTATION_READ_TIMEOUT_MS,
-        ragicReadMaxRetries: env.RAGIC_MUTATION_READ_MAX_RETRIES,
+        timeoutMs: env.RAGIC_MUTATION_READ_TIMEOUT_MS,
+        maxRetries: env.RAGIC_MUTATION_READ_MAX_RETRIES,
       });
+      if (!entry) {
+        throw new Error(`找不到工令：${entryId}`);
+      }
     } catch (error) {
       console.warn("[work-report-create][entry-status-precheck-failed]", {
         formId,
@@ -546,9 +777,17 @@ class WorkReportService {
       );
     }
 
-    const status = String((record as Record<string, unknown>).status ?? "").trim();
+    const status = String(
+      getFirstFieldValue(
+        entry,
+        resolveCandidateFieldKeys(
+          config.mainFields.status ?? "",
+          config.mainFieldFallbacks?.status
+        )
+      ) ?? ""
+    ).trim();
     if (status !== CLOSED_WORK_ORDER_STATUS) {
-      return;
+      return entry;
     }
 
     throw new HttpError(
@@ -561,8 +800,8 @@ class WorkReportService {
   async assertBatchCreateEntryAcceptsReports(
     formId: string,
     entryId: string
-  ): Promise<void> {
-    await this.assertCreateEntryAcceptsReports(formId, entryId);
+  ): Promise<RagicRecord> {
+    return this.assertCreateEntryAcceptsReports(formId, entryId);
   }
 
   private async getExpectedEntrySnapshotFromReadModel(

@@ -53,13 +53,16 @@ export interface CreateReportFlowOptions {
    * worker 仍保留工令狀態檢查，批次列內也避免每列多打一個 Ragic GET。
    */
   skipEntryPreflight?: boolean;
-  /**
-   * 客戶端送出時產的 UUID（通常跟 `x-client-mutation-id` header 來的 value 一致）。
-   * workReportService.createReport 會拿這個去 SQLite 查既有的 Form 16 寫入映射，
-   * 命中就跳過 runCreateReportFlow 直接回舊 rowId，擋 backend restart 後 retry
-   * 造成的重複 Ragic 寫入。
-   */
+  /** async worker 延後到建立寫入 context 前才執行 live 狀態檢查，並重用該 raw entry。 */
+  loadPreconditionEntrySnapshot?: () => Promise<RagicRecord>;
+  /** 本次背景 task attempt 的 UUID；舊 caller 也會 fallback 當 durable create key。 */
   clientMutationId?: string;
+  /** 跨 task retry 保持不變，命中 SQLite mapping 時跳過第二次 Ragic create。 */
+  createIdempotencyKey?: string;
+  /** 與 durable create idempotency key 綁定的 operation/target/payload fingerprint。 */
+  clientMutationFingerprint?: string;
+  /** 本次 durable idempotency reservation 的唯一 token。 */
+  idempotencyReservationToken?: string;
 }
 
 function extractCreatedForm16RowId(value: unknown): string | null {
@@ -225,6 +228,17 @@ export async function runCreateReportFlow(args: {
   const batchSharedState =
     options.mode?.kind === "batch" ? options.mode.shared : undefined;
   let beforeEntry: RagicRecord | undefined;
+  const loadBeforeEntry = async (): Promise<RagicRecord> => {
+    if (beforeEntry) {
+      return beforeEntry;
+    }
+    beforeEntry = await measureStage("beforeRead", () =>
+      options.loadPreconditionEntrySnapshot
+        ? options.loadPreconditionEntrySnapshot()
+        : deps.getRawEntry(config, entryId, false)
+    );
+    return beforeEntry;
+  };
   let beforeRowsFromBatch = batchSharedState?.latestRows;
   let workOrderNoFromBatch = batchSharedState?.workOrderNo;
   let payloadForWrite = payload;
@@ -234,14 +248,12 @@ export async function runCreateReportFlow(args: {
         ? batchSharedState.processCodeDefault
         : undefined;
     if (processCodeDefault === undefined) {
-      beforeEntry = await measureStage("beforeRead", () =>
-        deps.getRawEntry(config, entryId, false)
-      );
-      const options = await deps.getFormOptions(formId, ["machineId"]);
+      const formOptions = await deps.getFormOptions(formId, ["machineId"]);
+      beforeEntry = await loadBeforeEntry();
       processCodeDefault = resolveCreatePayloadProcessCodeDefault(
         config,
         beforeEntry,
-        options.machineId ?? []
+        formOptions.machineId ?? []
       );
       if (batchSharedState) {
         batchSharedState.processCodeDefault = processCodeDefault;
@@ -262,11 +274,7 @@ export async function runCreateReportFlow(args: {
   );
 
   if (!beforeRowsFromBatch || !workOrderNoFromBatch) {
-    beforeEntry =
-      beforeEntry ??
-      (await measureStage("beforeRead", () =>
-        deps.getRawEntry(config, entryId, false)
-      ));
+    beforeEntry = await loadBeforeEntry();
   }
 
   const subtableRowData = deps.buildSubtableRowData(normalizedPayload, config);
@@ -336,12 +344,23 @@ export async function runCreateReportFlow(args: {
   // 批次模式則先排背景 reverify，避免每列都同步等 live Ragic GET；若排不進佇列才退回同步 verify。
   // 只驗 workOrderNo 跟 type；depUnit/prodType 是 Ragic 推算欄位、會被 workflow 轉換，
   // 不適合嚴格比對（會誤殺合法 entry）
+  let verifiedForm16Entry: RagicRecord | null = null;
   if (createdForm16RowId) {
     const form16RowId = createdForm16RowId;
     const expectedForm16Entry = {
       workOrderNo,
       type: resolvedReportType.type,
     };
+    const durableCreateKey = options.createIdempotencyKey ?? options.clientMutationId;
+    const reverifyIdempotencyIdentity = durableCreateKey
+      ? {
+          clientRowKey: durableCreateKey,
+          idempotencySource: `work-report-${formId}`,
+          ...(options.idempotencyReservationToken
+            ? { idempotencyReservationToken: options.idempotencyReservationToken }
+            : {}),
+        }
+      : {};
     const enqueueReverify = async (errorMessage: string) =>
       form16WriteReverifyService.enqueue({
         form16Path: form16WritePath,
@@ -360,6 +379,7 @@ export async function runCreateReportFlow(args: {
         workReportFormId: formId,
         workReportEntryId: entryId,
         workOrderNo,
+        ...reverifyIdempotencyIdentity,
       });
 
     await measureStage("verifyWrite", async () => {
@@ -382,7 +402,7 @@ export async function runCreateReportFlow(args: {
         }
       }
 
-      await assertForm16EntryStored(
+      verifiedForm16Entry = await assertForm16EntryStored(
         form16WritePath,
         form16RowId,
         expectedForm16Entry,
@@ -398,6 +418,7 @@ export async function runCreateReportFlow(args: {
               workReportFormId: formId,
               workReportEntryId: entryId,
               workOrderNo,
+              ...reverifyIdempotencyIdentity,
             });
           },
         }
@@ -414,6 +435,15 @@ export async function runCreateReportFlow(args: {
     confirmedTargetRow = {
       rowId: createdForm16RowId,
       rowData: {},
+    };
+    latestRows = [
+      confirmedTargetRow,
+      ...beforeRows.filter((row) => row.rowId !== createdForm16RowId),
+    ];
+  } else if (createdForm16RowId && verifiedForm16Entry) {
+    confirmedTargetRow = {
+      rowId: createdForm16RowId,
+      rowData: verifiedForm16Entry,
     };
     latestRows = [
       confirmedTargetRow,

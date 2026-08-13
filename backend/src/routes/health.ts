@@ -5,11 +5,16 @@ import { SERVER_DEPLOY_VERSION } from "../observability/deployVersionState";
 import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
 import { form16WriteReverifyService } from "../services/form16/form16WriteReverifyService";
 import { ragicCallbackRefreshService } from "../services/ragicCallbackRefreshService";
+import {
+  getRuntimeHealthSnapshot,
+  type RuntimeHealthSnapshot,
+} from "../observability/runtimeHealthLogger";
 
 interface HealthRouterDeps {
   getForm16WriteReverifyStats?: () => { pending: number; failed: number; total: number };
   getRagicSchedulerStats?: () => unknown;
   getRagicCallbackRefreshStats?: () => unknown;
+  getRuntimeHealthSnapshot?: () => RuntimeHealthSnapshot | null;
 }
 
 function isDetailRequested(value: unknown): boolean {
@@ -26,6 +31,8 @@ export function createHealthRouter(deps: HealthRouterDeps = {}): Router {
     deps.getRagicSchedulerStats ?? (() => ragicRequestScheduler.getStats());
   const getRagicCallbackRefreshStats =
     deps.getRagicCallbackRefreshStats ?? (() => ragicCallbackRefreshService.getStats());
+  const readRuntimeHealthSnapshot =
+    deps.getRuntimeHealthSnapshot ?? getRuntimeHealthSnapshot;
 
   router.get("/health", (req, res) => {
     const payload: Record<string, unknown> = {
@@ -40,6 +47,7 @@ export function createHealthRouter(deps: HealthRouterDeps = {}): Router {
     if (isDetailRequested(req.query.detail)) {
       payload.ragicScheduler = getRagicSchedulerStats();
       payload.ragicCallbackRefresh = getRagicCallbackRefreshStats();
+      payload.runtime = readRuntimeHealthSnapshot();
     }
 
     res.json(payload);

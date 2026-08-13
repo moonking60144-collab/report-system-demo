@@ -1,14 +1,15 @@
-import { memo, useCallback, useRef, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "react-i18next";
 import type { WorkReportRecord } from "../../../api/workReport";
+import type { ColumnDisplayMode } from "../types";
 import { parseSemanticBoolean } from "../utils";
 import { FixedHorizontalScrollbar } from "./FixedHorizontalScrollbar";
 
 interface WorkReportTableSectionProps {
   columns: ColumnsType<WorkReportRecord>;
-  columnDisplayMode: "compact" | "fit" | "full";
+  columnDisplayMode: ColumnDisplayMode;
   visibleRecords: WorkReportRecord[];
   pageFrom: number;
   pageTo: number;
@@ -19,10 +20,26 @@ interface WorkReportTableSectionProps {
   hasMoreForPager: boolean;
   softBusy: boolean;
   softBusyLabel: string | null;
+  stickyHeaderOffset: number;
   highlightedEntryId: string | null;
   onPrevPage: () => void;
   onNextPage: () => void;
   onOpenDetail: (entryId: string) => void;
+}
+
+const LIST_VIRTUALIZATION_RECORD_THRESHOLD = 40;
+const VIRTUAL_TABLE_MIN_HEIGHT = 360;
+const VIRTUAL_TABLE_MAX_HEIGHT = 640;
+const VIRTUAL_TABLE_RESERVED_HEIGHT = 160;
+const VIRTUAL_COLUMN_FALLBACK_WIDTH = 120;
+
+function getVirtualScrollWidth(columns: ColumnsType<WorkReportRecord>): number {
+  return columns.reduce((total, column) => {
+    const width = "width" in column && typeof column.width === "number"
+      ? column.width
+      : VIRTUAL_COLUMN_FALLBACK_WIDTH;
+    return total + width;
+  }, 0);
 }
 
 function shouldIgnoreRowClick(event: MouseEvent<HTMLElement>): boolean {
@@ -46,6 +63,7 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
   hasMoreForPager,
   softBusy,
   softBusyLabel,
+  stickyHeaderOffset,
   highlightedEntryId,
   onPrevPage,
   onNextPage,
@@ -53,8 +71,41 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
 }: WorkReportTableSectionProps) {
   const { t } = useTranslation(["workReport", "common"]);
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
-  const horizontalScrollWidth: number | string =
-    columnDisplayMode === "fit" ? "max-content" : 3200;
+  const shouldVirtualize = visibleRecords.length >= LIST_VIRTUALIZATION_RECORD_THRESHOLD;
+  const [viewportHeight, setViewportHeight] = useState(() =>
+    typeof window === "undefined" ? 900 : window.innerHeight
+  );
+  useEffect(() => {
+    if (!shouldVirtualize) {
+      return;
+    }
+    const updateViewportHeight = () => {
+      setViewportHeight(window.innerHeight);
+    };
+    updateViewportHeight();
+    window.addEventListener("resize", updateViewportHeight);
+    return () => {
+      window.removeEventListener("resize", updateViewportHeight);
+    };
+  }, [shouldVirtualize]);
+  const virtualScrollHeight = Math.max(
+    VIRTUAL_TABLE_MIN_HEIGHT,
+    Math.min(
+      VIRTUAL_TABLE_MAX_HEIGHT,
+      viewportHeight - stickyHeaderOffset - VIRTUAL_TABLE_RESERVED_HEIGHT
+    )
+  );
+  const virtualScrollWidth = useMemo(() => getVirtualScrollWidth(columns), [columns]);
+  const horizontalScrollWidth: number | string = shouldVirtualize
+    ? columnDisplayMode === "fit"
+      ? virtualScrollWidth
+      : Math.max(3200, virtualScrollWidth)
+    : columnDisplayMode === "fit"
+      ? "max-content"
+      : 3200;
+  const tableScroll = shouldVirtualize
+    ? { x: horizontalScrollWidth, y: virtualScrollHeight }
+    : { x: horizontalScrollWidth };
   const buildRowClassName = useCallback(
     (record: WorkReportRecord) => {
       const value = parseSemanticBoolean(record.siteRunning);
@@ -107,13 +158,14 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
           dataSource={visibleRecords}
           pagination={false}
           size="small"
-          scroll={{ x: horizontalScrollWidth }}
-          sticky={{ offsetHeader: 0, offsetScroll: 8 }}
+          scroll={tableScroll}
+          virtual={shouldVirtualize}
+          sticky={{ offsetHeader: stickyHeaderOffset, offsetScroll: 8 }}
           rowClassName={buildRowClassName}
           onRow={buildRowProps}
         />
       </div>
-      <FixedHorizontalScrollbar tableWrapRef={tableWrapRef} />
+      <FixedHorizontalScrollbar tableWrapRef={tableWrapRef} enabled={!shouldVirtualize} />
 
       <div className="pager">
         <span>{t("common:pager.showingRange", { from: pageFrom, to: pageTo })}</span>

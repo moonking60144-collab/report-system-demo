@@ -13,6 +13,35 @@ import { resolveRequestClientIdentity } from "../infra/requestClientIdentity";
 
 const realtimeEventsRouter = Router();
 const HEARTBEAT_INTERVAL_MS = 20_000;
+const activeSseConnections = new Map<string, { closeForShutdown: () => void }>();
+let acceptingSseConnections = true;
+let activeHeartbeatCount = 0;
+let activeEventListenerCount = 0;
+
+export interface RealtimeSseStats {
+  acceptingConnections: boolean;
+  activeConnectionCount: number;
+  activeHeartbeatCount: number;
+  activeEventListenerCount: number;
+}
+
+export function getRealtimeSseStats(): RealtimeSseStats {
+  return {
+    acceptingConnections: acceptingSseConnections,
+    activeConnectionCount: activeSseConnections.size,
+    activeHeartbeatCount,
+    activeEventListenerCount,
+  };
+}
+
+export function closeRealtimeSseConnections(): number {
+  acceptingSseConnections = false;
+  const activeConnections = Array.from(activeSseConnections.values());
+  for (const connection of activeConnections) {
+    connection.closeForShutdown();
+  }
+  return activeConnections.length;
+}
 
 function writeSseEvent(
   res: Response,
@@ -26,6 +55,16 @@ function writeSseEvent(
 realtimeEventsRouter.get(
   "/events",
   asyncHandler(async (req, res) => {
+    if (!acceptingSseConnections) {
+      res.status(503).json({
+        error: {
+          code: "SERVER_SHUTTING_DOWN",
+          message: "伺服器正在關閉，暫不接受新的即時事件連線。",
+        },
+      });
+      return;
+    }
+
     // EventSource 不支援 custom header，clientId / tabId / bootId 走 query string 傳進來
     const debugClientId = String(req.query.clientId ?? "").trim() || null;
     const debugTabId = String(req.query.tabId ?? "").trim() || null;
@@ -108,6 +147,7 @@ realtimeEventsRouter.get(
         }
       }
     });
+    activeEventListenerCount += 1;
 
     // Heartbeat write 失敗（client 掉線、proxy 斷連）→ 主動 destroy request，觸發 close handler 清 presence
     // 否則要等下個 tick 才發現，presence 可能謊報 online 最多 20s
@@ -132,10 +172,20 @@ realtimeEventsRouter.get(
         }
       }
     }, HEARTBEAT_INTERVAL_MS);
+    activeHeartbeatCount += 1;
 
-    req.on("close", () => {
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
       clearInterval(heartbeat);
+      activeHeartbeatCount -= 1;
       unsubscribe();
+      activeEventListenerCount -= 1;
+      req.removeListener("close", handleRequestClose);
+      activeSseConnections.delete(sseConnectionId);
       if (debugClientId && debugTabId) {
         try {
           workReportClientPresenceStore.markDisconnected(
@@ -160,12 +210,41 @@ realtimeEventsRouter.get(
         debugTabId,
         ip: identity.effectiveIp,
       });
+    };
+    const handleRequestClose = () => {
+      cleanup();
       try {
         res.end();
       } catch {
         // ignore — 連線已斷
       }
-    });
+    };
+    const closeForShutdown = () => {
+      try {
+        writeSseEvent(res, "shutdown", {
+          status: "closing",
+          at: new Date().toISOString(),
+          bootId: SERVER_BOOT_ID,
+          deployVersion: SERVER_DEPLOY_VERSION,
+        });
+      } catch (error) {
+        workReportDebugLog("sse", "shutdown-write-failed", {
+          sseConnectionId,
+          debugClientId,
+          debugTabId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      cleanup();
+      try {
+        res.end();
+      } catch {
+        // ignore — 連線已斷
+      }
+    };
+
+    req.once("close", handleRequestClose);
+    activeSseConnections.set(sseConnectionId, { closeForShutdown });
   })
 );
 

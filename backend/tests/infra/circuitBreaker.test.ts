@@ -111,6 +111,7 @@ test("CircuitBreakerOpenError 帶 retryAfterMs 資訊", () => {
       assert.fail(`expected CircuitBreakerOpenError, got ${String(err)}`);
     }
     assert.equal(err.retryAfterMs, 700);
+    assert.equal(err.code, "RAGIC_CIRCUIT_OPEN");
   }
 });
 

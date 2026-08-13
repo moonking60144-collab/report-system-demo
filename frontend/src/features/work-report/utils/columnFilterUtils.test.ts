@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildBackendColumnFilters,
   compareColumnCellValues,
+  countActiveColumnFilters,
   hasActiveColumnFilterRule,
   hasActiveColumnFilters,
 } from "./columnFilterUtils";
@@ -56,6 +57,16 @@ describe("hasActiveColumnFilters", () => {
         b: { textQuery: "x" },
       })
     ).toBe(true);
+  });
+
+  test("只計算有作用的欄位條件，不以 token 數量膨脹 badge", () => {
+    expect(
+      countActiveColumnFilters({
+        status: { selectedTokens: ["未結案", "已結案"] },
+        machineCode: { textQuery: "W5" },
+        empty: { textQuery: " " },
+      })
+    ).toBe(2);
   });
 });
 

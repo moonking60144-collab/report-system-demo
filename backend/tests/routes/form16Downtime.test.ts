@@ -1,11 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import form16DowntimeRouter from "../../src/routes/form16Downtime";
 import { errorHandler } from "../../src/middleware/errorHandler";
-import { form16DowntimeService } from "../../src/services/form16/form16DowntimeService";
+import {
+  form16DowntimeService,
+  type Form16DowntimeMutationOptions,
+  type UpdateForm16DowntimeInput,
+} from "../../src/services/form16/form16DowntimeService";
+import { form16DowntimeCallbackRefreshService } from "../../src/services/form16/form16DowntimeCallbackRefreshService";
+import {
+  FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+  runForm16DowntimeMutationExclusive,
+} from "../../src/services/form16/form16DowntimeMutationQueue";
+import { getWorkReportEntryMutationQueueStats } from "../../src/services/work-report/workReportEntryMutationQueue";
+import { workReportTaskRegistryService } from "../../src/services/work-report/workReportTaskRegistryService";
+import type { Form16DowntimeRecord } from "../../src/types/form16Downtime";
+import {
+  recordAuditLogRepository,
+  type RecordAuditLogInsertInput,
+} from "../../src/storage/sqlite/recordAuditLogRepository";
 
 async function withTestServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
   const app = express();
@@ -38,6 +55,9 @@ async function waitForTask(
   status: string;
   entryId: string | null;
   queueKey?: string | null;
+  lifecycleState?: string;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
 }> {
@@ -47,6 +67,9 @@ async function waitForTask(
     status: string;
     entryId: string | null;
     queueKey?: string | null;
+    lifecycleState?: string;
+    acceptedAt?: string | null;
+    confirmedAt?: string | null;
     errorCode?: string | null;
     errorMessage?: string | null;
   } | null = null;
@@ -60,6 +83,9 @@ async function waitForTask(
         status: string;
         entryId: string | null;
         queueKey?: string | null;
+        lifecycleState?: string;
+        acceptedAt?: string | null;
+        confirmedAt?: string | null;
         errorCode?: string | null;
         errorMessage?: string | null;
       };
@@ -73,6 +99,21 @@ async function waitForTask(
   throw new Error(
     `task ${taskId} did not reach ${expectedStatus}; last=${JSON.stringify(lastTask)}`
   );
+}
+
+async function waitForPendingMutationTasks(expectedMinimum: number): Promise<void> {
+  for (let index = 0; index < 50; index += 1) {
+    if (getWorkReportEntryMutationQueueStats().pendingTaskCount >= expectedMinimum) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`mutation queue pending task count did not reach ${expectedMinimum}`);
+}
+
+function percentile(values: number[], ratio: number): number {
+  const ordered = [...values].sort((left, right) => left - right);
+  return ordered[Math.min(ordered.length - 1, Math.ceil(ordered.length * ratio) - 1)] ?? 0;
 }
 
 test("POST /api/downtime/records 回 pending taskId，不等待 Ragic mutation 完成", async (t) => {
@@ -97,21 +138,38 @@ test("POST /api/downtime/records 回 pending taskId，不等待 Ragic mutation �
         clientRowKey: "row-key-1",
       }),
     });
-    const payload = (await response.json()) as { data: { taskId: string; status: string } };
+    const payload = (await response.json()) as {
+      data: {
+        taskId: string;
+        status: string;
+        lifecycleState: string;
+        acceptedAt: string;
+        confirmedAt: string | null;
+      };
+    };
 
     assert.equal(response.status, 202);
     assert.equal(payload.data.status, "pending");
+    assert.equal(payload.data.lifecycleState, "accepted");
+    assert.ok(payload.data.acceptedAt);
+    assert.equal(payload.data.confirmedAt, null);
 
     const runningTask = await waitForTask(baseUrl, payload.data.taskId, "running");
     assert.equal(runningTask.entryId, null);
     assert.equal(runningTask.taskType, "create-downtime");
-    assert.equal(runningTask.queueKey, "16:downtime:create");
+    assert.equal(runningTask.queueKey, FORM16_DOWNTIME_MUTATION_QUEUE_KEY);
+    assert.equal(runningTask.lifecycleState, "running");
+    assert.equal(runningTask.acceptedAt, payload.data.acceptedAt);
+    assert.equal(runningTask.confirmedAt, null);
 
     assert.ok(resolveCreate);
     resolveCreate();
 
     const successTask = await waitForTask(baseUrl, payload.data.taskId, "success");
     assert.equal(successTask.entryId, "123456");
+    assert.equal(successTask.lifecycleState, "success");
+    assert.equal(successTask.acceptedAt, payload.data.acceptedAt);
+    assert.ok(successTask.confirmedAt);
   });
 });
 
@@ -210,6 +268,28 @@ test("POST /api/downtime/records 相同 clientRowKey 未完成時回同一個 ta
     assert.ok(resolveCreate);
     resolveCreate();
     await waitForTask(baseUrl, firstPayload.data.taskId, "success");
+
+    const completedRetryResponse = await fetch(`${baseUrl}/api/downtime/records`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const completedRetryPayload = (await completedRetryResponse.json()) as {
+      data: {
+        taskId: string;
+        status: string;
+        lifecycleState: string;
+        acceptedAt: string | null;
+        confirmedAt: string | null;
+      };
+    };
+    assert.equal(completedRetryResponse.status, 202);
+    assert.equal(completedRetryPayload.data.taskId, firstPayload.data.taskId);
+    assert.equal(completedRetryPayload.data.status, "success");
+    assert.equal(completedRetryPayload.data.lifecycleState, "success");
+    assert.ok(completedRetryPayload.data.acceptedAt);
+    assert.ok(completedRetryPayload.data.confirmedAt);
+    assert.equal(createCallCount, 1);
   });
 });
 
@@ -254,6 +334,435 @@ test("POST /api/downtime/records 同 clientRowKey failed 後可重送成新 task
 
     const successTask = await waitForTask(baseUrl, secondPayload.data.taskId, "success");
     assert.equal(successTask.entryId, "123458");
+  });
+});
+
+test("PATCH /api/downtime/records/:entryId?async=1 先回 accepted，再由共用 barrier 執行 authoritative update", async (t) => {
+  const clientMutationId = `downtime-update-${randomUUID()}`;
+  let resolveUpdate: (() => void) | null = null;
+  let receivedOptions: Record<string, unknown> | null = null;
+  t.mock.method(recordAuditLogRepository, "insert", async () => undefined);
+  t.mock.method(
+    form16DowntimeService,
+    "updateRecord",
+    (
+      _entryId: string,
+      _patch: UpdateForm16DowntimeInput,
+      options: Form16DowntimeMutationOptions
+    ) => {
+      receivedOptions = options as Record<string, unknown>;
+      return new Promise<{ id: string; beforeSnapshot: Form16DowntimeRecord }>((resolve) => {
+        resolveUpdate = () =>
+          resolve({
+            id: "123480",
+            beforeSnapshot: {
+              id: "123480",
+              snapshotHash: "before-hash",
+              date: "2026/08/12",
+              machineId: "P10",
+              processCode: "TI01",
+              operatorId: null,
+              operatorName: null,
+              reportType: "TI搓牙",
+              startTime: "08:00",
+              endTime: "17:00",
+              breakTime: "1.00",
+              plannedIdleMinutes: 480,
+              remark: "before",
+              workOrderNo: null,
+            },
+          });
+      });
+    }
+  );
+
+  await withTestServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/downtime/records/123480?async=1`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "x-client-mutation-id": clientMutationId,
+      },
+      body: JSON.stringify({
+        remark: "after",
+        expectedSnapshotHash: "before-hash",
+      }),
+    });
+    const payload = (await response.json()) as {
+      data: {
+        taskId: string;
+        status: string;
+        lifecycleState: string;
+        acceptedAt: string;
+        confirmedAt: string | null;
+      };
+    };
+
+    assert.equal(response.status, 202);
+    assert.ok(["pending", "running"].includes(payload.data.status));
+    assert.ok(["accepted", "running"].includes(payload.data.lifecycleState));
+    assert.ok(payload.data.acceptedAt);
+    assert.equal(payload.data.confirmedAt, null);
+    await waitForTask(baseUrl, payload.data.taskId, "running");
+    assert.deepEqual(receivedOptions, {
+      expectedSnapshotHash: "before-hash",
+      deferProjection: true,
+    });
+
+    assert.ok(resolveUpdate);
+    resolveUpdate();
+    const terminal = await waitForTask(baseUrl, payload.data.taskId, "success");
+    assert.equal(terminal.taskType, "update-downtime");
+    assert.equal(terminal.lifecycleState, "success");
+    assert.ok(terminal.confirmedAt);
+  });
+});
+
+test("DELETE /api/downtime/records/:entryId?async=1 相同 mutation id 不會排入第二次刪除", async (t) => {
+  const clientMutationId = `downtime-delete-${randomUUID()}`;
+  let resolveDelete: (() => void) | null = null;
+  let deleteCallCount = 0;
+  t.mock.method(
+    form16DowntimeService,
+    "deleteRecord",
+    () => {
+      deleteCallCount += 1;
+      return new Promise<{ deleted: true; beforeSnapshot: Form16DowntimeRecord }>((resolve) => {
+        resolveDelete = () =>
+          resolve({
+            deleted: true,
+            beforeSnapshot: {
+              id: "123481",
+              snapshotHash: "delete-hash",
+              date: "2026/08/12",
+              machineId: "P11",
+              processCode: "TI01",
+              operatorId: null,
+              operatorName: null,
+              reportType: "TI搓牙",
+              startTime: "08:00",
+              endTime: "17:00",
+              breakTime: "1.00",
+              plannedIdleMinutes: 480,
+              remark: null,
+              workOrderNo: null,
+            },
+          });
+      });
+    }
+  );
+
+  await withTestServer(async (baseUrl) => {
+    const sendDelete = () =>
+      fetch(`${baseUrl}/api/downtime/records/123481?async=1`, {
+        method: "DELETE",
+        headers: {
+          "x-client-mutation-id": clientMutationId,
+          "x-downtime-snapshot-hash": "delete-hash",
+        },
+      });
+    const firstResponse = await sendDelete();
+    const firstPayload = (await firstResponse.json()) as { data: { taskId: string } };
+    await waitForTask(baseUrl, firstPayload.data.taskId, "running");
+    const secondResponse = await sendDelete();
+    const secondPayload = (await secondResponse.json()) as { data: { taskId: string } };
+
+    assert.equal(firstResponse.status, 202);
+    assert.equal(secondResponse.status, 202);
+    assert.equal(secondPayload.data.taskId, firstPayload.data.taskId);
+    assert.equal(deleteCallCount, 1);
+
+    assert.ok(resolveDelete);
+    resolveDelete();
+    const terminal = await waitForTask(baseUrl, firstPayload.data.taskId, "success");
+    assert.equal(terminal.taskType, "delete-downtime");
+  });
+});
+
+test("Form16 async route 的受控 accepted latency 不等待 terminal worker", async (t) => {
+  let releaseFirstWorker: () => void = () => {
+    throw new Error("first Form16 latency worker has not started");
+  };
+  let workerCallCount = 0;
+  t.mock.method(form16DowntimeService, "updateRecord", async (entryId: string) => {
+    workerCallCount += 1;
+    if (workerCallCount === 1) {
+      await new Promise<void>((resolve) => {
+        releaseFirstWorker = resolve;
+      });
+    }
+    return {
+      id: entryId,
+      beforeSnapshot: {
+        id: entryId,
+        snapshotHash: "latency-hash",
+        date: "2026/08/12",
+        machineId: "P10",
+        processCode: "TI01",
+        operatorId: null,
+        operatorName: null,
+        reportType: "TI搓牙",
+        startTime: "08:00",
+        endTime: "17:00",
+        breakTime: "1.00",
+        plannedIdleMinutes: 480,
+        remark: "latency",
+        workOrderNo: null,
+      },
+    };
+  });
+
+  const samples: number[] = [];
+  let lastTaskId = "";
+  await withTestServer(async (baseUrl) => {
+    for (let index = 0; index < 20; index += 1) {
+      const startedAt = performance.now();
+      const response = await fetch(`${baseUrl}/api/downtime/records/123490?async=1`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-client-mutation-id": `downtime-latency-${randomUUID()}`,
+        },
+        body: JSON.stringify({
+          remark: `latency-${index}`,
+          expectedSnapshotHash: "latency-hash",
+        }),
+      });
+      samples.push(performance.now() - startedAt);
+      assert.equal(response.status, 202);
+      const payload = (await response.json()) as { data: { taskId: string } };
+      lastTaskId = payload.data.taskId;
+    }
+
+    assert.equal(workerCallCount, 1);
+    const p50 = percentile(samples, 0.5);
+    const p95 = percentile(samples, 0.95);
+    console.info("[accepted-latency][form16-mock-http]", {
+      samples: samples.length,
+      p50Ms: Number(p50.toFixed(2)),
+      p95Ms: Number(p95.toFixed(2)),
+    });
+    assert.ok(p50 < 500, `controlled accepted p50 ${p50}ms should stay below 500ms`);
+    assert.ok(p95 < 1000, `controlled accepted p95 ${p95}ms should stay below 1000ms`);
+
+    releaseFirstWorker();
+    await waitForTask(baseUrl, lastTaskId, "success");
+  });
+});
+
+test("Form 16 create 與同步 update 共用同一個 mutation barrier", async (t) => {
+  let resolveCreate: (() => void) | null = null;
+  let updateStarted = false;
+  t.mock.method(
+    form16DowntimeService,
+    "createRecord",
+    () =>
+      new Promise<{ created: true; entryId: string }>((resolve) => {
+        resolveCreate = () => resolve({ created: true, entryId: "123470" });
+      })
+  );
+  t.mock.method(form16DowntimeService, "updateRecord", async () => {
+    updateStarted = true;
+    return {
+      id: "123470",
+      beforeSnapshot: {
+        id: "123470",
+        snapshotHash: null,
+        date: "2026/07/20",
+        machineId: "P10",
+        processCode: "TI01",
+        operatorId: null,
+        operatorName: null,
+        reportType: null,
+        startTime: null,
+        endTime: null,
+        breakTime: null,
+        plannedIdleMinutes: 480,
+        remark: null,
+        workOrderNo: null,
+      },
+    };
+  });
+
+  await withTestServer(async (baseUrl) => {
+    const createResponse = await fetch(`${baseUrl}/api/downtime/records`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: "2026-07-20",
+        machineId: "P10",
+        processCode: "TI01",
+        clientRowKey: "row-key-shared-mutation-barrier",
+      }),
+    });
+    const createPayload = (await createResponse.json()) as {
+      data: { taskId: string };
+    };
+    await waitForTask(baseUrl, createPayload.data.taskId, "running");
+
+    const updateResponsePromise = fetch(`${baseUrl}/api/downtime/records/123470`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remark: "queued update" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(updateStarted, false);
+
+    assert.ok(resolveCreate);
+    resolveCreate();
+    await waitForTask(baseUrl, createPayload.data.taskId, "success");
+
+    const updateResponse = await updateResponsePromise;
+    assert.equal(updateResponse.status, 200);
+    assert.equal(updateStarted, true);
+  });
+});
+
+test("Form 16 update 與 delete 在同一個 mutation barrier 依序執行", async (t) => {
+  let releaseBlocker: (() => void) | null = null;
+  const executionOrder: string[] = [];
+  const blocker = runForm16DowntimeMutationExclusive(
+    () =>
+      new Promise<void>((resolve) => {
+        releaseBlocker = resolve;
+      })
+  );
+  t.mock.method(form16DowntimeService, "updateRecord", async () => {
+    executionOrder.push("update");
+    return {
+      id: "123471",
+      beforeSnapshot: {
+        id: "123471",
+        snapshotHash: null,
+        date: "2026/07/20",
+        machineId: "P10",
+        processCode: "TI01",
+        operatorId: null,
+        operatorName: null,
+        reportType: null,
+        startTime: null,
+        endTime: null,
+        breakTime: null,
+        plannedIdleMinutes: 480,
+        remark: null,
+        workOrderNo: null,
+      },
+    };
+  });
+  t.mock.method(form16DowntimeService, "deleteRecord", async () => {
+    executionOrder.push("delete");
+    return {
+      deleted: true as const,
+      beforeSnapshot: {
+        id: "123471",
+        snapshotHash: null,
+        date: "2026/07/20",
+        machineId: "P10",
+        processCode: "TI01",
+        operatorId: null,
+        operatorName: null,
+        reportType: null,
+        startTime: null,
+        endTime: null,
+        breakTime: null,
+        plannedIdleMinutes: 480,
+        remark: null,
+        workOrderNo: null,
+      },
+    };
+  });
+
+  await withTestServer(async (baseUrl) => {
+    const updateResponsePromise = fetch(`${baseUrl}/api/downtime/records/123471`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remark: "first" }),
+    });
+    await waitForPendingMutationTasks(2);
+    const deleteResponsePromise = fetch(`${baseUrl}/api/downtime/records/123471`, {
+      method: "DELETE",
+    });
+    await waitForPendingMutationTasks(3);
+    assert.deepEqual(executionOrder, []);
+
+    assert.ok(releaseBlocker);
+    releaseBlocker();
+    await blocker;
+
+    const [updateResponse, deleteResponse] = await Promise.all([
+      updateResponsePromise,
+      deleteResponsePromise,
+    ]);
+    assert.equal(updateResponse.status, 200);
+    assert.equal(deleteResponse.status, 200);
+    const updatePayload = (await updateResponse.json()) as {
+      data: {
+        lifecycleState: string;
+        acceptedAt: string;
+        confirmedAt: string | null;
+      };
+    };
+    const deletePayload = (await deleteResponse.json()) as {
+      data: {
+        lifecycleState: string;
+        acceptedAt: string;
+        confirmedAt: string | null;
+      };
+    };
+    assert.equal(updatePayload.data.lifecycleState, "success");
+    assert.ok(updatePayload.data.acceptedAt);
+    assert.ok(updatePayload.data.confirmedAt);
+    assert.equal(deletePayload.data.lifecycleState, "success");
+    assert.ok(deletePayload.data.acceptedAt);
+    assert.ok(deletePayload.data.confirmedAt);
+    assert.deepEqual(executionOrder, ["update", "delete"]);
+  });
+});
+
+test("Form 16 update audit 使用 worker 內即時讀到的 mutation preimage", async (t) => {
+  const authoritativeBeforeSnapshot = {
+    id: "123472",
+    snapshotHash: null,
+    date: "2026/07/20",
+    machineId: "P12",
+    processCode: "TI01",
+    operatorId: null,
+    operatorName: null,
+    reportType: "TI搓牙",
+    startTime: "08:00",
+    endTime: "17:00",
+    breakTime: "1.00",
+    plannedIdleMinutes: 480,
+    remark: "authoritative-before",
+    workOrderNo: null,
+  };
+  let auditInput: RecordAuditLogInsertInput | null = null;
+  t.mock.method(form16DowntimeService, "updateRecord", async () => ({
+    id: "123472",
+    beforeSnapshot: authoritativeBeforeSnapshot,
+  }));
+  t.mock.method(recordAuditLogRepository, "insert", async (input: RecordAuditLogInsertInput) => {
+    auditInput = input;
+  });
+
+  await withTestServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/downtime/records/123472`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ remark: "after" }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.ok(auditInput);
+    assert.deepEqual(auditInput.beforeSnapshot, authoritativeBeforeSnapshot);
+    assert.deepEqual(auditInput.afterPatch, {
+      date: undefined,
+      machineId: undefined,
+      processCode: undefined,
+      operatorId: undefined,
+      plannedIdleMinutes: undefined,
+      remark: "after",
+    });
   });
 });
 
@@ -391,4 +900,54 @@ test("GET /api/downtime/tasks 預設依 request actorClientId 過濾，不支援
       )
     );
   });
+});
+
+test("POST /api/forms/16/ragic-callback 在 shutdown admission 關閉後回 503 且不建立 task", async () => {
+  const previousToken = process.env.RAGIC_CALLBACK_TOKEN;
+  process.env.RAGIC_CALLBACK_TOKEN = "form16-callback-shutdown-test";
+  const entryId = "1600000001";
+  const beforeCount = workReportTaskRegistryService.listTasks({
+    formId: "16",
+    entryId,
+    taskType: "callback-refresh",
+    limit: 200,
+  }).length;
+  form16DowntimeCallbackRefreshService.closeAdmission();
+
+  try {
+    await withTestServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/forms/16/ragic-callback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-ragic-callback-token": "form16-callback-shutdown-test",
+        },
+        body: JSON.stringify({
+          entryId,
+          eventType: "entry-updated",
+          source: "test",
+        }),
+      });
+      const payload = (await response.json()) as {
+        error: { code: string };
+      };
+
+      assert.equal(response.status, 503);
+      assert.equal(payload.error.code, "RAGIC_CALLBACK_QUEUE_CLOSED");
+    });
+
+    const afterCount = workReportTaskRegistryService.listTasks({
+      formId: "16",
+      entryId,
+      taskType: "callback-refresh",
+      limit: 200,
+    }).length;
+    assert.equal(afterCount, beforeCount);
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.RAGIC_CALLBACK_TOKEN;
+    } else {
+      process.env.RAGIC_CALLBACK_TOKEN = previousToken;
+    }
+  }
 });

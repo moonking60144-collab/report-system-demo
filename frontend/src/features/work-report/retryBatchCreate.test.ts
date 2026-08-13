@@ -133,6 +133,25 @@ describe("retryBatchCreateFromRecord", () => {
     )).toBe("indeterminate");
   });
 
+  it("blocks full retry when row key mapping failed after Ragic create", async () => {
+    vi.mocked(fetchWorkReportQueueTask).mockResolvedValueOnce(
+      createFailedBatchTask({
+        batchWriteIndeterminate: true,
+        errorCode: "BATCH_CREATE_PARTIAL_FAILURE",
+        errorMessage: "第1列：批次新增列已寫入 Ragic（rowId: 1001），但 idempotency reservation 已變更，需人工確認後再重送。",
+      })
+    );
+
+    await expect(retryBatchCreateFromRecord(createRetryRecord()))
+      .rejects.toThrow("不能重送");
+
+    expect(deleteRetryableBatchCreateRecordChain).toHaveBeenCalledWith("batch-task-1");
+    expect(createReportsBatchAccepted).not.toHaveBeenCalled();
+    expect(retryBatchCreateFinalizeAccepted).not.toHaveBeenCalled();
+    expect(replaceRetryableBatchCreateRecord).not.toHaveBeenCalled();
+    expect(enqueueRetryPoll).not.toHaveBeenCalled();
+  });
+
   it("classifies status-unknown failures separately from changed work orders", async () => {
     const task = createFailedBatchTask({
       errorCode: "ENTRY_STATUS_UNKNOWN",
@@ -144,6 +163,34 @@ describe("retryBatchCreateFromRecord", () => {
 
     await expect(retryBatchCreateFromRecord(createRetryRecord()))
       .rejects.toThrow("無法確認工令狀態");
+
+    expect(deleteRetryableBatchCreateRecordChain).toHaveBeenCalledWith("batch-task-1");
+    expect(createReportsBatchAccepted).not.toHaveBeenCalled();
+    expect(retryBatchCreateFinalizeAccepted).not.toHaveBeenCalled();
+    expect(replaceRetryableBatchCreateRecord).not.toHaveBeenCalled();
+    expect(enqueueRetryPoll).not.toHaveBeenCalled();
+  });
+
+  it("blocks legacy full retry records that have no durable row key", async () => {
+    vi.mocked(fetchWorkReportQueueTask).mockResolvedValueOnce(createFailedBatchTask());
+
+    await expect(
+      retryBatchCreateFromRecord(
+        createRetryRecord({
+          rows: [
+            {
+              payload: {
+                date: "2026/07/02",
+                machineId: "P10",
+                operatorId: "RA004",
+                startTime: "08:00",
+                endTime: "17:00",
+              },
+            },
+          ],
+        })
+      )
+    ).rejects.toThrow("缺少逐列防重識別碼");
 
     expect(deleteRetryableBatchCreateRecordChain).toHaveBeenCalledWith("batch-task-1");
     expect(createReportsBatchAccepted).not.toHaveBeenCalled();

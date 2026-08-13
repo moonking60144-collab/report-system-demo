@@ -28,17 +28,17 @@ function buildEntryWith({
   return record as RagicRecord;
 }
 
-test("verify 全部欄位都吻合 → 靜默成功，不呼叫 deleteEntry", async (t) => {
-  const getEntryMock = t.mock.method(ragicClient, "getEntry", async () =>
-    buildEntryWith({ workOrderNo: "WO-100", type: "TI搓牙" })
-  );
+test("verify 全部欄位都吻合 → 回傳 verified entry，不呼叫 deleteEntry", async (t) => {
+  const storedEntry = buildEntryWith({ workOrderNo: "WO-100", type: "TI搓牙" });
+  const getEntryMock = t.mock.method(ragicClient, "getEntry", async () => storedEntry);
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
 
-  await assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
+  const result = await assertForm16EntryStored(FORM_PATH, ENTRY_ID, {
     workOrderNo: "WO-100",
     type: "TI搓牙",
   });
 
+  assert.equal(result, storedEntry);
   assert.equal(getEntryMock.mock.callCount(), 1);
   assert.equal(deleteEntryMock.mock.callCount(), 0);
 });
@@ -112,7 +112,7 @@ test("verify 讀取錯誤可標記為狀態未知後放行，避免慢但已寫�
   const deleteEntryMock = t.mock.method(ragicClient, "deleteEntry", async () => undefined);
   const indeterminatePayloads: unknown[] = [];
 
-  await assertForm16EntryStored(
+  const result = await assertForm16EntryStored(
     FORM_PATH,
     ENTRY_ID,
     { workOrderNo: "WO-100" },
@@ -124,6 +124,7 @@ test("verify 讀取錯誤可標記為狀態未知後放行，避免慢但已寫�
     }
   );
 
+  assert.equal(result, null);
   assert.equal(getEntryMock.mock.callCount(), 1);
   assert.equal(deleteEntryMock.mock.callCount(), 0);
   assert.equal(indeterminatePayloads.length, 1);

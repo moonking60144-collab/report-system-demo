@@ -45,10 +45,13 @@ function createPayload() {
 
 describe("downtimeTaskRetryStore", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-07T00:00:00.000Z"));
     vi.stubGlobal("window", createWindowStub());
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -132,5 +135,23 @@ describe("downtimeTaskRetryStore", () => {
     );
 
     expect(getRetryableDowntimeCreateRecord("task-1")).toBeNull();
+  });
+
+  it("keeps records within seven days and drops expired records", () => {
+    saveRetryableDowntimeCreateRecord({
+      taskId: "task-fresh",
+      retryRootTaskId: "task-fresh",
+      payload: createPayload(),
+      createdAt: "2026-06-30T00:00:01.000Z",
+    });
+    saveRetryableDowntimeCreateRecord({
+      taskId: "task-expired",
+      retryRootTaskId: "task-expired",
+      payload: createPayload(),
+      createdAt: "2026-06-29T23:59:59.000Z",
+    });
+
+    expect(getRetryableDowntimeCreateRecord("task-fresh")?.taskId).toBe("task-fresh");
+    expect(getRetryableDowntimeCreateRecord("task-expired")).toBeNull();
   });
 });

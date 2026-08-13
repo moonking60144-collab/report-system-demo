@@ -1,4 +1,9 @@
-import { getOrCreateClientId, getOrCreateTabId } from "../utils/clientIdentity";
+import {
+  encodeTaskActorLabelHeader,
+  getOrCreateClientId,
+  getOrCreateTabId,
+  readWorkReportDeviceLabel,
+} from "../utils/clientIdentity";
 import { createApiClient } from "./apiClient";
 import type {
   BackendColumnFilterState,
@@ -46,6 +51,7 @@ export type {
   WorkReportFullResponse,
   WorkReportItem,
   WorkReportQueueTask,
+  WorkReportQueueTaskOperationKind,
   WorkReportQueueTaskStatus,
   WorkReportQueueTaskType,
   WorkReportRecord,
@@ -54,13 +60,18 @@ export type {
   WorkReportSyncTask,
   WorkReportSyncTaskStatus,
 } from "./workReportTypes";
+export type { MutationLifecycleState, MutationLifecycleTiming } from "./mutationLifecycleTypes";
 
 const api = createApiClient();
 
 function buildTaskActorHeaders(): Record<string, string> {
+  const deviceLabel = readWorkReportDeviceLabel();
   return {
     "x-debug-client-id": getOrCreateClientId(),
     "x-debug-tab-id": getOrCreateTabId(),
+    ...(deviceLabel
+      ? { "x-debug-device-label": encodeTaskActorLabelHeader(deviceLabel) }
+      : {}),
   };
 }
 
@@ -252,10 +263,16 @@ export async function fetchWorkReportAnalysis(
 export async function fetchWorkReportEntry(
   formId: string,
   entryId: string,
-  refresh = false
+  refresh = false,
+  options: { strictRefresh?: boolean } = {}
 ): Promise<WorkReportRecord> {
   const response = await api.get<{ data: WorkReportRecord }>(`/forms/${formId}/reports/${entryId}`, {
-    params: refresh ? { refresh: 1 } : undefined,
+    params: refresh
+      ? {
+          refresh: 1,
+          ...(options.strictRefresh ? { strictRefresh: 1 } : {}),
+        }
+      : undefined,
   });
   return response.data.data;
 }
@@ -267,6 +284,109 @@ export async function fetchFormOptions(
   const response = await api.get<{ data: FormOptionMap }>(`/forms/${formId}/options`, {
     params: fields?.length ? { fields: fields.join(",") } : undefined,
   });
+  return response.data.data;
+}
+
+export async function updateWorkOrderMainMachineAccepted(
+  formId: string,
+  entryId: string,
+  machineCode: string,
+  options: {
+    clientMutationId: string;
+    workOrderNo?: string | null;
+    expectedEntryLastUpdatedAt?: string;
+    editSessionId?: string;
+    editLockVersion?: number;
+  }
+): Promise<CreateReportTaskAcceptedResult> {
+  const response = await api.put<{ data: CreateReportTaskAcceptedResult }>(
+    `/forms/${formId}/reports/${entryId}/main-machine`,
+    { machineCode },
+    {
+      params: { async: 1 },
+      headers: {
+        ...buildTaskActorHeadersWithContext({ workOrderNo: options.workOrderNo }),
+        "x-client-mutation-id": options.clientMutationId,
+        ...(options.expectedEntryLastUpdatedAt
+          ? { "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt }
+          : {}),
+        ...(options.editSessionId
+          ? { "x-edit-session-id": options.editSessionId }
+          : {}),
+        ...(options.editLockVersion !== undefined
+          ? { "x-edit-lock-version": String(options.editLockVersion) }
+          : {}),
+      },
+    }
+  );
+  return response.data.data;
+}
+
+export async function closeWorkOrderAccepted(
+  formId: string,
+  entryId: string,
+  options: {
+    clientMutationId: string;
+    workOrderNo?: string | null;
+    expectedEntryLastUpdatedAt?: string;
+    editSessionId?: string;
+    editLockVersion?: number;
+  }
+): Promise<CreateReportTaskAcceptedResult> {
+  const response = await api.post<{ data: CreateReportTaskAcceptedResult }>(
+    `/forms/${formId}/reports/${entryId}/close`,
+    null,
+    {
+      params: { async: 1 },
+      headers: {
+        ...buildTaskActorHeadersWithContext({ workOrderNo: options.workOrderNo }),
+        "x-client-mutation-id": options.clientMutationId,
+        ...(options.expectedEntryLastUpdatedAt
+          ? { "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt }
+          : {}),
+        ...(options.editSessionId
+          ? { "x-edit-session-id": options.editSessionId }
+          : {}),
+        ...(options.editLockVersion !== undefined
+          ? { "x-edit-lock-version": String(options.editLockVersion) }
+          : {}),
+      },
+    }
+  );
+  return response.data.data;
+}
+
+export async function reopenWorkOrderAccepted(
+  formId: string,
+  entryId: string,
+  options: {
+    clientMutationId: string;
+    workOrderNo?: string | null;
+    expectedEntryLastUpdatedAt?: string;
+    editSessionId?: string;
+    editLockVersion?: number;
+  }
+): Promise<CreateReportTaskAcceptedResult> {
+  const response = await api.post<{ data: CreateReportTaskAcceptedResult }>(
+    `/forms/${formId}/reports/${entryId}/reopen`,
+    null,
+    {
+      params: { async: 1 },
+      headers: {
+        ...buildTaskActorHeadersWithContext({ workOrderNo: options.workOrderNo }),
+        "x-client-mutation-id": options.clientMutationId,
+        ...(options.expectedEntryLastUpdatedAt
+          ? { "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt }
+          : {}),
+        ...(options.editSessionId
+          ? { "x-edit-session-id": options.editSessionId }
+          : {}),
+        ...(options.editLockVersion !== undefined
+          ? { "x-edit-lock-version": String(options.editLockVersion) }
+          : {}),
+      },
+    }
+  );
   return response.data.data;
 }
 
@@ -394,6 +514,7 @@ export async function createReportAccepted(
   payload: ReportMutationPayload,
   options: {
     clientMutationId?: string;
+    createIdempotencyKey?: string;
     workOrderNo?: string | null;
     expectedEntryLastUpdatedAt?: string;
     editSessionId?: string;
@@ -412,6 +533,11 @@ export async function createReportAccepted(
         ...(options.clientMutationId
           ? {
               "x-client-mutation-id": options.clientMutationId,
+            }
+          : {}),
+        ...(options.createIdempotencyKey
+          ? {
+              "x-create-idempotency-key": options.createIdempotencyKey,
             }
           : {}),
         ...(options.expectedEntryLastUpdatedAt
@@ -541,6 +667,36 @@ export async function deleteReport(
   return response.data.data;
 }
 
+export async function updateWorkOrderSortOrderAccepted(
+  formId: string,
+  entryId: string,
+  sortOrder: number,
+  options: {
+    clientMutationId: string;
+    workOrderNo?: string | null;
+    expectedEntryLastUpdatedAt?: string;
+  }
+): Promise<CreateReportTaskAcceptedResult> {
+  const response = await api.put<{ data: CreateReportTaskAcceptedResult }>(
+    `/forms/${formId}/reports/${entryId}/sort-order`,
+    { sortOrder },
+    {
+      headers: {
+        ...buildTaskActorHeadersWithContext({
+          workOrderNo: options.workOrderNo ?? null,
+        }),
+        "x-client-mutation-id": options.clientMutationId,
+        ...(options.expectedEntryLastUpdatedAt
+          ? {
+              "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt,
+            }
+          : {}),
+      },
+    }
+  );
+  return response.data.data;
+}
+
 export async function createReportsBatchAccepted(
   formId: string,
   entryId: string,
@@ -554,7 +710,7 @@ export async function createReportsBatchAccepted(
   const body = {
     rows: rows.map((row) => ({
       payload: row.payload,
-      ...(row.clientRowKey ? { clientRowKey: row.clientRowKey } : {}),
+      clientRowKey: row.clientRowKey,
     })),
   };
   const response = await api.post<{ data: BatchCreateTaskAcceptedResult }>(

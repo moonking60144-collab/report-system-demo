@@ -8,6 +8,18 @@ export interface TaskActorContext {
   workOrderNo: string | null;
 }
 
+function decodeActorLabelHeader(value: string | undefined): string | null {
+  const encoded = String(value ?? "").trim();
+  if (!encoded) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(encoded).trim().slice(0, 60) || null;
+  } catch {
+    return encoded.slice(0, 60) || null;
+  }
+}
+
 /**
  * 從 request 收集 actor context：IP、client/tab id、device label、工令號
  * 給 audit log、task registry 等記載使用。
@@ -21,7 +33,7 @@ export function readTaskActorContext(req: {
   const identity = resolveRequestClientIdentity(req);
   const actorClientId = String(req.header("x-debug-client-id") ?? "").trim() || null;
   const actorTabId = String(req.header("x-debug-tab-id") ?? "").trim() || null;
-  const actorLabel = String(req.header("x-debug-device-label") ?? "").trim() || null;
+  const actorLabel = decodeActorLabelHeader(req.header("x-debug-device-label"));
   const workOrderNo = String(req.header("x-debug-work-order-no") ?? "").trim() || null;
   return {
     actorClientId,

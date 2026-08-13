@@ -14,6 +14,7 @@ interface BuildWorkReportColumnDefinitionsArgs {
   renderValue: (value: unknown) => ReactNode;
   renderMachineValue: (value: unknown, record: WorkReportRecord) => ReactNode;
   renderWorkOrderValue: (value: unknown, record: WorkReportRecord) => ReactNode;
+  renderSortOrderValue: (value: unknown, record: WorkReportRecord) => ReactNode;
   renderCheck: (value: unknown) => ReactNode;
   toNumber: (value: unknown) => number;
   toDateValue: (value: unknown) => number;
@@ -207,6 +208,7 @@ export function buildFormAwareColumns(args: BuildWorkReportColumnDefinitionsArgs
     renderValue,
     renderMachineValue,
     renderWorkOrderValue,
+    renderSortOrderValue,
     renderCheck,
     toNumber,
     toDateValue,
@@ -258,7 +260,7 @@ export function buildFormAwareColumns(args: BuildWorkReportColumnDefinitionsArgs
       dataIndex: "sortOrder",
       width: 80,
       sorter: (a, b) => toNumber(a.sortOrder) - toNumber(b.sortOrder),
-      render: renderValue,
+      render: renderSortOrderValue,
     },
     {
       title: "尺寸",
@@ -475,7 +477,7 @@ export function buildFormAwareColumns(args: BuildWorkReportColumnDefinitionsArgs
       ? applyFitColumnWidths(formAwareColumns)
       : formAwareColumns;
 
-  if (columnDisplayMode === "full" || columnDisplayMode === "fit") {
+  if (columnDisplayMode === "fit") {
     return widthAwareColumns;
   }
 
@@ -499,6 +501,7 @@ export function getSelectableWorkReportColumns(
     renderValue: () => null,
     renderMachineValue: () => null,
     renderWorkOrderValue: () => null,
+    renderSortOrderValue: () => null,
     renderCheck: () => null,
     toNumber: () => 0,
     toDateValue: () => 0,

@@ -1,6 +1,6 @@
 import { AxiosError } from "axios";
 import { describe, expect, it, vi } from "vitest";
-import type { CreateReportTaskResult } from "../../../api/workReport";
+import type { CreateReportTaskResult, WorkReportQueueTask } from "../../../api/workReport";
 import { CREATE_TASK_AUTO_CLEAR_MS, CREATE_TASK_STALE_AUTO_CLEAR_MS } from "../constants";
 import type { CreateTaskMonitor } from "../types";
 import {
@@ -8,7 +8,9 @@ import {
   hasTerminalTaskMonitors,
   pollCreateTaskMonitor,
   pruneExpiredTaskMonitors,
+  resolveTaskMonitorResult,
 } from "./useTaskMonitor";
+import { createWorkReportOptimisticMutation } from "../workReportOptimisticMutation";
 
 function createMonitor(
   overrides: Partial<CreateTaskMonitor> & Pick<CreateTaskMonitor, "taskId" | "status" | "updatedAt">
@@ -24,6 +26,11 @@ function createMonitor(
     kind: overrides.kind ?? "create",
     rowId: overrides.rowId,
     stale: overrides.stale,
+    lifecycleState: overrides.lifecycleState,
+    acceptedAt: overrides.acceptedAt,
+    confirmedAt: overrides.confirmedAt,
+    batchCreatedRowIds: overrides.batchCreatedRowIds,
+    optimisticMutation: overrides.optimisticMutation,
   };
 }
 
@@ -126,6 +133,28 @@ describe("pruneExpiredTaskMonitors", () => {
     expect(next).not.toBe(monitors);
     expect(next.map((item) => item.taskId)).toEqual(["fresh-stale-running"]);
   });
+
+  it("indeterminate 終態會用待查證 TTL，不會在一般完成 TTL 後過早清除", () => {
+    const now = Date.parse("2026-07-07T00:01:00.000Z");
+    const monitors = [
+      createMonitor({
+        taskId: "fresh-indeterminate",
+        status: "failed",
+        lifecycleState: "indeterminate",
+        updatedAt: new Date(now - CREATE_TASK_AUTO_CLEAR_MS).toISOString(),
+      }),
+      createMonitor({
+        taskId: "expired-indeterminate",
+        status: "failed",
+        lifecycleState: "indeterminate",
+        updatedAt: new Date(now - CREATE_TASK_STALE_AUTO_CLEAR_MS).toISOString(),
+      }),
+    ];
+
+    expect(pruneExpiredTaskMonitors(monitors, now).map((item) => item.taskId)).toEqual([
+      "fresh-indeterminate",
+    ]);
+  });
 });
 
 describe("hasTerminalTaskMonitors", () => {
@@ -174,6 +203,211 @@ describe("hasTerminalTaskMonitors", () => {
 
     expect(hasTerminalTaskMonitors(monitors)).toBe(false);
     expect(hasAutoClearableTaskMonitors(monitors)).toBe(true);
+  });
+});
+
+describe("resolveTaskMonitorResult", () => {
+  it("task terminal 會把 optimistic lifecycle 收斂成 confirmed、rolled-back 或 frozen", () => {
+    const optimisticMutation = createWorkReportOptimisticMutation({
+      taskId: "task-optimistic",
+      mutationId: "mutation-optimistic",
+      operation: "work-report-update",
+      target: {
+        domain: "work-report",
+        formId: "104",
+        entryId: "17382",
+        rowId: "row-1",
+      },
+      acceptedAt: "2026-08-12T00:00:00.000Z",
+      reconcilePolicy: "replace-target",
+      failurePolicy: "rollback",
+      previousSnapshot: { rowId: "row-1", productionQty: 10 },
+      patch: {
+        kind: "update-row",
+        rowId: "row-1",
+        payload: {
+          date: "2026/08/12",
+          machineId: "W23",
+          operatorId: "A001",
+          startTime: "08:00",
+          endTime: "09:00",
+          productionQty: 20,
+        },
+      },
+    });
+    const base = createMonitor({
+      taskId: "task-optimistic",
+      kind: "update",
+      status: "running",
+      updatedAt: "2026-08-12T00:00:01.000Z",
+      optimisticMutation,
+    });
+
+    const success = resolveTaskMonitorResult(
+      base,
+      createTaskResult({
+        taskId: "task-optimistic",
+        status: "success",
+        confirmedAt: "2026-08-12T00:00:02.000Z",
+      }),
+      (key) => key
+    );
+    expect(success.optimisticMutation?.lifecycle.optimisticState).toBe("confirmed");
+
+    const failed = resolveTaskMonitorResult(
+      base,
+      createTaskResult({
+        taskId: "task-optimistic",
+        status: "failed",
+        error: { code: "ENTRY_CONFLICT", message: "conflict" },
+      }),
+      (key) => key
+    );
+    expect(failed.optimisticMutation?.lifecycle.optimisticState).toBe("rolled-back");
+
+    const indeterminate = resolveTaskMonitorResult(
+      base,
+      createTaskResult({
+        taskId: "task-optimistic",
+        status: "failed",
+        writeIndeterminate: true,
+        error: { code: "RAGIC_WRITE_VERIFY_FAILED", message: "unknown" },
+      }),
+      (key) => key
+    );
+    expect(indeterminate.optimisticMutation?.lifecycle.optimisticState).toBe("frozen");
+  });
+
+  it("entry-level update 完成時不會製造假的 rowId", () => {
+    const monitor = resolveTaskMonitorResult(
+      createMonitor({
+        taskId: "sort-order-task",
+        kind: "update",
+        status: "running",
+        updatedAt: "2026-08-04T00:00:01.000Z",
+      }),
+      createTaskResult({
+        taskId: "sort-order-task",
+        taskType: "update-report",
+        status: "success",
+        updatedAt: "2026-08-04T00:00:02.000Z",
+        result: {},
+      }),
+      (key) => key
+    );
+
+    expect(monitor.status).toBe("success");
+    expect(monitor.rowId).toBeUndefined();
+    expect(monitor.message).toBe(
+      "workReport:messages.taskBackgroundUpdateCompleted"
+    );
+  });
+
+  it("create task 含 taskType 時仍從 nested result 取得 rowId", () => {
+    const monitor = resolveTaskMonitorResult(
+      createMonitor({
+        taskId: "create-task-1",
+        status: "running",
+        updatedAt: "2026-07-07T00:00:01.000Z",
+      }),
+      createTaskResult({
+        status: "success",
+        updatedAt: "2026-07-07T00:00:02.000Z",
+        result: { rowId: "2001" },
+      }),
+      (key) => key
+    );
+
+    expect(monitor).toMatchObject({
+      status: "success",
+      rowId: "2001",
+    });
+  });
+
+  it("queue task 維持從 flat rowId 取得結果", () => {
+    const task: WorkReportQueueTask = {
+      taskId: "delete-task-flat-row",
+      taskType: "delete-report",
+      status: "success",
+      formId: "105",
+      workOrderNo: "WO-25040537",
+      entryId: "17382",
+      rowId: "3001",
+      queueKey: "105:17382",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      startedAt: "2026-07-07T00:00:01.000Z",
+      finishedAt: "2026-07-07T00:00:02.000Z",
+      updatedAt: "2026-07-07T00:00:02.000Z",
+      message: "刪除報工完成",
+      errorCode: null,
+      errorMessage: null,
+      actorClientId: null,
+      actorTabId: null,
+      actorIp: null,
+      actorLabel: null,
+      source: null,
+    };
+
+    const monitor = resolveTaskMonitorResult(
+      createMonitor({
+        taskId: task.taskId,
+        kind: "delete",
+        status: "running",
+        updatedAt: "2026-07-07T00:00:01.000Z",
+      }),
+      task,
+      (key) => key
+    );
+
+    expect(monitor).toMatchObject({
+      status: "success",
+      rowId: "3001",
+    });
+  });
+
+  it("保留已完成刪除的 registry metadata 與收尾失敗訊息", () => {
+    const task: WorkReportQueueTask = {
+      taskId: "delete-task-1",
+      taskType: "delete-report",
+      status: "failed",
+      formId: "105",
+      workOrderNo: "WO-25040537",
+      entryId: "17382",
+      rowId: "1001",
+      queueKey: "105:17382",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      startedAt: "2026-07-07T00:00:01.000Z",
+      finishedAt: "2026-07-07T00:00:02.000Z",
+      updatedAt: "2026-07-07T00:00:02.000Z",
+      message: "報工已刪除，但工令回算或資料同步收尾失敗",
+      errorCode: "DELETE_REPORT_FINALIZE_FAILED",
+      errorMessage: "*finalize*: Ragic formula recalculation failed",
+      actorClientId: null,
+      actorTabId: null,
+      actorIp: null,
+      actorLabel: null,
+      source: null,
+      deletedCount: 1,
+      deleteFinalizeFailed: true,
+    };
+
+    const monitor = resolveTaskMonitorResult(
+      createMonitor({
+        taskId: task.taskId,
+        kind: "delete",
+        status: "running",
+        updatedAt: "2026-07-07T00:00:01.000Z",
+      }),
+      task,
+      (key) => key
+    );
+
+    expect(monitor).toMatchObject({
+      status: "failed",
+      message: "報工已刪除，但工令回算或資料同步收尾失敗",
+      deletedCount: 1,
+      deleteFinalizeFailed: true,
+    });
   });
 });
 
@@ -247,6 +481,7 @@ describe("pollCreateTaskMonitor", () => {
         taskId: "missing-task",
         status: "running",
         updatedAt: "2026-07-07T00:00:00.000Z",
+        confirmedAt: "2026-07-07T00:00:01.000Z",
       }),
       fetchTask: vi.fn().mockRejectedValueOnce(createTaskNotFoundError()),
       buildMonitorFromTaskResult: (base) => base,
@@ -267,6 +502,8 @@ describe("pollCreateTaskMonitor", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({
       status: "running",
+      lifecycleState: "unknown",
+      confirmedAt: null,
       stale: true,
       message: "unknown",
     });
@@ -281,6 +518,7 @@ describe("pollCreateTaskMonitor", () => {
         taskId: "slow-task",
         status: "running",
         updatedAt: "2026-07-07T00:00:00.000Z",
+        confirmedAt: "2026-07-07T00:00:01.000Z",
       }),
       fetchTask: vi.fn().mockResolvedValue(createTaskResult({ status: "running" })),
       buildMonitorFromTaskResult: (base, task) => ({
@@ -309,6 +547,8 @@ describe("pollCreateTaskMonitor", () => {
     const finalUpdate = updates.at(-1);
     expect(finalUpdate).toMatchObject({
       status: "running",
+      lifecycleState: "unknown",
+      confirmedAt: null,
       stale: true,
       message: "timeout",
     });
@@ -318,5 +558,31 @@ describe("pollCreateTaskMonitor", () => {
         Date.parse("2026-07-07T00:00:30.000Z") + CREATE_TASK_STALE_AUTO_CLEAR_MS
       )
     ).toEqual([]);
+  });
+
+  it("write indeterminate 維持 failed wire status，但 lifecycle 不會偽造成 confirmed failed", () => {
+    const monitor = resolveTaskMonitorResult(
+      createMonitor({
+        taskId: "indeterminate-task",
+        status: "running",
+        updatedAt: "2026-08-12T06:00:01.000Z",
+      }),
+      createTaskResult({
+        taskId: "indeterminate-task",
+        status: "failed",
+        updatedAt: "2026-08-12T06:00:05.000Z",
+        finishedAt: "2026-08-12T06:00:05.000Z",
+        confirmedAt: "2026-08-12T06:00:05.000Z",
+        writeIndeterminate: true,
+        error: { code: "RAGIC_WRITE_FAILED", message: "write result unknown" },
+      }),
+      (key) => key
+    );
+
+    expect(monitor).toMatchObject({
+      status: "failed",
+      lifecycleState: "indeterminate",
+      confirmedAt: null,
+    });
   });
 });

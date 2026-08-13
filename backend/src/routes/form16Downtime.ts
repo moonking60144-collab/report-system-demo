@@ -1,11 +1,9 @@
 import { randomUUID } from "crypto";
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { asyncHandler } from "./asyncHandler";
 import { HttpError } from "../utils/httpError";
 import { form16DowntimeService } from "../services/form16/form16DowntimeService";
 import { form16DowntimeCreateTaskService } from "../services/form16/form16DowntimeCreateTaskService";
-import { form16ExcelExportService } from "../services/form16/form16ExcelExportService";
-import { form16PivotAnalysisExportService } from "../services/form16/form16PivotAnalysisExportService";
 import { form16DowntimeCallbackRefreshService } from "../services/form16/form16DowntimeCallbackRefreshService";
 import {
   workReportTaskRegistryService,
@@ -18,7 +16,12 @@ import {
 } from "./workReportRequest";
 import { readTaskActorContext } from "./taskActorContext";
 import { safeInsertRecordAudit } from "../services/audit/recordAuditLogger";
-import { readDowntimeSnapshot } from "../services/audit/recordAuditSnapshotResolver";
+import {
+  FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+  runForm16DowntimeMutationExclusive,
+} from "../services/form16/form16DowntimeMutationQueue";
+import { createReportTaskService } from "../services/createReportTaskService";
+import { createStableJsonFingerprint } from "../utils/stableJsonFingerprint";
 
 const form16DowntimeRouter = Router();
 const DEFAULT_DOWNTIME_RECORD_LIMIT = 20;
@@ -134,38 +137,6 @@ form16DowntimeRouter.get(
 );
 
 form16DowntimeRouter.get(
-  "/downtime/export/monthly-csv",
-  asyncHandler(async (_req, res) => {
-    // 直接抓使用者在 .env 設好的 Ragic 發佈網址（view 已篩好），原樣轉發給瀏覽器下載。
-    const result = await form16ExcelExportService.exportFromPublishedUrl();
-    res.setHeader("Content-Type", result.contentType);
-    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
-    res.send(result.body);
-  })
-);
-
-form16DowntimeRouter.get(
-  "/downtime/export/analysis-xlsx",
-  asyncHandler(async (req, res) => {
-    // 同一條發佈網址的 CSV，灌進樞紐分析範本後回成品 xlsx（Excel 開檔自動重整樞紐）。
-    // attendanceDays 選填：當月應出勤天數，會灌進 3 張機台運轉分析表的 F 欄。
-    const rawDays = String(req.query.attendanceDays ?? "").trim();
-    let attendanceDays: number | undefined;
-    if (rawDays) {
-      const parsed = Number(rawDays);
-      if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 31) {
-        throw new HttpError(400, "attendanceDays 需為 0~31 之間的數字", "INVALID_QUERY_PARAM");
-      }
-      attendanceDays = parsed;
-    }
-    const result = await form16PivotAnalysisExportService.exportAnalysisXlsx(attendanceDays);
-    res.setHeader("Content-Type", result.contentType);
-    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
-    res.send(result.body);
-  })
-);
-
-form16DowntimeRouter.get(
   "/downtime/planned-idle-summary",
   asyncHandler(async (req, res) => {
     // month 選填（YYYY/MM）；不帶就「當月」。回每機台當月 (P)計畫停機分加總（含部分停機）。
@@ -178,6 +149,9 @@ form16DowntimeRouter.get(
         month: result.month,
         machineCount: result.machines.length,
         source: result.source,
+        refreshed: result.refreshed,
+        refreshTriggered: result.refreshTriggered,
+        snapshotAt: result.snapshotAt,
       },
     });
   })
@@ -249,12 +223,20 @@ form16DowntimeRouter.post(
     });
 
     await workReportTaskRegistryService.flush();
+    const registryTask = workReportTaskRegistryService.getTask(task.taskId);
+    const isTaskUnconfirmed = task.status === "pending" || task.status === "running";
 
     res.status(202).json({
       data: {
         taskId: task.taskId,
         status: task.status,
         createdAt: task.createdAt,
+        lifecycleState:
+          task.status === "pending"
+            ? "accepted"
+            : registryTask?.lifecycleState ?? task.status,
+        acceptedAt: registryTask?.acceptedAt ?? task.createdAt,
+        confirmedAt: isTaskUnconfirmed ? null : registryTask?.confirmedAt ?? null,
         ...(task.entryId ? { entryId: task.entryId } : {}),
       },
     });
@@ -288,6 +270,43 @@ function readHeaderSnapshotHash(req: { header(name: string): string | undefined 
   return value || null;
 }
 
+function readAsyncMutationFlag(value: unknown): boolean {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function readRequiredClientMutationId(req: {
+  header(name: string): string | undefined;
+}): string {
+  const clientMutationId = String(req.header("x-client-mutation-id") ?? "").trim();
+  if (!clientMutationId) {
+    throw new HttpError(
+      400,
+      "背景停機紀錄異動必須提供 x-client-mutation-id，才能安全處理重試與服務重啟。",
+      "CLIENT_MUTATION_ID_REQUIRED"
+    );
+  }
+  return clientMutationId;
+}
+
+function sendAcceptedDowntimeTask(
+  res: Response,
+  task: ReturnType<typeof createReportTaskService.enqueue>,
+  entryId: string
+): void {
+  res.status(202).json({
+    data: {
+      taskId: task.taskId,
+      status: task.status,
+      createdAt: task.createdAt,
+      lifecycleState: task.lifecycleState ?? "accepted",
+      acceptedAt: task.acceptedAt ?? task.createdAt,
+      confirmedAt: task.confirmedAt ?? null,
+      entryId,
+    },
+  });
+}
+
 form16DowntimeRouter.patch(
   "/downtime/records/:entryId",
   asyncHandler(async (req, res) => {
@@ -305,12 +324,51 @@ form16DowntimeRouter.patch(
       remark: readOptionalPatchText(body, "remark"),
     };
     const expectedSnapshotHash = readOptionalSnapshotHash(body, "expectedSnapshotHash");
-    await form16DowntimeService.assertRecordSnapshotUnchanged(entryId, expectedSnapshotHash);
     const actor = readTaskActorContext(req);
+    if (readAsyncMutationFlag(req.query.async)) {
+      const clientMutationId = readRequiredClientMutationId(req);
+      await createReportTaskService.initialize();
+      const task = createReportTaskService.enqueue({
+        taskType: "update-downtime",
+        formId: "16",
+        entryId,
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+        clientMutationId,
+        operationFingerprint: createStableJsonFingerprint({
+          operation: "update-downtime",
+          entryId,
+          patch,
+          expectedSnapshotHash,
+        }),
+        actorClientId: actor.actorClientId ?? undefined,
+        actorTabId: actor.actorTabId ?? undefined,
+        actorIp: actor.actorIp ?? undefined,
+        actorLabel: actor.actorLabel ?? undefined,
+        worker: async () => {
+          const updated = await form16DowntimeService.updateRecord(entryId, patch, {
+            expectedSnapshotHash,
+            deferProjection: true,
+          });
+          await safeInsertRecordAudit({
+            scope: "downtime",
+            formId: "16",
+            entryId,
+            action: "update",
+            actorClientId: actor.actorClientId,
+            actorTabId: actor.actorTabId,
+            actorIp: actor.actorIp,
+            actorLabel: actor.actorLabel,
+            taskId: task.taskId,
+            beforeSnapshot: updated.beforeSnapshot,
+            afterPatch: patch,
+          });
+        },
+      });
+      sendAcceptedDowntimeTask(res, task, entryId);
+      return;
+    }
     const taskId = randomUUID();
     const now = new Date().toISOString();
-    // 在 mutation 之前抓 before snapshot；之後抓會抓到新值
-    const beforeSnapshot = await readDowntimeSnapshot(entryId);
 
     workReportTaskRegistryService.upsertTask({
       taskId,
@@ -318,8 +376,10 @@ form16DowntimeRouter.patch(
       status: "running",
       formId: "16",
       entryId,
+      queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
       createdAt: now,
       startedAt: now,
+      acceptedAt: now,
       updatedAt: now,
       message: "停機紀錄更新中",
       actorClientId: actor.actorClientId,
@@ -329,49 +389,68 @@ form16DowntimeRouter.patch(
     });
 
     try {
-      await form16DowntimeService.updateRecord(entryId, patch, { expectedSnapshotHash });
-      await safeInsertRecordAudit({
-        scope: "downtime",
-        formId: "16",
-        entryId,
-        action: "update",
-        actorClientId: actor.actorClientId,
-        actorTabId: actor.actorTabId,
-        actorIp: actor.actorIp,
-        actorLabel: actor.actorLabel,
-        taskId,
-        beforeSnapshot,
-        afterPatch: patch,
+      await runForm16DowntimeMutationExclusive(async () => {
+        const updated = await form16DowntimeService.updateRecord(entryId, patch, {
+          expectedSnapshotHash,
+        });
+        await safeInsertRecordAudit({
+          scope: "downtime",
+          formId: "16",
+          entryId,
+          action: "update",
+          actorClientId: actor.actorClientId,
+          actorTabId: actor.actorTabId,
+          actorIp: actor.actorIp,
+          actorLabel: actor.actorLabel,
+          taskId,
+          beforeSnapshot: updated.beforeSnapshot,
+          afterPatch: patch,
+        });
       });
+      const confirmedAt = new Date().toISOString();
       workReportTaskRegistryService.upsertTask({
         taskId,
         taskType: "update-downtime",
         status: "success",
         formId: "16",
         entryId,
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
         // downtime 是 entry-level，registry 的 rowId 保持 null；updated.id 本來就是 entryId
-        finishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        finishedAt: confirmedAt,
+        confirmedAt,
+        updatedAt: confirmedAt,
         message: "停機紀錄已更新",
       });
     } catch (error) {
+      const confirmedAt = new Date().toISOString();
       workReportTaskRegistryService.upsertTask({
         taskId,
         taskType: "update-downtime",
         status: "failed",
         formId: "16",
         entryId,
-        finishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+        finishedAt: confirmedAt,
+        confirmedAt,
+        updatedAt: confirmedAt,
         message: error instanceof Error ? error.message : "更新失敗",
-        errorCode: "UPDATE_DOWNTIME_FAILED",
+        errorCode: error instanceof HttpError ? error.code : "UPDATE_DOWNTIME_FAILED",
         errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
 
+    const task = workReportTaskRegistryService.getTask(taskId);
     res.status(200).json({
-      data: { taskId, status: "success" },
+      data: {
+        taskId,
+        status: "success",
+        createdAt: now,
+        lifecycleState: task?.lifecycleState ?? "success",
+        acceptedAt: task?.acceptedAt ?? now,
+        confirmedAt: task?.confirmedAt ?? task?.finishedAt ?? null,
+        entryId,
+      },
     });
   })
 );
@@ -385,10 +464,48 @@ form16DowntimeRouter.delete(
     }
     const actor = readTaskActorContext(req);
     const expectedSnapshotHash = readHeaderSnapshotHash(req);
-    await form16DowntimeService.assertRecordSnapshotUnchanged(entryId, expectedSnapshotHash);
+    if (readAsyncMutationFlag(req.query.async)) {
+      const clientMutationId = readRequiredClientMutationId(req);
+      await createReportTaskService.initialize();
+      const task = createReportTaskService.enqueue({
+        taskType: "delete-downtime",
+        formId: "16",
+        entryId,
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+        clientMutationId,
+        operationFingerprint: createStableJsonFingerprint({
+          operation: "delete-downtime",
+          entryId,
+          expectedSnapshotHash,
+        }),
+        actorClientId: actor.actorClientId ?? undefined,
+        actorTabId: actor.actorTabId ?? undefined,
+        actorIp: actor.actorIp ?? undefined,
+        actorLabel: actor.actorLabel ?? undefined,
+        worker: async () => {
+          const deleted = await form16DowntimeService.deleteRecord(entryId, {
+            expectedSnapshotHash,
+            deferProjection: true,
+          });
+          await safeInsertRecordAudit({
+            scope: "downtime",
+            formId: "16",
+            entryId,
+            action: "delete",
+            actorClientId: actor.actorClientId,
+            actorTabId: actor.actorTabId,
+            actorIp: actor.actorIp,
+            actorLabel: actor.actorLabel,
+            taskId: task.taskId,
+            beforeSnapshot: deleted.beforeSnapshot,
+          });
+        },
+      });
+      sendAcceptedDowntimeTask(res, task, entryId);
+      return;
+    }
     const taskId = randomUUID();
     const now = new Date().toISOString();
-    const beforeSnapshot = await readDowntimeSnapshot(entryId);
 
     workReportTaskRegistryService.upsertTask({
       taskId,
@@ -396,8 +513,10 @@ form16DowntimeRouter.delete(
       status: "running",
       formId: "16",
       entryId,
+      queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
       createdAt: now,
       startedAt: now,
+      acceptedAt: now,
       updatedAt: now,
       message: "停機紀錄刪除中",
       actorClientId: actor.actorClientId,
@@ -407,47 +526,66 @@ form16DowntimeRouter.delete(
     });
 
     try {
-      await form16DowntimeService.deleteRecord(entryId, { expectedSnapshotHash });
-      await safeInsertRecordAudit({
-        scope: "downtime",
-        formId: "16",
-        entryId,
-        action: "delete",
-        actorClientId: actor.actorClientId,
-        actorTabId: actor.actorTabId,
-        actorIp: actor.actorIp,
-        actorLabel: actor.actorLabel,
-        taskId,
-        beforeSnapshot,
+      await runForm16DowntimeMutationExclusive(async () => {
+        const deleted = await form16DowntimeService.deleteRecord(entryId, {
+          expectedSnapshotHash,
+        });
+        await safeInsertRecordAudit({
+          scope: "downtime",
+          formId: "16",
+          entryId,
+          action: "delete",
+          actorClientId: actor.actorClientId,
+          actorTabId: actor.actorTabId,
+          actorIp: actor.actorIp,
+          actorLabel: actor.actorLabel,
+          taskId,
+          beforeSnapshot: deleted.beforeSnapshot,
+        });
       });
+      const confirmedAt = new Date().toISOString();
       workReportTaskRegistryService.upsertTask({
         taskId,
         taskType: "delete-downtime",
         status: "success",
         formId: "16",
         entryId,
-        finishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+        finishedAt: confirmedAt,
+        confirmedAt,
+        updatedAt: confirmedAt,
         message: `停機紀錄 ${entryId} 已刪除`,
       });
     } catch (error) {
+      const confirmedAt = new Date().toISOString();
       workReportTaskRegistryService.upsertTask({
         taskId,
         taskType: "delete-downtime",
         status: "failed",
         formId: "16",
         entryId,
-        finishedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        queueKey: FORM16_DOWNTIME_MUTATION_QUEUE_KEY,
+        finishedAt: confirmedAt,
+        confirmedAt,
+        updatedAt: confirmedAt,
         message: error instanceof Error ? error.message : "刪除失敗",
-        errorCode: "DELETE_DOWNTIME_FAILED",
+        errorCode: error instanceof HttpError ? error.code : "DELETE_DOWNTIME_FAILED",
         errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     }
 
+    const task = workReportTaskRegistryService.getTask(taskId);
     res.status(200).json({
-      data: { taskId, status: "success" },
+      data: {
+        taskId,
+        status: "success",
+        createdAt: now,
+        lifecycleState: task?.lifecycleState ?? "success",
+        acceptedAt: task?.acceptedAt ?? now,
+        confirmedAt: task?.confirmedAt ?? task?.finishedAt ?? null,
+        entryId,
+      },
     });
   })
 );

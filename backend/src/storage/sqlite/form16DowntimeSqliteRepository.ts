@@ -11,12 +11,14 @@ import type { Form16DowntimeRecord } from "../../types/form16Downtime";
 interface Form16DowntimeStateRow {
   snapshot_at: string | null;
   total_records: number;
+  revision: number;
   updated_at: string;
 }
 
 export interface StoredForm16DowntimeState {
   snapshotAt: string | null;
   totalRecords: number;
+  revision: number;
   updatedAt: string;
 }
 
@@ -44,6 +46,12 @@ function serializeForm16DowntimeRecord(record: Form16DowntimeRecord): string {
     workOrderNo: record.workOrderNo,
   };
   return JSON.stringify(stored);
+}
+
+export function buildForm16DowntimeRecordSnapshotHash(
+  record: Form16DowntimeRecord
+): string {
+  return createHash("sha256").update(serializeForm16DowntimeRecord(record)).digest("hex");
 }
 
 function toDowntimeInsertParams(record: Form16DowntimeRecord, syncedAt: string): unknown[] {
@@ -159,21 +167,7 @@ class Form16DowntimeSqliteRepository {
     await withWriteTransaction(async (db) => {
       await db.exec("DELETE FROM form16_downtime_records");
       await this.upsertRecordsWithDb(db, records, syncedAt);
-
-      await db.run(
-        `
-        INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
-        VALUES (1, ?, ?, ?)
-        ON CONFLICT(id)
-        DO UPDATE SET
-          snapshot_at = excluded.snapshot_at,
-          total_records = excluded.total_records,
-          updated_at = excluded.updated_at
-        `,
-        syncedAt,
-        records.length,
-        new Date().toISOString()
-      );
+      await this.updateSnapshotStateWithDb(db, syncedAt);
     });
   }
 
@@ -195,8 +189,19 @@ class Form16DowntimeSqliteRepository {
    * UI 也只需要近期資料），不是「完整停機紀錄表」。如果要查歷史 30+ 天前的
    * 停機紀錄需要直接查 Ragic。
    */
-  async syncSnapshot(records: Form16DowntimeRecord[], syncedAt: string): Promise<void> {
-    await withWriteTransaction(async (db) => {
+  async syncSnapshot(
+    records: Form16DowntimeRecord[],
+    syncedAt: string,
+    expectedRevision: number
+  ): Promise<"applied" | "stale"> {
+    return withWriteTransaction(async (db) => {
+      const currentState = await db.get<{ revision: number }>(
+        "SELECT revision FROM form16_downtime_state WHERE id = 1"
+      );
+      if ((currentState?.revision ?? 0) !== expectedRevision) {
+        return "stale";
+      }
+
       const existingRows = await db.all<Array<{ entry_id: string }>>(
         "SELECT entry_id FROM form16_downtime_records"
       );
@@ -208,20 +213,8 @@ class Form16DowntimeSqliteRepository {
         await db.run("DELETE FROM form16_downtime_records WHERE entry_id = ?", entryId);
       }
       await this.upsertRecordsWithDb(db, records, syncedAt);
-      await db.run(
-        `
-        INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
-        VALUES (1, ?, ?, ?)
-        ON CONFLICT(id)
-        DO UPDATE SET
-          snapshot_at = excluded.snapshot_at,
-          total_records = excluded.total_records,
-          updated_at = excluded.updated_at
-        `,
-        syncedAt,
-        records.length,
-        new Date().toISOString()
-      );
+      await this.updateSnapshotStateWithDb(db, syncedAt);
+      return "applied";
     });
   }
 
@@ -243,7 +236,7 @@ class Form16DowntimeSqliteRepository {
     const db = await sqliteClient.getReadDb();
     const row = await db.get<Form16DowntimeStateRow>(
       `
-      SELECT snapshot_at, total_records, updated_at
+      SELECT snapshot_at, total_records, revision, updated_at
       FROM form16_downtime_state
       WHERE id = 1
       `
@@ -256,6 +249,10 @@ class Form16DowntimeSqliteRepository {
       totalRecords:
         typeof row.total_records === "number" && Number.isFinite(row.total_records)
           ? row.total_records
+          : 0,
+      revision:
+        typeof row.revision === "number" && Number.isFinite(row.revision)
+          ? row.revision
           : 0,
       updatedAt: row.updated_at,
     };
@@ -344,12 +341,13 @@ class Form16DowntimeSqliteRepository {
 
     await db.run(
       `
-      INSERT INTO form16_downtime_state (id, snapshot_at, total_records, updated_at)
-      VALUES (1, ?, ?, ?)
+      INSERT INTO form16_downtime_state (id, snapshot_at, total_records, revision, updated_at)
+      VALUES (1, ?, ?, 1, ?)
       ON CONFLICT(id)
       DO UPDATE SET
         snapshot_at = excluded.snapshot_at,
         total_records = excluded.total_records,
+        revision = form16_downtime_state.revision + 1,
         updated_at = excluded.updated_at
       `,
       snapshotAt,

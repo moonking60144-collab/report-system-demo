@@ -76,6 +76,37 @@ function parseTriStateFlag(
   throw new HttpError(400, `無效的 ${fieldName} 參數：${input}`, "INVALID_QUERY_PARAM");
 }
 
+const UPDATED_DATE_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseUpdatedDateParam(input: string | undefined, fieldName: string): string | undefined {
+  const normalized = input?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  const matched = UPDATED_DATE_PATTERN.exec(normalized);
+  if (matched) {
+    const [, rawYear, rawMonth, rawDay, rawHour, rawMinute, rawSecond] = matched;
+    const year = Number(rawYear);
+    const month = Number(rawMonth);
+    const day = Number(rawDay);
+    const calendarDate = new Date(Date.UTC(year, month - 1, day));
+    const validCalendarDate =
+      calendarDate.getUTCFullYear() === year &&
+      calendarDate.getUTCMonth() === month - 1 &&
+      calendarDate.getUTCDate() === day;
+    const validTime =
+      Number(rawHour) <= 23 && Number(rawMinute) <= 59 && Number(rawSecond) <= 59;
+
+    if (validCalendarDate && validTime && Number.isFinite(Date.parse(normalized))) {
+      return normalized;
+    }
+  }
+
+  throw new HttpError(400, `無效的 ${fieldName} 參數：${input}`, "INVALID_QUERY_PARAM");
+}
+
 function parseSortRules(
   input: string | undefined
 ): Array<{
@@ -215,6 +246,26 @@ export function parseReportsQuery(query: Record<string, unknown>): {
     direction: "asc" | "desc";
   }>;
 } {
+  const updatedDateFrom = parseUpdatedDateParam(
+    query.updatedDateFrom as string | undefined,
+    "updatedDateFrom"
+  );
+  const updatedDateTo = parseUpdatedDateParam(
+    query.updatedDateTo as string | undefined,
+    "updatedDateTo"
+  );
+  if (
+    updatedDateFrom &&
+    updatedDateTo &&
+    Date.parse(updatedDateFrom) > Date.parse(updatedDateTo)
+  ) {
+    throw new HttpError(
+      400,
+      "updatedDateFrom 不得晚於 updatedDateTo",
+      "INVALID_QUERY_PARAM"
+    );
+  }
+
   return {
     limit: parsePositiveInt(query.limit as string | undefined, 50),
     offset: parsePositiveInt(query.offset as string | undefined, 0),
@@ -230,8 +281,8 @@ export function parseReportsQuery(query: Record<string, unknown>): {
     filterMachineCode: (query.filterMachineCode as string | undefined)?.trim() || undefined,
     siteRunning: parseTriStateFlag(query.siteRunning as string | undefined, "siteRunning"),
     startSchedule: parseTriStateFlag(query.startSchedule as string | undefined, "startSchedule"),
-    updatedDateFrom: (query.updatedDateFrom as string | undefined)?.trim() || undefined,
-    updatedDateTo: (query.updatedDateTo as string | undefined)?.trim() || undefined,
+    updatedDateFrom,
+    updatedDateTo,
     columnFilters: parseColumnFilters(query.columnFilters as string | undefined),
     sortRules: parseSortRules(query.sort as string | undefined),
     refresh: parseBooleanFlag(query.refresh as string | undefined, {
@@ -247,6 +298,14 @@ export function parseRefreshFlag(query: Record<string, unknown>): boolean {
     trueValues: ["1", "true"],
     falseValues: ["0", "false"],
     fieldName: "refresh",
+  });
+}
+
+export function parseStrictRefreshFlag(query: Record<string, unknown>): boolean {
+  return parseBooleanFlag(query.strictRefresh as string | undefined, {
+    trueValues: ["1", "true"],
+    falseValues: ["0", "false"],
+    fieldName: "strictRefresh",
   });
 }
 
@@ -299,6 +358,28 @@ export function parseMainMachineUpdatePayload(body: unknown): { machineCode: str
   }
 
   return { machineCode };
+}
+
+export function parseSortOrderUpdatePayload(body: unknown): { sortOrder: number } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new HttpError(400, "payload 必須是物件", "INVALID_PAYLOAD");
+  }
+
+  const rawSortOrder = (body as Record<string, unknown>).sortOrder;
+  const sortOrder = rawSortOrder;
+  if (
+    typeof sortOrder !== "number" ||
+    !Number.isInteger(sortOrder) ||
+    sortOrder < 0
+  ) {
+    throw new HttpError(
+      400,
+      "sortOrder 必須是大於或等於 0 的整數",
+      "INVALID_PAYLOAD"
+    );
+  }
+
+  return { sortOrder };
 }
 
 export function parseExpectedEntryLastUpdatedAt(headerValue: string | undefined): string | undefined {

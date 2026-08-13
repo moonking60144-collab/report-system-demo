@@ -1,5 +1,13 @@
 @import "./layout-sidebar-toolbar.css";
 @import "./status-task-table-base.css";
+@import "./task-queue.css";
 @import "./table-detail-overlays.css";
 @import "./detail-page.css";
 @import "./responsive.css";
+.detail-row-optimistic-syncing > td {
+  background-image: linear-gradient(rgba(37, 99, 235, 0.055), rgba(37, 99, 235, 0.055));
+}
+
+.detail-row-optimistic-frozen > td {
+  background-image: linear-gradient(rgba(217, 119, 6, 0.08), rgba(217, 119, 6, 0.08));
+}

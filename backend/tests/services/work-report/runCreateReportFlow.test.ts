@@ -49,6 +49,11 @@ function createReverifyTask(input: EnqueueReverifyInput): Form16WriteReverifyTas
     ...(input.workReportFormId ? { workReportFormId: input.workReportFormId } : {}),
     ...(input.workReportEntryId ? { workReportEntryId: input.workReportEntryId } : {}),
     ...(input.workOrderNo ? { workOrderNo: input.workOrderNo } : {}),
+    ...(input.clientRowKey ? { clientRowKey: input.clientRowKey } : {}),
+    ...(input.idempotencySource ? { idempotencySource: input.idempotencySource } : {}),
+    ...(input.idempotencyReservationToken
+      ? { idempotencyReservationToken: input.idempotencyReservationToken }
+      : {}),
   };
 }
 
@@ -288,6 +293,9 @@ test("runCreateReportFlow 單筆模式仍同步讀回 Form16 entry 驗證", asyn
   const getEntryMock = t.mock.method(ragicClient, "getEntry", async () => ({
     [env.RAGIC_FORM_16_WORK_ORDER_FIELD_ID]: WORK_ORDER_NO,
     [env.RAGIC_FORM_16_TYPE_FIELD_ID]: REPORT_TYPE,
+    [getFormConfig(FORM_ID).writeConfig.subtableWriteFields.operatorId]: "RA004",
+    [getFormConfig(FORM_ID).writeConfig.subtableWriteFields.operatorName]: "羅智加",
+    [getFormConfig(FORM_ID).writeConfig.subtableWriteFields.totalWorkTime]: 8,
   }));
   const enqueueMock = t.mock.method(
     form16WriteReverifyService,
@@ -296,20 +304,22 @@ test("runCreateReportFlow 單筆模式仍同步讀回 Form16 entry 驗證", asyn
   );
 
   let preflightCalls = 0;
+  const deps = createDeps({
+    mode: "single",
+    onAssertEntryNotModified: (formId, entryId, expectedEntryLastUpdatedAt) => {
+      preflightCalls += 1;
+      assert.equal(formId, FORM_ID);
+      assert.equal(entryId, ENTRY_ID);
+      assert.equal(expectedEntryLastUpdatedAt, "2026-07-02T00:00:00.000Z");
+    },
+  });
+  const getRawEntryMock = t.mock.fn(deps.getRawEntry);
   const result = await runCreateReportFlow({
     formId: FORM_ID,
     entryId: ENTRY_ID,
     payload: createPayload(),
     options: { expectedEntryLastUpdatedAt: "2026-07-02T00:00:00.000Z" },
-    deps: createDeps({
-      mode: "single",
-      onAssertEntryNotModified: (formId, entryId, expectedEntryLastUpdatedAt) => {
-        preflightCalls += 1;
-        assert.equal(formId, FORM_ID);
-        assert.equal(entryId, ENTRY_ID);
-        assert.equal(expectedEntryLastUpdatedAt, "2026-07-02T00:00:00.000Z");
-      },
-    }),
+    deps: { ...deps, getRawEntry: getRawEntryMock },
   });
 
   assert.equal(result.rowId, CREATED_ROW_ID);
@@ -326,6 +336,126 @@ test("runCreateReportFlow 單筆模式仍同步讀回 Form16 entry 驗證", asyn
     },
   ]);
   assert.equal(enqueueMock.mock.callCount(), 0);
+  assert.equal(getRawEntryMock.mock.callCount(), 1);
+});
+
+test("runCreateReportFlow 在建立 context 前才載入狀態 snapshot，且 verified entry 免再輪詢母表", async (t) => {
+  const config = getFormConfig(FORM_ID);
+  const preconditionEntrySnapshot: RagicRecord = {
+    [config.mainFields.workOrderNo]: WORK_ORDER_NO,
+    [config.mainFields.status]: "未結案",
+    [config.mainFields.machineCode]: "R3",
+    [config.writeConfig.subtableId]: {},
+  };
+  t.mock.method(ragicClient, "createEntry", async () => ({
+    [CREATED_ROW_ID]: {},
+  }));
+  t.mock.method(ragicClient, "getEntry", async () => ({
+    [env.RAGIC_FORM_16_WORK_ORDER_FIELD_ID]: WORK_ORDER_NO,
+    [env.RAGIC_FORM_16_TYPE_FIELD_ID]: REPORT_TYPE,
+    [config.writeConfig.subtableWriteFields.operatorId]: "RA004",
+    [config.writeConfig.subtableWriteFields.operatorName]: "羅智加",
+    [config.writeConfig.subtableWriteFields.totalWorkTime]: 8,
+  }));
+  const callOrder: string[] = [];
+  const deps: RunCreateReportDeps = {
+    ...createDeps({ mode: "single" }),
+    normalizePayloadForWrite: async (_formId, _config, payload) => {
+      callOrder.push("normalize");
+      return payload;
+    },
+    getFormOptions: async () => {
+      callOrder.push("form-options");
+      return {
+        machineId: [
+          {
+            value: "R3",
+            label: "R3 - 滾牙機",
+            display: "滾牙機",
+            machineDefault: {
+              machineCode: "R3",
+              processCode: "TI02",
+              status: "使用中",
+            },
+          },
+        ],
+      };
+    },
+  };
+  const getRawEntryMock = t.mock.fn(async () => {
+    throw new Error("precondition snapshot 與 verified entry 命中時不應讀母表");
+  });
+
+  const result = await runCreateReportFlow({
+    formId: FORM_ID,
+    entryId: ENTRY_ID,
+    payload: { ...createPayload(), processCode: "" },
+    options: {
+      skipEntryPreflight: true,
+      loadPreconditionEntrySnapshot: async () => {
+        callOrder.push("precondition-read");
+        return preconditionEntrySnapshot;
+      },
+    },
+    deps: { ...deps, getRawEntry: getRawEntryMock },
+  });
+
+  assert.equal(result.rowId, CREATED_ROW_ID);
+  assert.equal(getRawEntryMock.mock.callCount(), 0);
+  assert.deepEqual(callOrder, ["form-options", "precondition-read", "normalize"]);
+});
+
+test("runCreateReportFlow 單筆讀回狀態未知時保留 idempotency identity 給背景補驗", async (t) => {
+  const config = getFormConfig(FORM_ID);
+  t.mock.method(ragicClient, "createEntry", async () => ({
+    [CREATED_ROW_ID]: {},
+  }));
+  t.mock.method(ragicClient, "getEntry", async () => {
+    throw new Error("ECONNABORTED");
+  });
+  const enqueueMock = t.mock.method(
+    form16WriteReverifyService,
+    "enqueue",
+    async (input: EnqueueReverifyInput) => createReverifyTask(input)
+  );
+  const deps = createDeps({ mode: "single" });
+  const getRawEntryMock = t.mock.fn(async () => ({
+    [config.mainFields.workOrderNo]: WORK_ORDER_NO,
+    [config.writeConfig.subtableId]: {
+      [CREATED_ROW_ID]: {
+        [config.writeConfig.subtableWriteFields.operatorId]: "RA004",
+        [config.writeConfig.subtableWriteFields.operatorName]: "羅智加",
+        [config.writeConfig.subtableWriteFields.totalWorkTime]: 8,
+      },
+    },
+  }));
+
+  const result = await runCreateReportFlow({
+    formId: FORM_ID,
+    entryId: ENTRY_ID,
+    payload: createPayload(),
+    options: {
+      clientMutationId: "mutation-row-1",
+      clientMutationFingerprint: "fingerprint-1",
+      idempotencyReservationToken: "reservation-1",
+      loadPreconditionEntrySnapshot: async () => ({
+        [config.mainFields.workOrderNo]: WORK_ORDER_NO,
+        [config.writeConfig.subtableId]: {},
+      }),
+    },
+    deps: { ...deps, getRawEntry: getRawEntryMock },
+  });
+
+  assert.equal(result.rowId, CREATED_ROW_ID);
+  assert.equal(enqueueMock.mock.callCount(), 1);
+  assert.equal(enqueueMock.mock.calls[0]?.arguments[0].source, "work-report-create");
+  assert.equal(enqueueMock.mock.calls[0]?.arguments[0].clientRowKey, "mutation-row-1");
+  assert.equal(enqueueMock.mock.calls[0]?.arguments[0].idempotencySource, "work-report-104");
+  assert.equal(
+    enqueueMock.mock.calls[0]?.arguments[0].idempotencyReservationToken,
+    "reservation-1"
+  );
+  assert.equal(getRawEntryMock.mock.callCount(), 1);
 });
 
 test("runCreateReportFlow 缺 processCode 時可由機台預設補上", async (t) => {

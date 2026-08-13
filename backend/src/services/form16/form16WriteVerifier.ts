@@ -71,7 +71,7 @@ function resolveExpectedField(
 /**
  * 讀回 entry 比對預期欄位。
  *
- * - 全部欄位都符合 → 靜默成功
+ * - 全部欄位都符合 → 回傳已驗證 entry，讓 caller 可重用這次 GET
  * - 讀取驗證失敗且 continueOnReadError=true → 記 warning 後放行，避免「慢但已寫入」
  *   被當成失敗造成使用者重試、重複寫入
  * - 任何欄位對不起來 → 先 DELETE 該 entry 再 throw，讓上層 caller（service / flow）
@@ -82,7 +82,7 @@ export async function assertForm16EntryStored(
   entryId: string,
   expected: VerifyForm16EntryExpected,
   options: VerifyForm16EntryOptions = {}
-): Promise<void> {
+): Promise<RagicRecord | null> {
   // 預設走 background lane：
   // - downtime / cleanup 等背景流程不污染 user lane
   // - 若 background lane 當下 OPEN（callback burst），verify fast-fail → 寫入被當失敗回滾。
@@ -131,7 +131,7 @@ export async function assertForm16EntryStored(
           });
         }
       }
-      return;
+      return null;
     }
     throw error;
   }
@@ -170,7 +170,7 @@ export async function assertForm16EntryStored(
   }
 
   if (mismatches.length === 0) {
-    return;
+    return entry;
   }
 
   // 有欄位不一致 → 這筆就是 orphan 種子，立刻 DELETE 止血

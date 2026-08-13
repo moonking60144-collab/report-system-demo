@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AxiosError } from "axios";
-import { getErrorMessage, getWorkReportTaskErrorMessage } from "./errorUtils";
+import {
+  getApiErrorCode,
+  getErrorMessage,
+  getWorkReportTaskErrorMessage,
+} from "./errorUtils";
 
 describe("getWorkReportTaskErrorMessage", () => {
   it("把任務錯誤碼翻成中文，不直接露出內部 code", () => {
@@ -32,6 +36,16 @@ describe("getWorkReportTaskErrorMessage", () => {
       })
     ).toBe("暫時無法從 Ragic 取得最新工令狀態，這筆報工尚未寫入；請稍後重送。");
   });
+
+  it("把 Ragic circuit breaker fast-fail 翻成可重試提示", () => {
+    expect(
+      getWorkReportTaskErrorMessage({
+        errorCode: "RAGIC_CIRCUIT_OPEN",
+        errorMessage: "circuit breaker [mutation] is OPEN, retry after 11155ms",
+        message: null,
+      })
+    ).toBe("Ragic 暫時無法回應，這筆變更尚未寫入；請稍後重送。");
+  });
 });
 
 describe("getErrorMessage", () => {
@@ -56,5 +70,23 @@ describe("getErrorMessage", () => {
     );
 
     expect(getErrorMessage(error)).toBe("Field Type報工類別 contains empty value (code: 202)");
+  });
+
+  it("可辨識 TASK_NOT_FOUND，讓 polling freeze overlay 而非偽造 failed", () => {
+    const error = new AxiosError(
+      "Request failed with status code 404",
+      "ERR_BAD_REQUEST",
+      undefined,
+      undefined,
+      {
+        status: 404,
+        statusText: "Not Found",
+        headers: {},
+        config: {} as never,
+        data: { error: { code: "TASK_NOT_FOUND", message: "找不到任務" } },
+      }
+    );
+
+    expect(getApiErrorCode(error)).toBe("TASK_NOT_FOUND");
   });
 });

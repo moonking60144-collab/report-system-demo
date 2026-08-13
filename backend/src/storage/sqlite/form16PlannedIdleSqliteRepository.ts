@@ -26,6 +26,14 @@ export interface PlannedIdleSyncState {
   syncedAt: string | null;
   oldestMonth: string | null;
   totalRecords: number;
+  fullRevision: number;
+  projectionRevision: number;
+}
+
+export interface PlannedIdleRefreshBarrier {
+  fullRevision: number;
+  projectionRevision: number;
+  monthRevision: number;
 }
 
 const PLANNED_IDLE_RECORD_COLUMN_COUNT = 7;
@@ -43,19 +51,29 @@ function toPlannedIdleInsertParams(record: PlannedIdleSqliteRecord, syncedAt: st
 }
 
 class Form16PlannedIdleSqliteRepository {
-  // 半年背景同步：全量替換 + 記錄同步範圍/時間。
-  // B4 註：用「全量替換」而非 incremental diff 是刻意的 —— incremental 的「刪掉 incoming 沒有的」
-  // 會誤刪使用者剛 refresh 新建、但背景快照（撈在使用者改之前）尚未含到的當月 entry。
-  // 全量替換最差只是「背景舊快照短暫蓋過 refresh」，下次背景（撈到改後）即修正，30 分內自我修復。
+  // 半年背景同步：只有 projection revision 未變時才提交整份快照。
   async replaceAll(
     records: PlannedIdleSqliteRecord[],
     oldestMonth: string,
-    syncedAt: string
-  ): Promise<void> {
-    await withWriteTransaction(async (db) => {
+    syncedAt: string,
+    expectedProjectionRevision: number
+  ): Promise<"applied" | "stale"> {
+    return withWriteTransaction(async (db) => {
+      const globalState = await db.get<{ projection_revision: number }>(
+        "SELECT projection_revision FROM form16_planned_idle_state WHERE id = 1"
+      );
+      if ((globalState?.projection_revision ?? 0) !== expectedProjectionRevision) {
+        return "stale";
+      }
+
       await db.exec("DELETE FROM form16_planned_idle_records");
+      await db.exec("DELETE FROM form16_planned_idle_month_state");
       await this.insertManyWithDb(db, records, syncedAt);
-      await this.upsertStateWithDb(db, syncedAt, oldestMonth, records.length);
+      for (const monthKey of new Set(records.map((record) => record.monthKey))) {
+        await this.upsertMonthStateWithDb(db, monthKey, syncedAt);
+      }
+      await this.commitFullStateWithCurrentCount(db, syncedAt, oldestMonth);
+      return "applied";
     });
   }
 
@@ -63,12 +81,77 @@ class Form16PlannedIdleSqliteRepository {
   async replaceMonth(
     monthKey: string,
     records: PlannedIdleSqliteRecord[],
-    syncedAt: string
-  ): Promise<void> {
-    await withWriteTransaction(async (db) => {
+    syncedAt: string,
+    expectedBarrier: PlannedIdleRefreshBarrier
+  ): Promise<"applied" | "stale"> {
+    return withWriteTransaction(async (db) => {
+      const globalState = await db.get<{
+        full_revision: number;
+        projection_revision: number;
+      }>(
+        `SELECT full_revision, projection_revision
+         FROM form16_planned_idle_state
+         WHERE id = 1`
+      );
+      const monthState = await db.get<{ revision: number }>(
+        "SELECT revision FROM form16_planned_idle_month_state WHERE month_key = ?",
+        monthKey
+      );
+      if (
+        (globalState?.full_revision ?? 0) !== expectedBarrier.fullRevision ||
+        (globalState?.projection_revision ?? 0) !== expectedBarrier.projectionRevision ||
+        (monthState?.revision ?? 0) !== expectedBarrier.monthRevision
+      ) {
+        return "stale";
+      }
       await db.run("DELETE FROM form16_planned_idle_records WHERE month_key = ?", monthKey);
       await this.insertManyWithDb(db, records, syncedAt);
+      await this.upsertMonthStateWithDb(db, monthKey, syncedAt);
+      await this.incrementProjectionRevisionWithCurrentCount(db, syncedAt);
+      return "applied";
     });
+  }
+
+  async getRefreshBarrier(monthKey: string): Promise<PlannedIdleRefreshBarrier> {
+    const db = await sqliteClient.getReadDb();
+    const globalState = await db.get<{
+      full_revision: number;
+      projection_revision: number;
+    }>(
+      "SELECT full_revision, projection_revision FROM form16_planned_idle_state WHERE id = 1"
+    );
+    const monthState = await db.get<{ revision: number }>(
+      "SELECT revision FROM form16_planned_idle_month_state WHERE month_key = ?",
+      monthKey
+    );
+    return {
+      fullRevision: globalState?.full_revision ?? 0,
+      projectionRevision: globalState?.projection_revision ?? 0,
+      monthRevision: monthState?.revision ?? 0,
+    };
+  }
+
+  async getProjectionRevision(): Promise<number> {
+    const db = await sqliteClient.getReadDb();
+    const row = await db.get<{ projection_revision: number }>(
+      "SELECT projection_revision FROM form16_planned_idle_state WHERE id = 1"
+    );
+    return row?.projection_revision ?? 0;
+  }
+
+  async bumpProjectionRevision(updatedAt = new Date().toISOString()): Promise<void> {
+    await withWriteTransaction(async (db) => {
+      await this.incrementProjectionRevisionWithCurrentCount(db, updatedAt);
+    });
+  }
+
+  async getMonthSyncedAt(monthKey: string): Promise<string | null> {
+    const db = await sqliteClient.getReadDb();
+    const row = await db.get<{ synced_at: string | null }>(
+      "SELECT synced_at FROM form16_planned_idle_month_state WHERE month_key = ?",
+      monthKey
+    );
+    return row?.synced_at ?? null;
   }
 
   // 某月每機台 (P)計畫停機分加總。
@@ -118,8 +201,12 @@ class Form16PlannedIdleSqliteRepository {
       synced_at: string | null;
       oldest_month: string | null;
       total_records: number;
+      full_revision: number;
+      projection_revision: number;
     }>(
-      "SELECT synced_at, oldest_month, total_records FROM form16_planned_idle_state WHERE id = 1"
+      `SELECT synced_at, oldest_month, total_records, full_revision, projection_revision
+       FROM form16_planned_idle_state
+       WHERE id = 1`
     );
     if (!row) {
       return null;
@@ -131,28 +218,81 @@ class Form16PlannedIdleSqliteRepository {
         typeof row.total_records === "number" && Number.isFinite(row.total_records)
           ? row.total_records
           : 0,
+      fullRevision: row.full_revision ?? 0,
+      projectionRevision: row.projection_revision ?? 0,
     };
   }
 
-  private async upsertStateWithDb(
+  private async commitFullStateWithCurrentCount(
     db: Database,
     syncedAt: string,
-    oldestMonth: string,
-    totalRecords: number
+    oldestMonth: string
   ): Promise<void> {
+    const countRow = await db.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM form16_planned_idle_records"
+    );
+    const totalRecords =
+      typeof countRow?.count === "number" && Number.isFinite(countRow.count)
+        ? countRow.count
+        : 0;
     await db.run(
       `
-      INSERT INTO form16_planned_idle_state (id, synced_at, oldest_month, total_records, updated_at)
-      VALUES (1, ?, ?, ?, ?)
+      INSERT INTO form16_planned_idle_state (
+        id, synced_at, oldest_month, total_records, full_revision, projection_revision, updated_at
+      )
+      VALUES (1, ?, ?, ?, 1, 1, ?)
       ON CONFLICT(id) DO UPDATE SET
         synced_at = excluded.synced_at,
         oldest_month = excluded.oldest_month,
         total_records = excluded.total_records,
+        full_revision = form16_planned_idle_state.full_revision + 1,
+        projection_revision = form16_planned_idle_state.projection_revision + 1,
         updated_at = excluded.updated_at
       `,
       syncedAt,
       oldestMonth,
       totalRecords,
+      syncedAt
+    );
+  }
+
+  private async incrementProjectionRevisionWithCurrentCount(
+    db: Database,
+    updatedAt: string
+  ): Promise<void> {
+    const countRow = await db.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM form16_planned_idle_records"
+    );
+    const totalRecords =
+      typeof countRow?.count === "number" && Number.isFinite(countRow.count)
+        ? countRow.count
+        : 0;
+    await db.run(
+      `INSERT INTO form16_planned_idle_state (
+         id, synced_at, oldest_month, total_records, full_revision, projection_revision, updated_at
+       )
+       VALUES (1, NULL, NULL, ?, 0, 1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         total_records = excluded.total_records,
+         projection_revision = form16_planned_idle_state.projection_revision + 1,
+         updated_at = excluded.updated_at`,
+      totalRecords,
+      updatedAt
+    );
+  }
+
+  private async upsertMonthStateWithDb(
+    db: Database,
+    monthKey: string,
+    syncedAt: string
+  ): Promise<void> {
+    await db.run(
+      `INSERT INTO form16_planned_idle_month_state (month_key, synced_at, revision)
+       VALUES (?, ?, 1)
+       ON CONFLICT(month_key) DO UPDATE SET
+         synced_at = excluded.synced_at,
+         revision = form16_planned_idle_month_state.revision + 1`,
+      monthKey,
       syncedAt
     );
   }

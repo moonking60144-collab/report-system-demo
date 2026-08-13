@@ -22,6 +22,32 @@ async function withTestServer(run: (baseUrl: string) => Promise<void>): Promise<
         activeCoalescingKeys: 1,
         coalescedCallbacks: 2,
       }),
+      getRuntimeHealthSnapshot: () => ({
+        at: "2026-08-13T00:00:00.000Z",
+        ragic: {} as never,
+        createTasks: {} as never,
+        form16WriteReverify: {} as never,
+        workReportMutationQueue: {
+          accepting: true,
+          activeKeyCount: 1,
+          pendingTaskCount: 2,
+          oldestPendingTaskAgeMs: 800,
+          highestPendingTaskCountPerKey: 2,
+          maxPendingTaskCount: 500,
+          maxPendingTaskCountPerKey: 25,
+          maxOldestPendingTaskAgeMs: 600000,
+        },
+        memory: {
+          rssBytes: 100,
+          heapTotalBytes: 80,
+          heapUsedBytes: 40,
+          heapUsedRatio: 0.5,
+          externalBytes: 10,
+          arrayBuffersBytes: 5,
+        },
+        eventLoopLagMs: { mean: 1, p95: 2, max: 3 },
+        warnings: [],
+      }),
     })
   );
 
@@ -72,6 +98,10 @@ test("GET /api/health?detail=1 回傳 Ragic scheduler 與 callback queue 指標"
         activeCoalescingKeys: number;
         coalescedCallbacks: number;
       };
+      runtime: {
+        workReportMutationQueue: { pendingTaskCount: number };
+        eventLoopLagMs: { p95: number };
+      };
     };
 
     assert.deepEqual(payload.ragicScheduler, {
@@ -85,5 +115,7 @@ test("GET /api/health?detail=1 回傳 Ragic scheduler 與 callback queue 指標"
       activeCoalescingKeys: 1,
       coalescedCallbacks: 2,
     });
+    assert.equal(payload.runtime.workReportMutationQueue.pendingTaskCount, 2);
+    assert.equal(payload.runtime.eventLoopLagMs.p95, 2);
   });
 });

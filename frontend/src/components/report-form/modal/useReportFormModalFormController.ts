@@ -6,7 +6,6 @@ import type {
   WorkReportItem,
   WorkReportRecord,
 } from "../../../api/workReport";
-import type { WorkReportFormId } from "../../../features/work-report/types";
 import {
   translateInputOptionValue,
   translateReportTypeValue,
@@ -29,7 +28,7 @@ import {
   normalizeShiftTypeValue,
   validate,
 } from "../formLogic";
-import { buildInitialFormState, writeRememberedCreateDefaults } from "../formMemory";
+import { buildInitialFormState } from "../formMemory";
 import { buildLocalizedOptions, withCurrentValue } from "../optionUtils";
 import { maskTimeInputResult } from "../timeUtils";
 import type { FormState } from "../types";
@@ -62,7 +61,6 @@ function normalizeDateInputValue(rawValue: string): string {
 }
 
 interface UseReportFormModalFormControllerArgs {
-  formId: WorkReportFormId;
   mode: "create" | "edit";
   initialValue?: WorkReportItem | null;
   entryContext?: WorkReportRecord | null;
@@ -89,7 +87,6 @@ interface UseReportFormModalFormControllerArgs {
 }
 
 export function useReportFormModalFormController({
-  formId,
   mode,
   initialValue,
   entryContext,
@@ -104,14 +101,12 @@ export function useReportFormModalFormController({
   const initialFormState = useMemo(
     () =>
       buildInitialFormState(
-        formId,
         mode,
         initialValue,
         entryContext,
-        options.machineId ?? [],
-        options.operatorId ?? []
+        options.machineId ?? []
       ),
-    [entryContext, formId, initialValue, mode, options.machineId, options.operatorId]
+    [entryContext, initialValue, mode, options.machineId]
   );
   const [formState, setFormState] = useState<FormState>(() => initialFormState);
   const [error, setError] = useState<string | null>(null);
@@ -348,9 +343,6 @@ export function useReportFormModalFormController({
       await onSubmit(payload, {
         continueAfterSave: submitIntent === "save-and-next",
       });
-      if (mode === "create") {
-        writeRememberedCreateDefaults(formId, formState, entryContext?.id ?? "");
-      }
       setSaveProgress(100);
     } catch (submitError) {
       if (submitError instanceof Error) {

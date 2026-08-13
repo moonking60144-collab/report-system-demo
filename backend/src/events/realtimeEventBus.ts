@@ -57,6 +57,21 @@ export function publishWorkReportUpdated(formId: string, entryId: string): Realt
   });
 }
 
+export function publishWorkReportEntriesUpdated(
+  formId: string,
+  entryIds: string[]
+): RealtimeEventPayload {
+  const normalizedFormId = String(formId ?? "").trim();
+  const normalizedEntryIds = Array.from(
+    new Set(entryIds.map((entryId) => String(entryId ?? "").trim()).filter(Boolean))
+  );
+  return realtimeEventBus.publish({
+    type: "work-report-entries-updated",
+    formId: normalizedFormId,
+    entryIds: normalizedEntryIds,
+  });
+}
+
 export function publishWorkReportFormUpdated(formId: string): RealtimeEventPayload {
   const normalizedFormId = String(formId ?? "").trim();
   return realtimeEventBus.publish({

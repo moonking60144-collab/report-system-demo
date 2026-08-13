@@ -1,6 +1,7 @@
 export type RealtimeEventType =
   | "work-report-form-updated"
   | "work-report-entry-updated"
+  | "work-report-entries-updated"
   | "system-notice-force-refresh"
   | "system-notice-content-updated"
   | "ragic-definitions-sync-status";
@@ -30,6 +31,7 @@ export interface RealtimeEventPayload {
   occurredAt: string;
   formId?: string;
   entryId?: string;
+  entryIds?: string[];
   forceRefreshToken?: string;
   noticeRevision?: number;
   ragicDefinitions?: RagicDefinitionsSyncPayload;

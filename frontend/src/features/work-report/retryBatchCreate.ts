@@ -81,6 +81,17 @@ export async function retryBatchCreateFromRecord(
     Array.isArray(task.batchCreatedRowIds) &&
     task.batchCreatedRowIds.length > 0;
 
+  const retryRows = record.rows.filter(
+    (row): row is typeof row & { clientRowKey: string } =>
+      typeof row.clientRowKey === "string" && row.clientRowKey.trim().length > 0
+  );
+  if (!useFinalizeRetry && retryRows.length !== record.rows.length) {
+    deleteRetryableBatchCreateRecordChain(record.taskId);
+    throw new Error(
+      "這筆舊批次新增缺少逐列防重識別碼，不能安全重送；請重新建立批次。"
+    );
+  }
+
   const accepted = useFinalizeRetry
     ? await retryBatchCreateFinalizeAccepted(
         record.formId,
@@ -91,7 +102,7 @@ export async function retryBatchCreateFromRecord(
     : await createReportsBatchAccepted(
         record.formId,
         record.entryId,
-        record.rows,
+        retryRows,
         {
           expectedEntryLastUpdatedAt: record.expectedEntryLastUpdatedAt,
           editSessionId: record.editSessionId,

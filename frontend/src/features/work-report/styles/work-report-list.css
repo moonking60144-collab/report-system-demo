@@ -1,5 +1,7 @@
 @import "./layout-sidebar-toolbar.css";
 @import "./status-task-table-base.css";
+@import "./task-queue.css";
 @import "./column-menu.css";
+@import "./list-column-settings.css";
 @import "./table-detail-overlays.css";
 @import "./responsive.css";

@@ -43,6 +43,9 @@ export interface Form16WriteReverifyTask {
   workReportFormId?: string;
   workReportEntryId?: string;
   workOrderNo?: string;
+  clientRowKey?: string;
+  idempotencySource?: string;
+  idempotencyReservationToken?: string;
 }
 
 interface Form16WriteReverifySnapshot {
@@ -57,6 +60,9 @@ export interface EnqueueForm16WriteReverifyInput
   workReportFormId?: string;
   workReportEntryId?: string;
   workOrderNo?: string;
+  clientRowKey?: string;
+  idempotencySource?: string;
+  idempotencyReservationToken?: string;
 }
 
 export interface Form16WriteReverifyServiceOptions {
@@ -96,6 +102,15 @@ async function defaultInvalidateIdempotencyOnEntryGone(
   if (task.source === "work-report-batch-create") {
     await batchCreateRowKeyRepository.deleteByRagicRowId(task.entryId);
   } else if (task.source === "work-report-create" || task.source === "downtime") {
+    if (task.clientRowKey && task.idempotencySource && task.idempotencyReservationToken) {
+      await form16ClientRowKeyRepository.deleteByReservationIdentity({
+        clientRowKey: task.clientRowKey,
+        source: task.idempotencySource,
+        reservationToken: task.idempotencyReservationToken,
+        entryId: task.entryId,
+      });
+      return;
+    }
     await form16ClientRowKeyRepository.deleteByEntryId(task.entryId);
   }
 }
@@ -225,6 +240,11 @@ export class Form16WriteReverifyService {
       ...(input.workReportFormId ? { workReportFormId: input.workReportFormId } : {}),
       ...(input.workReportEntryId ? { workReportEntryId: input.workReportEntryId } : {}),
       ...(input.workOrderNo ? { workOrderNo: input.workOrderNo } : {}),
+      ...(input.clientRowKey ? { clientRowKey: input.clientRowKey } : {}),
+      ...(input.idempotencySource ? { idempotencySource: input.idempotencySource } : {}),
+      ...(input.idempotencyReservationToken
+        ? { idempotencyReservationToken: input.idempotencyReservationToken }
+        : {}),
     };
     this.tasks.set(key, task);
     this.schedulePersist();

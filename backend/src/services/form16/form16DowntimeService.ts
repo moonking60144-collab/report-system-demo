@@ -10,7 +10,11 @@ import {
 } from "../work-report/shared/valueUtils";
 import { workReportReadService } from "../work-report/workReportReadService";
 import { buildBackgroundReadOptions } from "../work-report/shared/refreshEntryOptions";
-import { form16DowntimeSqliteRepository } from "../../storage/sqlite/form16DowntimeSqliteRepository";
+import {
+  buildForm16DowntimeRecordSnapshotHash,
+  form16DowntimeSqliteRepository,
+} from "../../storage/sqlite/form16DowntimeSqliteRepository";
+import { form16ClientRowKeyRepository } from "../../storage/sqlite/form16ClientRowKeyRepository";
 import {
   form16PlannedIdleSqliteRepository,
   type PlannedIdleMachineAggregate,
@@ -27,6 +31,12 @@ import type { Form16DowntimeRecord } from "../../types/form16Downtime";
 import { checkOrCreateForm16Entry } from "./form16IdempotencyService";
 import { form16WriteReverifyService } from "./form16WriteReverifyService";
 import { assertForm16EntryStored } from "./form16WriteVerifier";
+import { createStableJsonFingerprint } from "../../utils/stableJsonFingerprint";
+import { createKeyedSerialQueue } from "../../utils/keyedSerialQueue";
+import {
+  WorkReportAutoSyncYieldRequestedError,
+  workReportMutationSyncCoordinator,
+} from "../work-report-sync/workReportMutationSyncCoordinator";
 
 const FORM_16_DEFAULT_INPUT_OPTIONS = "整天";
 const FORM_16_DEFAULT_SHIFT_TYPE = "正常班Reg";
@@ -130,6 +140,7 @@ export interface UpdateForm16DowntimeInput {
 
 export interface Form16DowntimeMutationOptions {
   expectedSnapshotHash?: string | null;
+  deferProjection?: boolean;
 }
 
 export interface ListForm16DowntimeOptions {
@@ -188,8 +199,10 @@ export interface PlannedIdleMachineSummary {
 export interface PlannedIdleSummaryResult {
   month: string;
   machines: PlannedIdleMachineSummary[];
-  // C14：資料來源，前端可據此辨「SQLite 快取」或「即時撈最新」的新鮮度。
   source: "sqlite" | "ragic-live";
+  refreshed: boolean;
+  refreshTriggered: boolean;
+  snapshotAt: string | null;
 }
 
 // 解析月份範圍：傳 YYYY/MM（或 YYYY-MM）用該月，沒傳就用「當月」。回 Ragic 日期格式的起訖。
@@ -244,8 +257,9 @@ function resolveHalfYearRange(): { start: string; end: string; oldestMonth: stri
 
 export class Form16DowntimeService {
   private refreshSnapshotPromise: Promise<Form16DowntimeRecord[]> | null = null;
+  private readonly entryProjectionQueue = createKeyedSerialQueue();
   // 背景重撈某月計畫停機的 in-flight promise（key=ym），防同月併發重複慢撈、也防無界累積。
-  private readonly plannedIdleMonthRefreshing = new Map<string, Promise<void>>();
+  private readonly plannedIdleMonthRefreshing = new Map<string, Promise<string | null>>();
 
   async getOptions() {
     try {
@@ -303,7 +317,7 @@ export class Form16DowntimeService {
 
     if (!hasSnapshot) {
       // 沒有 snapshot 時不阻塞 — 回空、背景觸發 refresh
-      void this.refreshSqliteSnapshotFromRagic().catch((error) => {
+      void this.refreshSqliteSnapshotFromRagic({ yieldToMutation: true }).catch((error) => {
         console.warn("[form16-downtime][background-initial-refresh-failed]", {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -318,7 +332,7 @@ export class Form16DowntimeService {
     }
 
     // refresh=true — 背景刷新、先回舊資料，避免跟 auto-sync 搶 concurrency timeout
-    void this.refreshSqliteSnapshotFromRagic().catch((error) => {
+    void this.refreshSqliteSnapshotFromRagic({ yieldToMutation: true }).catch((error) => {
       console.warn("[form16-downtime][background-refresh-failed]", {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -332,30 +346,64 @@ export class Form16DowntimeService {
     };
   }
 
-  async refreshSqliteSnapshotFromRagic(): Promise<Form16DowntimeRecord[]> {
+  async refreshSqliteSnapshotFromRagic(
+    options: { yieldToMutation?: boolean } = {}
+  ): Promise<Form16DowntimeRecord[]> {
     if (this.refreshSnapshotPromise) {
       return this.refreshSnapshotPromise;
     }
 
     const run = (async () => {
-      const records = await this.fetchRecordsFromRagic();
-      // fetchRecordsFromRagic 失敗會 throw（不會回 []），所以走到這代表 fetch 成功。
-      // 0 筆是合法結果（30 天內真的沒任何計畫停機，或舊資料超出時間範圍），
-      // 此時 SQLite 該同步成空集合，syncSnapshot([]) 會 delete 殘留的 30+ 天舊資料。
-      // 之前有個「records.length === 0 + existing > 0 就跳過」的保護是為了防 fetch
-      // 失敗誤覆蓋，但 fetch 失敗已經 throw 不會走到這，保護反而擋掉合法清除。
-      if (env.SQLITE_ENABLED) {
-        // incremental sync：比對 diff、不會洗掉剛 upsert 的新建 entry
-        await form16DowntimeSqliteRepository.syncSnapshot(records, new Date().toISOString());
+      const shouldYieldToMutation = options.yieldToMutation
+        ? () => workReportMutationSyncCoordinator.shouldDeferAutoSyncForMutation()
+        : undefined;
+
+      while (true) {
+        const releaseSyncSlot = await workReportMutationSyncCoordinator.acquireSyncSlot();
+        try {
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const expectedRevision = env.SQLITE_ENABLED
+              ? (await form16DowntimeSqliteRepository.getSnapshotState())?.revision ?? 0
+              : 0;
+            const records = await this.fetchRecordsFromRagic(shouldYieldToMutation);
+            if (shouldYieldToMutation?.()) {
+              throw new WorkReportAutoSyncYieldRequestedError();
+            }
+            if (!env.SQLITE_ENABLED) {
+              return records;
+            }
+            const result = await form16DowntimeSqliteRepository.syncSnapshot(
+              records,
+              new Date().toISOString(),
+              expectedRevision
+            );
+            if (result === "applied") {
+              return records;
+            }
+          }
+          throw new HttpError(
+            409,
+            "停機紀錄同步期間持續有較新的資料異動，這輪快照未套用，稍後會再次同步。",
+            "FORM16_DOWNTIME_SNAPSHOT_CONFLICT"
+          );
+        } catch (error) {
+          if (
+            !options.yieldToMutation ||
+            !(error instanceof WorkReportAutoSyncYieldRequestedError)
+          ) {
+            throw error;
+          }
+        } finally {
+          releaseSyncSlot();
+        }
       }
-      return records;
     })();
 
     this.refreshSnapshotPromise = run.finally(() => {
       this.refreshSnapshotPromise = null;
     });
 
-    return run;
+    return this.refreshSnapshotPromise;
   }
 
   async checkSnapshotStaleness(): Promise<{ isStale: boolean }> {
@@ -410,6 +458,17 @@ export class Form16DowntimeService {
       return null;
     }
 
+    let result: Form16DowntimeRecord | null = null;
+    await this.entryProjectionQueue.enqueue(`form16:${normalizedEntryId}`, async () => {
+      result = await this.refreshEntrySnapshotFromRagicNow(normalizedEntryId);
+    });
+    return result;
+  }
+
+  private async refreshEntrySnapshotFromRagicNow(
+    normalizedEntryId: string
+  ): Promise<Form16DowntimeRecord | null> {
+
     const form16Path = resolveForm16Path();
     // Form 16 沒 webhook，這條是：
     // (a) callback task 觸發 → 背景刷新 SQLite snapshot
@@ -444,7 +503,9 @@ export class Form16DowntimeService {
     return record;
   }
 
-  private async fetchRecordsFromRagic(): Promise<Form16DowntimeRecord[]> {
+  private async fetchRecordsFromRagic(
+    shouldYieldToMutation?: () => boolean
+  ): Promise<Form16DowntimeRecord[]> {
     const form16Path = resolveForm16Path();
     const t0 = Date.now();
 
@@ -469,6 +530,9 @@ export class Form16DowntimeService {
     const pageSize = 1000;
 
     while (true) {
+      if (shouldYieldToMutation?.()) {
+        throw new WorkReportAutoSyncYieldRequestedError();
+      }
       const page = await ragicClient.getFormPage(
         form16Path,
         { limit: pageSize, offset, where: whereClauses },
@@ -477,6 +541,9 @@ export class Form16DowntimeService {
       );
       const rows = normalizeRows(page);
       allRows.push(...rows);
+      if (shouldYieldToMutation?.()) {
+        throw new WorkReportAutoSyncYieldRequestedError();
+      }
       if (rows.length < pageSize) {
         break;
       }
@@ -518,7 +585,14 @@ export class Form16DowntimeService {
     // A1：SQLITE 關閉時直接走即時撈、不碰任何 SQLite（對齊 listRecords 的 fallback，避免 getDb 直接 throw 503）。
     if (!env.SQLITE_ENABLED) {
       const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
-      return this.toSummaryResult(ym, this.aggregateRecords(records), "ragic-live");
+      return this.toSummaryResult(
+        ym,
+        this.aggregateRecords(records),
+        "ragic-live",
+        true,
+        false,
+        new Date().toISOString()
+      );
     }
 
     // 平常走 SQLite：
@@ -526,60 +600,126 @@ export class Form16DowntimeService {
     const state = await form16PlannedIdleSqliteRepository.getState();
     const synced = Boolean(state?.syncedAt && state.oldestMonth && ym >= state.oldestMonth);
     if (synced) {
-      const stored = await form16PlannedIdleSqliteRepository.aggregateByMonth(ym);
-      // refresh：先回 SQLite 舊值，背景重撈該月寫回，不把 c1/16 全表慢掃（~2-4 分）
-      // 掛在使用者請求上（對齊 listRecords 的背景刷新；同月併發只觸發一次）。
+      const refreshedAt = await form16PlannedIdleSqliteRepository.getMonthSyncedAt(ym);
       if (refresh) {
-        this.refreshPlannedIdleMonthInBackground(ym, start, end);
+        void this.refreshPlannedIdleMonth(ym, start, end).catch((error) => {
+          console.warn("[planned-idle][background-refresh-failed]", {
+            ym,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
-      return this.toSummaryResult(ym, stored, "sqlite");
+      const stored = await form16PlannedIdleSqliteRepository.aggregateByMonth(ym);
+      return this.toSummaryResult(
+        ym,
+        stored,
+        "sqlite",
+        false,
+        refresh,
+        refreshedAt ?? state?.syncedAt ?? null
+      );
     }
 
     // SQLite 完全沒這月（首次、或 ym 超出同步範圍）：只能即時撈一次填上
+    const refreshBarrier = await form16PlannedIdleSqliteRepository.getRefreshBarrier(ym);
     const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+    const fetchedAt = new Date().toISOString();
+    let replaceResult: "applied" | "stale" | "failed" = "failed";
     // C9：寫快取失敗不該擋掉已撈到的結果，比照同檔其他 SQLite 寫入「失敗只 log」。
     try {
-      await form16PlannedIdleSqliteRepository.replaceMonth(ym, records, new Date().toISOString());
+      replaceResult = await form16PlannedIdleSqliteRepository.replaceMonth(
+        ym,
+        records,
+        fetchedAt,
+        refreshBarrier
+      );
     } catch (error) {
       console.warn("[planned-idle][replace-month-failed]", {
         ym,
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    return this.toSummaryResult(ym, this.aggregateRecords(records), "ragic-live");
+    if (replaceResult === "stale") {
+      return this.toSummaryResult(
+        ym,
+        await form16PlannedIdleSqliteRepository.aggregateByMonth(ym),
+        "sqlite",
+        true,
+        false,
+        (await form16PlannedIdleSqliteRepository.getMonthSyncedAt(ym)) ??
+          (await form16PlannedIdleSqliteRepository.getState())?.syncedAt ??
+          null
+      );
+    }
+    return this.toSummaryResult(
+      ym,
+      this.aggregateRecords(records),
+      "ragic-live",
+      true,
+      false,
+      (await form16PlannedIdleSqliteRepository.getMonthSyncedAt(ym)) ?? fetchedAt
+    );
   }
 
-  // 背景重撈某月計畫停機寫回 SQLite，不阻塞使用者；同月併發只跑一個、跑完即釋放。
-  private refreshPlannedIdleMonthInBackground(ym: string, start: string, end: string): void {
-    if (this.plannedIdleMonthRefreshing.has(ym)) {
-      return;
+  private refreshPlannedIdleMonth(
+    ym: string,
+    start: string,
+    end: string
+  ): Promise<string | null> {
+    const existing = this.plannedIdleMonthRefreshing.get(ym);
+    if (existing) {
+      return existing;
     }
     const run = (async () => {
-      const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
-      await form16PlannedIdleSqliteRepository.replaceMonth(ym, records, new Date().toISOString());
-    })()
-      .catch((error) => {
-        console.warn("[planned-idle][background-refresh-failed]", {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const refreshBarrier = await form16PlannedIdleSqliteRepository.getRefreshBarrier(ym);
+        const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+        const syncedAt = new Date().toISOString();
+        const result = await form16PlannedIdleSqliteRepository.replaceMonth(
           ym,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
+          records,
+          syncedAt,
+          refreshBarrier
+        );
+        if (result === "applied") {
+          return form16PlannedIdleSqliteRepository.getMonthSyncedAt(ym);
+        }
+      }
+      throw new HttpError(
+        409,
+        `計畫停機 ${ym} 同步期間持續有較新的資料異動，這輪快照未套用。`,
+        "FORM16_PLANNED_IDLE_MONTH_CONFLICT"
+      );
+    })()
       .finally(() => {
         this.plannedIdleMonthRefreshing.delete(ym);
       });
     this.plannedIdleMonthRefreshing.set(ym, run);
+    return run;
   }
 
   // 背景定時同步：撈近半年所有 (P)計畫停機分 > 0 的筆，全量替換 SQLite（順便清掉半年外的）。
   async syncPlannedIdleHalfYear(): Promise<{ total: number }> {
     const { start, end, oldestMonth } = resolveHalfYearRange();
-    const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
-    await form16PlannedIdleSqliteRepository.replaceAll(
-      records,
-      oldestMonth,
-      new Date().toISOString()
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const expectedProjectionRevision =
+        await form16PlannedIdleSqliteRepository.getProjectionRevision();
+      const records = await this.fetchPlannedIdleRowsFromRagic(start, end);
+      const result = await form16PlannedIdleSqliteRepository.replaceAll(
+        records,
+        oldestMonth,
+        new Date().toISOString(),
+        expectedProjectionRevision
+      );
+      if (result === "applied") {
+        return { total: records.length };
+      }
+    }
+    throw new HttpError(
+      409,
+      "半年計畫停機同步期間持續有較新的資料異動，這輪快照未套用。",
+      "FORM16_PLANNED_IDLE_SYNC_CONFLICT"
     );
-    return { total: records.length };
   }
 
   // 撈 c1/16 指定日期範圍、挑出 (P)計畫停機分 > 0 的筆（口徑 B：含有工令的部分停機）。
@@ -671,7 +811,10 @@ export class Form16DowntimeService {
   private toSummaryResult(
     ym: string,
     aggregates: PlannedIdleMachineAggregate[],
-    source: "sqlite" | "ragic-live"
+    source: "sqlite" | "ragic-live",
+    refreshed: boolean,
+    refreshTriggered: boolean,
+    snapshotAt: string | null
   ): PlannedIdleSummaryResult {
     const machines = aggregates
       .map((entry) => ({
@@ -682,16 +825,18 @@ export class Form16DowntimeService {
         count: entry.count,
       }))
       .sort((left, right) => right.totalMinutes - left.totalMinutes);
-    return { month: ym, machines, source };
+    return { month: ym, machines, source, refreshed, refreshTriggered, snapshotAt };
   }
 
   // 同日同機台已有計畫停機就擋掉，避免像 5/11 那樣重複建一筆、把稼動表的計劃停機天數灌爆。
   private async assertNoDuplicatePlannedIdle(
     form16Path: string,
     date: string,
-    machineId: string
+    machineId: string,
+    excludeEntryId?: string
   ): Promise<void> {
     const ragicDate = date.replace(/-/g, "/");
+    const normalizedExcludedEntryId = String(excludeEntryId ?? "").trim();
     // 只用「日期 + 計畫停機=Yes」查（機台是 linked 欄、where 不穩），撈回來本地比對機台
     const page = await ragicClient.getFormPage(
       form16Path,
@@ -700,6 +845,9 @@ export class Form16DowntimeService {
       { timeoutMs: env.RAGIC_READ_TIMEOUT_MS, priority: "user" }
     );
     const duplicate = normalizeRows(page).some((row) => {
+      if (normalizedExcludedEntryId && row.entryId === normalizedExcludedEntryId) {
+        return false;
+      }
       const record = this.mapRowToRecord(row.entryId, row.data);
       return Boolean(record && String(record.machineId ?? "").trim() === machineId);
     });
@@ -712,7 +860,10 @@ export class Form16DowntimeService {
     }
   }
 
-  async createRecord(input: CreateForm16DowntimeInput): Promise<{ created: true; entryId: string }> {
+  async createRecord(
+    input: CreateForm16DowntimeInput,
+    options: { deferProjection?: boolean } = {}
+  ): Promise<{ created: true; entryId: string }> {
     const form16Path = resolveForm16Path();
     const date = String(input.date ?? "").trim();
     const machineId = String(input.machineId ?? "").trim();
@@ -730,13 +881,29 @@ export class Form16DowntimeService {
       throw new HttpError(400, "缺少必要欄位：processCode", "INVALID_PAYLOAD");
     }
 
-    // 同日同機台重複防呆：稼動表會把每筆計畫停機當一天扣，重複建就灌爆運轉率（如 5/11 建兩筆）
-    await this.assertNoDuplicatePlannedIdle(form16Path, date, machineId);
-
     const plannedIdleMinutes =
       typeof input.plannedIdleMinutes === "number" && Number.isFinite(input.plannedIdleMinutes)
         ? Math.max(0, Math.trunc(input.plannedIdleMinutes))
         : FORM_16_DEFAULT_PLANNED_IDLE_MINUTES;
+
+    const recoveredEntryId = await this.findConfirmedCreateRecovery({
+      clientRowKey: input.clientRowKey,
+      form16Path,
+      date,
+      machineId,
+      processCode,
+      operatorId,
+      plannedIdleMinutes,
+      remark,
+    });
+    if (recoveredEntryId) {
+      console.info("[form16-downtime][idempotency-early-hit]", {
+        clientRowKey: input.clientRowKey,
+        entryId: recoveredEntryId,
+      });
+      await this.bumpPlannedIdleProjectionRevision("create", recoveredEntryId);
+      return { created: true, entryId: recoveredEntryId };
+    }
 
     const t0 = Date.now();
     const resolvedReportType = resolveForm16ReportType("", processCode, "");
@@ -786,7 +953,15 @@ export class Form16DowntimeService {
     const { entryId: createdEntryId, reused } = await checkOrCreateForm16Entry({
       clientRowKey: input.clientRowKey,
       source: "downtime",
-      create: async () => {
+      operationFingerprint: createStableJsonFingerprint({
+        operation: "create-downtime",
+        payload,
+      }),
+      create: async (reservation) => {
+        // confirmed idempotency mapping 會在進入 callback 前直接回既有 entry；只有新 reservation
+        // 才做 duplicate guard，避免服務重啟後把已成功建立的同一筆誤判成重複。
+        await this.assertNoDuplicatePlannedIdle(form16Path, date, machineId);
+
         // 失敗語意統一：讓 ragicClient.createEntry 的 error 自然拋出，上層 idempotency
         // 不會記 mapping、route task worker 會標 failed、前端看到錯誤。
         // 原本的 try/catch + localEntryId=null 會讓 function 回「成功但 null」，
@@ -837,6 +1012,11 @@ export class Form16DowntimeService {
               await form16WriteReverifyService.enqueue({
                 ...payload,
                 source: "downtime",
+                clientRowKey: input.clientRowKey,
+                idempotencySource: "downtime",
+                ...(reservation?.reservationToken
+                  ? { idempotencyReservationToken: reservation.reservationToken }
+                  : {}),
               });
             },
           }
@@ -882,13 +1062,20 @@ export class Form16DowntimeService {
         }
 
         if (env.SQLITE_ENABLED && localEntryId) {
-          try {
-            await this.refreshEntrySnapshotFromRagic(localEntryId);
-          } catch (error) {
-            console.warn("[form16-downtime][sqlite-entry-refresh-failed]", {
-              entryId: localEntryId,
-              error: error instanceof Error ? error.message : String(error),
-            });
+          const refreshProjection = async () => {
+            try {
+              await this.refreshEntrySnapshotFromRagic(localEntryId);
+            } catch (error) {
+              console.warn("[form16-downtime][sqlite-entry-refresh-failed]", {
+                entryId: localEntryId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          };
+          if (options.deferProjection) {
+            void refreshProjection();
+          } else {
+            await refreshProjection();
           }
         }
 
@@ -915,6 +1102,7 @@ export class Form16DowntimeService {
         "RAGIC_WRITE_FAILED"
       );
     }
+    await this.bumpPlannedIdleProjectionRevision("create", createdEntryId);
     return { created: true, entryId: createdEntryId };
   }
 
@@ -922,20 +1110,28 @@ export class Form16DowntimeService {
     entryId: string,
     patch: UpdateForm16DowntimeInput,
     options: Form16DowntimeMutationOptions = {}
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; beforeSnapshot: Form16DowntimeRecord }> {
     const normalizedEntryId = String(entryId ?? "").trim();
     if (!/^\d+$/.test(normalizedEntryId)) {
       throw new HttpError(400, `非法的 entryId：${entryId}`, "INVALID_ENTRY_ID");
     }
     const form16Path = resolveForm16Path();
-    await this.assertRecordSnapshotUnchanged(normalizedEntryId, options.expectedSnapshotHash);
+    const beforeSnapshot = await this.readCurrentRecordFromRagic(form16Path, normalizedEntryId);
+    await this.assertRecordSnapshotUnchanged(
+      normalizedEntryId,
+      options.expectedSnapshotHash,
+      beforeSnapshot
+    );
 
     const payload: RagicRecord = {};
     const writeFields = FORM_104_CONFIG.writeConfig.subtableWriteFields;
+    let nextDate: string | null = null;
+    let nextMachineId: string | null = null;
 
     if (patch.date !== undefined) {
       const value = String(patch.date).trim();
       if (!value) throw new HttpError(400, "date 不可為空", "INVALID_PAYLOAD");
+      nextDate = value;
       payload[writeFields.date] = value;
     }
 
@@ -951,6 +1147,7 @@ export class Form16DowntimeService {
     if (patch.machineId !== undefined) {
       const value = String(patch.machineId).trim();
       if (!value) throw new HttpError(400, "machineId 不可為空", "INVALID_PAYLOAD");
+      nextMachineId = value;
       payload[writeFields.machineId] = value;
     }
 
@@ -998,51 +1195,188 @@ export class Form16DowntimeService {
       throw new HttpError(400, "沒有需要更新的欄位", "INVALID_PAYLOAD");
     }
 
+    if (nextDate !== null || nextMachineId !== null) {
+      const effectiveDate = nextDate ?? String(beforeSnapshot.date ?? "").trim();
+      const effectiveMachineId = nextMachineId ?? String(beforeSnapshot.machineId ?? "").trim();
+      if (!effectiveDate || !effectiveMachineId) {
+        throw new HttpError(
+          409,
+          "無法確認停機紀錄目前的日期或機台，請重新整理後再操作",
+          "DOWNTIME_RECORD_STALE"
+        );
+      }
+      await this.assertNoDuplicatePlannedIdle(
+        form16Path,
+        effectiveDate,
+        effectiveMachineId,
+        normalizedEntryId
+      );
+    }
+
     await ragicClient.updateEntry(form16Path, normalizedEntryId, payload, "POST", {
       doWorkflow: true,
       doFormula: true,
       doLinkLoad: "all",
     });
+    await this.bumpPlannedIdleProjectionRevision("update", normalizedEntryId);
     // Ragic 寫入成功後同步 refresh local snapshot
     // - Ragic 端沒有 webhook，沒有其他機制會幫忙同步，必須這裡顧好
     // - refresh 失敗（mapRowToRecord 回 null / Ragic 抖動）只 log，不誤報 500
-    try {
-      await this.refreshEntrySnapshotFromRagic(normalizedEntryId);
-    } catch (error) {
-      console.warn("[form16-downtime][update-refresh-failed]", {
-        entryId: normalizedEntryId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    const refreshProjection = async () => {
+      try {
+        await this.refreshEntrySnapshotFromRagic(normalizedEntryId);
+      } catch (error) {
+        console.warn("[form16-downtime][update-refresh-failed]", {
+          entryId: normalizedEntryId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    if (options.deferProjection) {
+      void refreshProjection();
+    } else {
+      await refreshProjection();
     }
-    return { id: normalizedEntryId };
+    return { id: normalizedEntryId, beforeSnapshot };
   }
 
   async deleteRecord(
     entryId: string,
     options: Form16DowntimeMutationOptions = {}
-  ): Promise<{ deleted: true }> {
+  ): Promise<{ deleted: true; beforeSnapshot: Form16DowntimeRecord }> {
     const normalizedEntryId = String(entryId ?? "").trim();
     if (!/^\d+$/.test(normalizedEntryId)) {
       throw new HttpError(400, `非法的 entryId：${entryId}`, "INVALID_ENTRY_ID");
     }
     const form16Path = resolveForm16Path();
-    await this.assertRecordSnapshotUnchanged(normalizedEntryId, options.expectedSnapshotHash);
+    const beforeSnapshot = await this.readCurrentRecordFromRagic(form16Path, normalizedEntryId);
+    await this.assertRecordSnapshotUnchanged(
+      normalizedEntryId,
+      options.expectedSnapshotHash,
+      beforeSnapshot
+    );
     await ragicClient.deleteEntry(form16Path, normalizedEntryId);
+    await this.bumpPlannedIdleProjectionRevision("delete", normalizedEntryId);
     // 同步從本地 SQLite 刪掉（Ragic 端沒有 webhook 會幫忙通知）
     if (env.SQLITE_ENABLED) {
-      try {
-        await form16DowntimeSqliteRepository.deleteRecord(
-          normalizedEntryId,
-          new Date().toISOString()
-        );
-      } catch (error) {
-        console.warn("[form16-downtime][sqlite-delete-failed]", {
-          entryId: normalizedEntryId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      const deleteProjection = async () => {
+        try {
+          await form16DowntimeSqliteRepository.deleteRecord(
+            normalizedEntryId,
+            new Date().toISOString()
+          );
+        } catch (error) {
+          console.warn("[form16-downtime][sqlite-delete-failed]", {
+            entryId: normalizedEntryId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+      if (options.deferProjection) {
+        void deleteProjection();
+      } else {
+        await deleteProjection();
       }
     }
-    return { deleted: true };
+    return { deleted: true, beforeSnapshot };
+  }
+
+  private async bumpPlannedIdleProjectionRevision(
+    operation: "create" | "update" | "delete",
+    entryId: string
+  ): Promise<void> {
+    if (!env.SQLITE_ENABLED) {
+      return;
+    }
+    try {
+      await form16PlannedIdleSqliteRepository.bumpProjectionRevision();
+    } catch (error) {
+      // Ragic mutation 已完成，SQLite cache invalidation 失敗不可反轉成「寫入失敗」。
+      console.warn("[form16-downtime][planned-idle-revision-bump-failed]", {
+        operation,
+        entryId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async findConfirmedCreateRecovery(input: {
+    clientRowKey?: string | null;
+    form16Path: string;
+    date: string;
+    machineId: string;
+    processCode: string;
+    operatorId: string;
+    plannedIdleMinutes: number;
+    remark: string;
+  }): Promise<string | null> {
+    const clientRowKey = String(input.clientRowKey ?? "").trim();
+    if (!clientRowKey || !env.SQLITE_ENABLED) {
+      return null;
+    }
+
+    const mapping = await form16ClientRowKeyRepository.lookup(clientRowKey);
+    if (
+      mapping?.status !== "confirmed" ||
+      mapping.source !== "downtime" ||
+      !/^\d+$/.test(mapping.entryId)
+    ) {
+      return null;
+    }
+
+    let record: Form16DowntimeRecord | undefined;
+    try {
+      record = (await form16DowntimeSqliteRepository.listRecords()).find(
+        (candidate) => candidate.id === mapping.entryId
+      );
+    } catch {
+      record = undefined;
+    }
+    if (!record) {
+      try {
+        const entry = await ragicClient.getEntry(input.form16Path, mapping.entryId, false, {
+          timeoutMs: env.RAGIC_READ_TIMEOUT_MS,
+          priority: "user",
+        });
+        record = entry ? this.mapRowToRecord(mapping.entryId, entry) ?? undefined : undefined;
+      } catch {
+        return null;
+      }
+    }
+    if (!record) {
+      return null;
+    }
+
+    const normalizeDate = (value: string | null | undefined) =>
+      String(value ?? "").trim().replace(/-/g, "/");
+    const normalizeText = (value: string | null | undefined) => String(value ?? "").trim();
+    return normalizeDate(record.date) === normalizeDate(input.date) &&
+      normalizeText(record.machineId) === input.machineId &&
+      normalizeText(record.processCode) === input.processCode &&
+      normalizeText(record.operatorId) === input.operatorId &&
+      record.plannedIdleMinutes === input.plannedIdleMinutes &&
+      normalizeText(record.remark) === input.remark
+      ? mapping.entryId
+      : null;
+  }
+
+  private async readCurrentRecordFromRagic(
+    form16Path: string,
+    entryId: string
+  ): Promise<Form16DowntimeRecord> {
+    const currentEntry = await ragicClient.getEntry(form16Path, entryId, false, {
+      timeoutMs: env.RAGIC_READ_TIMEOUT_MS,
+      priority: "user",
+    });
+    const currentRecord = currentEntry ? this.mapRowToRecord(entryId, currentEntry) : null;
+    if (!currentRecord) {
+      throw new HttpError(
+        404,
+        "停機紀錄已不存在或不再是計畫停機資料",
+        "DOWNTIME_RECORD_NOT_FOUND"
+      );
+    }
+    return currentRecord;
   }
 
   private mapRowToRecord(entryId: string, row: RagicRecord): Form16DowntimeRecord | null {
@@ -1073,11 +1407,14 @@ export class Form16DowntimeService {
 
   async assertRecordSnapshotUnchanged(
     entryId: string,
-    expectedSnapshotHash?: string | null
+    expectedSnapshotHash?: string | null,
+    currentRecord?: Form16DowntimeRecord
   ): Promise<void> {
     const expected = String(expectedSnapshotHash ?? "").trim();
     if (!expected || !env.SQLITE_ENABLED) return;
-    const current = await form16DowntimeSqliteRepository.getRecordSnapshotHash(entryId);
+    const current = currentRecord
+      ? buildForm16DowntimeRecordSnapshotHash(currentRecord)
+      : await form16DowntimeSqliteRepository.getRecordSnapshotHash(entryId);
     if (!current) {
       throw new HttpError(
         409,

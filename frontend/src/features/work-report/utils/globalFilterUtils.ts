@@ -19,7 +19,51 @@ import type {
 } from "../types";
 import { readWorkReportLocalPreferences } from "./localPreferencesUtils";
 import { matchesRecordGlobalKeyword } from "./recordUtils";
-import { normalizeText, parseSemanticBoolean } from "./valueUtils";
+import { normalizeText, parseSemanticBoolean, toSortableDate } from "./valueUtils";
+
+const GLOBAL_FILTER_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeDateFilterValue(value: string | undefined): string {
+  const normalized = String(value ?? "").trim();
+  if (!GLOBAL_FILTER_DATE_PATTERN.test(normalized)) {
+    return "";
+  }
+  const [year, month, day] = normalized.split("-").map(Number);
+  const parsed = new Date(year, month - 1, day);
+  return parsed.getFullYear() === year &&
+    parsed.getMonth() === month - 1 &&
+    parsed.getDate() === day
+    ? normalized
+    : "";
+}
+
+function toLocalDateBoundaryIso(value: string, endOfDay: boolean): string | undefined {
+  const normalized = normalizeDateFilterValue(value);
+  if (!normalized) {
+    return undefined;
+  }
+  const [year, month, day] = normalized.split("-").map(Number);
+  const date = endOfDay
+    ? new Date(year, month - 1, day, 23, 59, 59, 999)
+    : new Date(year, month - 1, day);
+  return date.toISOString();
+}
+
+export function buildUpdatedDateRangeQuery(filters: GlobalFilters): {
+  updatedDateFrom?: string;
+  updatedDateTo?: string;
+} {
+  return {
+    updatedDateFrom: toLocalDateBoundaryIso(filters.updatedDateFrom, false),
+    updatedDateTo: toLocalDateBoundaryIso(filters.updatedDateTo, true),
+  };
+}
+
+export function isValidUpdatedDateRange(filters: GlobalFilters): boolean {
+  const updatedDateFrom = normalizeDateFilterValue(filters.updatedDateFrom);
+  const updatedDateTo = normalizeDateFilterValue(filters.updatedDateTo);
+  return !updatedDateFrom || !updatedDateTo || updatedDateFrom <= updatedDateTo;
+}
 
 function getExpectedLandingPageKeyForForm(formId: WorkReportFormId): WorkReportLandingPageKey {
   return formId === "105" ? "heading-105" : "thread-rolling-104";
@@ -82,7 +126,9 @@ function isExactUnfinishedMachineShortcut(
     normalized.workOrderKeyword !== "" ||
     normalized.customerPartKeyword !== "" ||
     normalized.ragicUnfinishedStatus !== ALL_FILTER_VALUE ||
-    normalized.siteRunning !== "all"
+    normalized.siteRunning !== "all" ||
+    normalized.updatedDateFrom !== "" ||
+    normalized.updatedDateTo !== ""
   ) {
     return false;
   }
@@ -114,8 +160,27 @@ export function hasActiveGlobalFilters(filters: GlobalFilters): boolean {
     filters.status !== ALL_FILTER_VALUE ||
     filters.ragicUnfinishedStatus !== ALL_FILTER_VALUE ||
     filters.siteRunning !== "all" ||
-    filters.startSchedule !== "all"
+    filters.startSchedule !== "all" ||
+    filters.updatedDateFrom.trim() !== "" ||
+    filters.updatedDateTo.trim() !== ""
   );
+}
+
+export function countActiveGlobalFilters(filters: GlobalFilters): number {
+  const normalized = normalizeFilters(filters);
+  return [
+    normalized.globalKeyword !== "",
+    normalized.workOrderKeyword !== "",
+    normalized.customerPartKeyword !== "",
+    normalized.machineCode !== ALL_FILTER_VALUE,
+    normalized.filterMachineCode !== ALL_FILTER_VALUE,
+    normalized.status !== ALL_FILTER_VALUE,
+    normalized.ragicUnfinishedStatus !== ALL_FILTER_VALUE,
+    normalized.siteRunning !== "all",
+    normalized.startSchedule !== "all",
+    normalized.updatedDateFrom !== "",
+    normalized.updatedDateTo !== "",
+  ].filter(Boolean).length;
 }
 
 export function normalizeFilters(filters: GlobalFilters): GlobalFilters {
@@ -135,6 +200,8 @@ export function normalizeFilters(filters: GlobalFilters): GlobalFilters {
       filters.startSchedule === "yes" || filters.startSchedule === "no"
         ? filters.startSchedule
         : "all",
+    updatedDateFrom: normalizeDateFilterValue(filters.updatedDateFrom),
+    updatedDateTo: normalizeDateFilterValue(filters.updatedDateTo),
   };
 }
 
@@ -150,7 +217,9 @@ export function isSameGlobalFilters(left: GlobalFilters, right: GlobalFilters): 
     a.status === b.status &&
     a.ragicUnfinishedStatus === b.ragicUnfinishedStatus &&
     a.siteRunning === b.siteRunning &&
-    a.startSchedule === b.startSchedule
+    a.startSchedule === b.startSchedule &&
+    a.updatedDateFrom === b.updatedDateFrom &&
+    a.updatedDateTo === b.updatedDateTo
   );
 }
 
@@ -176,7 +245,44 @@ export function readFiltersFromUrl(): GlobalFilters {
       startScheduleRaw === "yes" || startScheduleRaw === "no"
         ? (startScheduleRaw as "yes" | "no")
         : "all",
+    updatedDateFrom: normalizeDateFilterValue(params.get("fUpdatedFrom") ?? ""),
+    updatedDateTo: normalizeDateFilterValue(params.get("fUpdatedTo") ?? ""),
   };
+}
+
+export function writeGlobalFiltersToSearchParams(
+  params: URLSearchParams,
+  filters: GlobalFilters
+): void {
+  const values: Array<[string, string, boolean]> = [
+    ["fGlobal", filters.globalKeyword.trim(), filters.globalKeyword.trim() !== ""],
+    ["fWorkOrder", filters.workOrderKeyword.trim(), filters.workOrderKeyword.trim() !== ""],
+    ["fPart", filters.customerPartKeyword.trim(), filters.customerPartKeyword.trim() !== ""],
+    ["fMachine", filters.machineCode, filters.machineCode !== ALL_FILTER_VALUE],
+    [
+      "fFilterMachine",
+      filters.filterMachineCode,
+      filters.filterMachineCode !== ALL_FILTER_VALUE,
+    ],
+    ["fStatus", filters.status, filters.status !== ALL_FILTER_VALUE],
+    [
+      "fRagicUnfinished",
+      filters.ragicUnfinishedStatus,
+      filters.ragicUnfinishedStatus !== ALL_FILTER_VALUE,
+    ],
+    ["fSite", filters.siteRunning, filters.siteRunning !== "all"],
+    ["fStartSchedule", filters.startSchedule, filters.startSchedule !== "all"],
+    ["fUpdatedFrom", filters.updatedDateFrom, filters.updatedDateFrom !== ""],
+    ["fUpdatedTo", filters.updatedDateTo, filters.updatedDateTo !== ""],
+  ];
+
+  for (const [key, value, enabled] of values) {
+    if (enabled) {
+      params.set(key, value);
+    } else {
+      params.delete(key);
+    }
+  }
 }
 
 export function hasExplicitGlobalFilterParamsInUrl(): boolean {
@@ -406,6 +512,9 @@ export function applyGlobalFilters(records: WorkReportRecord[], filters: GlobalF
   const globalKeyword = normalizeText(filters.globalKeyword);
   const workOrderKeyword = normalizeText(filters.workOrderKeyword);
   const customerPartKeyword = normalizeText(filters.customerPartKeyword);
+  const { updatedDateFrom, updatedDateTo } = buildUpdatedDateRangeQuery(filters);
+  const updatedDateFromTimestamp = updatedDateFrom ? Date.parse(updatedDateFrom) : null;
+  const updatedDateToTimestamp = updatedDateTo ? Date.parse(updatedDateTo) : null;
 
   return records.filter((record) => {
     if (globalKeyword && !matchesRecordGlobalKeyword(record, globalKeyword)) {
@@ -464,6 +573,19 @@ export function applyGlobalFilters(records: WorkReportRecord[], filters: GlobalF
         return false;
       }
       if (filters.startSchedule === "no" && startSchedule !== false) {
+        return false;
+      }
+    }
+
+    if (updatedDateFromTimestamp !== null || updatedDateToTimestamp !== null) {
+      const lastUpdatedAt = toSortableDate(record.lastUpdatedAt);
+      if (lastUpdatedAt === null) {
+        return false;
+      }
+      if (updatedDateFromTimestamp !== null && lastUpdatedAt < updatedDateFromTimestamp) {
+        return false;
+      }
+      if (updatedDateToTimestamp !== null && lastUpdatedAt > updatedDateToTimestamp) {
         return false;
       }
     }

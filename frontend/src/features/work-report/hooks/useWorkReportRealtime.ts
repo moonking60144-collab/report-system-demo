@@ -17,6 +17,7 @@ interface UseWorkReportRealtimeArgs {
   enabled?: boolean;
   onFormUpdated?: (payload: RealtimeEventPayload) => void;
   onEntryUpdated?: (payload: RealtimeEventPayload) => void;
+  onEntriesUpdated?: (payload: RealtimeEventPayload) => void;
   onSystemNoticeForceRefresh?: (payload: RealtimeEventPayload) => void;
   onServerBootIdChanged?: (payload: { bootId: string }) => void;
 }
@@ -35,7 +36,7 @@ function resolveEventsUrl(): string {
   return `${normalizedBase.replace(/\/+$/, "")}/events`;
 }
 
-function parseRealtimeEventPayload(rawData: string): RealtimeEventPayload | null {
+export function parseRealtimeEventPayload(rawData: string): RealtimeEventPayload | null {
   try {
     const parsed = JSON.parse(rawData) as Partial<RealtimeEventPayload>;
     if (!parsed || typeof parsed !== "object") {
@@ -45,6 +46,7 @@ function parseRealtimeEventPayload(rawData: string): RealtimeEventPayload | null
     if (
       type !== "work-report-form-updated" &&
       type !== "work-report-entry-updated" &&
+      type !== "work-report-entries-updated" &&
       type !== "system-notice-force-refresh" &&
       type !== "system-notice-content-updated"
     ) {
@@ -56,6 +58,12 @@ function parseRealtimeEventPayload(rawData: string): RealtimeEventPayload | null
       occurredAt: String(parsed.occurredAt ?? ""),
       formId: typeof parsed.formId === "string" ? parsed.formId : undefined,
       entryId: typeof parsed.entryId === "string" ? parsed.entryId : undefined,
+      entryIds: Array.isArray(parsed.entryIds)
+        ? parsed.entryIds
+            .filter((entryId): entryId is string => typeof entryId === "string")
+            .map((entryId) => entryId.trim())
+            .filter(Boolean)
+        : undefined,
       forceRefreshToken:
         typeof parsed.forceRefreshToken === "string" ? parsed.forceRefreshToken : undefined,
       noticeRevision:
@@ -84,6 +92,7 @@ export function useWorkReportRealtime({
   enabled = true,
   onFormUpdated,
   onEntryUpdated,
+  onEntriesUpdated,
   onSystemNoticeForceRefresh,
   onServerBootIdChanged,
 }: UseWorkReportRealtimeArgs): UseWorkReportRealtimeResult {
@@ -92,6 +101,7 @@ export function useWorkReportRealtime({
   const eventSourceRef = useRef<EventSource | null>(null);
   const onFormUpdatedRef = useRef(onFormUpdated);
   const onEntryUpdatedRef = useRef(onEntryUpdated);
+  const onEntriesUpdatedRef = useRef(onEntriesUpdated);
   const onSystemNoticeForceRefreshRef = useRef(onSystemNoticeForceRefresh);
   const onServerBootIdChangedRef = useRef(onServerBootIdChanged);
   const lastBootIdRef = useRef("");
@@ -113,6 +123,10 @@ export function useWorkReportRealtime({
   useEffect(() => {
     onEntryUpdatedRef.current = onEntryUpdated;
   }, [onEntryUpdated]);
+
+  useEffect(() => {
+    onEntriesUpdatedRef.current = onEntriesUpdated;
+  }, [onEntriesUpdated]);
 
   useEffect(() => {
     onSystemNoticeForceRefreshRef.current = onSystemNoticeForceRefresh;
@@ -173,6 +187,11 @@ export function useWorkReportRealtime({
         return;
       }
 
+      if (payload.type === "work-report-entries-updated") {
+        onEntriesUpdatedRef.current?.(payload);
+        return;
+      }
+
       if (payload.type === "system-notice-force-refresh") {
         onSystemNoticeForceRefreshRef.current?.(payload);
         return;
@@ -197,6 +216,12 @@ export function useWorkReportRealtime({
 
     source.addEventListener("ping", (event) => {
       handleLifecycleEvent(event as MessageEvent);
+    });
+
+    source.addEventListener("shutdown", (event) => {
+      handleLifecycleEvent(event as MessageEvent);
+      setConnected(false);
+      setDisconnectedSince((prev) => prev ?? Date.now());
     });
 
     return () => {

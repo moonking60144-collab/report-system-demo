@@ -133,6 +133,14 @@
   vertical-align: top;
 }
 
+.downtime-record-table tr.is-optimistic {
+  background: #eff6ff;
+}
+
+.downtime-record-table tr.is-verification-pending {
+  background: #fff7ed;
+}
+
 .downtime-inline-input {
   width: 100%;
   min-width: 0;

@@ -5,12 +5,16 @@ import {
   Form16DowntimeCreateTaskService,
   type Form16DowntimeCreateTaskPayload,
 } from "../../../src/services/form16/form16DowntimeCreateTaskService";
-import { createKeyedSerialQueue } from "../../../src/utils/keyedSerialQueue";
+import {
+  createKeyedSerialQueue,
+  KeyedSerialQueueClosedError,
+} from "../../../src/utils/keyedSerialQueue";
 import type {
   WorkReportQueueTaskRecord,
   WorkReportQueueTaskStatus,
   WorkReportQueueTaskType,
 } from "../../../src/services/work-report/workReportTaskRegistryService";
+import { workReportTaskRegistryService } from "../../../src/services/work-report/workReportTaskRegistryService";
 import { WORK_REPORT_LOCAL_TERMINAL_TASK_HISTORY_LIMIT } from "../../../src/services/work-report/localTaskHistory";
 
 class FakeRegistry {
@@ -34,6 +38,7 @@ class FakeRegistry {
     message?: string | null;
     errorCode?: string | null;
     errorMessage?: string | null;
+    writeIndeterminate?: boolean | null;
     actorClientId?: string | null;
     actorTabId?: string | null;
     actorIp?: string | null;
@@ -57,6 +62,10 @@ class FakeRegistry {
       message: input.message ?? existing?.message ?? null,
       errorCode: input.errorCode ?? existing?.errorCode ?? null,
       errorMessage: input.errorMessage ?? existing?.errorMessage ?? null,
+      writeIndeterminate:
+        typeof input.writeIndeterminate === "boolean"
+          ? input.writeIndeterminate
+          : existing?.writeIndeterminate ?? null,
       actorClientId: input.actorClientId ?? existing?.actorClientId ?? null,
       actorTabId: input.actorTabId ?? existing?.actorTabId ?? null,
       actorIp: input.actorIp ?? existing?.actorIp ?? null,
@@ -247,6 +256,7 @@ test("相同 clientRowKey failed 後允許重新 enqueue 新 task", async () => 
   const failed = service.enqueue({ payload: payload("row-key-retry") });
   const failedTask = await waitForTaskStatus(registry, failed.taskId, "failed");
   assert.equal(failedTask.errorCode, "CREATE_DOWNTIME_FAILED");
+  assert.equal(failedTask.writeIndeterminate, false);
 
   const retried = service.enqueue({ payload: payload("row-key-retry") });
   assert.notEqual(retried.taskId, failed.taskId);
@@ -254,6 +264,26 @@ test("相同 clientRowKey failed 後允許重新 enqueue 新 task", async () => 
 
   assert.equal(callCount, 2);
   assert.equal(successTask.entryId, "990003");
+});
+
+test("停機 create 網路結果不明時 registry 會標記 writeIndeterminate", async () => {
+  const registry = new FakeRegistry();
+  const service = new Form16DowntimeCreateTaskService({
+    registry,
+    queue: createKeyedSerialQueue(),
+    createTaskId: () => "task-indeterminate-1",
+    createRecord: async () => {
+      const error = new Error("socket reset") as Error & { code: string };
+      error.code = "ECONNRESET";
+      throw error;
+    },
+  });
+
+  const accepted = service.enqueue({ payload: payload("row-key-indeterminate") });
+  const failedTask = await waitForTaskStatus(registry, accepted.taskId, "failed");
+
+  assert.equal(failedTask.errorCode, "ECONNRESET");
+  assert.equal(failedTask.writeIndeterminate, true);
 });
 
 test("terminal local history 只保留最近任務並清掉 stale clientRowKey index", async () => {
@@ -322,6 +352,88 @@ test("initialize 會把 registry 裡未完成的 downtime create task 標 failed
     registry.getTask("task-recovered-pending")?.errorCode,
     "TASK_RECOVERED_AFTER_RESTART"
   );
+  assert.equal(registry.getTask("task-recovered-pending")?.writeIndeterminate, false);
+  assert.equal(registry.getTask("task-recovered-running")?.writeIndeterminate, true);
+  assert.match(
+    registry.getTask("task-recovered-running")?.errorMessage ?? "",
+    /不可直接重送/
+  );
+});
+
+test("真實 registry 先 recovery 時仍保留 downtime running create 的結果不明契約", async (t) => {
+  const pendingTaskId = `registry-first-pending-${Date.now()}`;
+  const runningTaskId = `registry-first-running-${Date.now()}`;
+  const runningReportTaskId = `registry-first-report-${Date.now()}`;
+  const runningBatchTaskId = `registry-first-batch-${Date.now()}`;
+  const registryInternals = workReportTaskRegistryService as unknown as {
+    tasks: Map<string, WorkReportQueueTaskRecord>;
+    recoverInterruptedTasks: () => void;
+  };
+  t.after(() => {
+    registryInternals.tasks.delete(pendingTaskId);
+    registryInternals.tasks.delete(runningTaskId);
+    registryInternals.tasks.delete(runningReportTaskId);
+    registryInternals.tasks.delete(runningBatchTaskId);
+  });
+
+  workReportTaskRegistryService.upsertTask({
+    taskId: pendingTaskId,
+    taskType: "create-downtime",
+    status: "pending",
+    formId: "16",
+    queueKey: FORM16_DOWNTIME_CREATE_QUEUE_KEY,
+  });
+  workReportTaskRegistryService.upsertTask({
+    taskId: runningReportTaskId,
+    taskType: "create-report",
+    status: "running",
+    formId: "104",
+    entryId: "E-REGISTRY-FIRST",
+    queueKey: "104:E-REGISTRY-FIRST",
+  });
+  workReportTaskRegistryService.upsertTask({
+    taskId: runningBatchTaskId,
+    taskType: "create-report-batch",
+    status: "running",
+    formId: "104",
+    entryId: "E-REGISTRY-FIRST-BATCH",
+    queueKey: "104:E-REGISTRY-FIRST-BATCH",
+  });
+  workReportTaskRegistryService.upsertTask({
+    taskId: runningTaskId,
+    taskType: "create-downtime",
+    status: "running",
+    formId: "16",
+    queueKey: FORM16_DOWNTIME_CREATE_QUEUE_KEY,
+  });
+
+  registryInternals.recoverInterruptedTasks();
+  const service = new Form16DowntimeCreateTaskService({
+    registry: workReportTaskRegistryService,
+    queue: createKeyedSerialQueue(),
+    createRecord: async () => ({ created: true, entryId: "never-called" }),
+  });
+  await service.initialize();
+
+  const recoveredPending = workReportTaskRegistryService.getTask(pendingTaskId);
+  const recoveredRunning = workReportTaskRegistryService.getTask(runningTaskId);
+  assert.equal(recoveredPending?.status, "failed");
+  assert.equal(recoveredPending?.writeIndeterminate, false);
+  assert.equal(recoveredRunning?.status, "failed");
+  assert.equal(recoveredRunning?.writeIndeterminate, true);
+  assert.equal(
+    recoveredRunning?.errorCode,
+    "TASK_REGISTRY_RECOVERED_AFTER_RESTART"
+  );
+  assert.match(recoveredRunning?.errorMessage ?? "", /不可直接重送/);
+  assert.equal(
+    workReportTaskRegistryService.getTask(runningReportTaskId)?.writeIndeterminate,
+    true
+  );
+  assert.equal(
+    workReportTaskRegistryService.getTask(runningBatchTaskId)?.batchWriteIndeterminate,
+    true
+  );
 });
 
 test("initialize 失敗後會清掉 cached promise 讓下一次請求可重試", async () => {
@@ -346,4 +458,21 @@ test("initialize 失敗後會清掉 cached promise 讓下一次請求可重試",
   await service.initialize();
 
   assert.equal(initializeAttempts, 2);
+});
+
+test("queue admission 關閉時不建立 ghost pending downtime task", () => {
+  const registry = new FakeRegistry();
+  const queue = createKeyedSerialQueue();
+  queue.closeAdmission();
+  const service = new Form16DowntimeCreateTaskService({
+    registry,
+    queue,
+    createRecord: async () => ({ created: true, entryId: "never-called" }),
+  });
+
+  assert.throws(
+    () => service.enqueue({ payload: payload("shutdown-row-key") }),
+    (error: unknown) => error instanceof KeyedSerialQueueClosedError
+  );
+  assert.equal(registry.tasks.size, 0);
 });

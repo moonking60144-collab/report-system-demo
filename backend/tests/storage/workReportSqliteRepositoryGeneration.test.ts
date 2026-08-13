@@ -148,3 +148,59 @@ test("workReportSqliteRepository 小批次 snapshot 寫入會跨 chunk 保留所
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("workReportSqliteRepository 排序投影只更新 entry sortOrder 且保留既有報工明細", async () => {
+  const root = await mkdtemp(join(tmpdir(), "work-report-sort-order-"));
+  const dbPath = join(root, "read-model.sqlite3");
+  const mutableEnv = env as { SQLITE_ENABLED: boolean; SQLITE_DB_FILE: string };
+  const originalSqliteEnabled = mutableEnv.SQLITE_ENABLED;
+  const originalSqliteDbFile = mutableEnv.SQLITE_DB_FILE;
+  mutableEnv.SQLITE_ENABLED = true;
+  mutableEnv.SQLITE_DB_FILE = dbPath;
+
+  try {
+    await workReportSqliteRepository.replaceFormSnapshot(
+      "104",
+      [{ ...record("E-sort", "WO-sort", 3), sortOrder: 2 }],
+      "gen-sort"
+    );
+    await workReportSqliteRepository.upsertSyncState({
+      formId: "104",
+      status: "success",
+      snapshotAt: "public-sort",
+      activeGenerationId: "gen-sort",
+      readModelVersion: READ_MODEL_SCHEMA_VERSION,
+      totalEntries: 1,
+      totalRows: 3,
+      message: "active-sort",
+    });
+
+    const result = await workReportSqliteRepository.patchEntrySortOrderSnapshot(
+      "104",
+      "E-sort",
+      7,
+      "2026-08-07T06:00:00.000Z"
+    );
+
+    assert.deepEqual(result, { rowCount: 1 });
+    const page = await workReportSqliteRepository.getReports("104", {
+      limit: 10,
+      offset: 0,
+    });
+    assert.equal(page.data[0]?.sortOrder, 7);
+    const detail = await workReportSqliteRepository.getReportByEntryId(
+      "104",
+      "E-sort"
+    );
+    assert.equal(detail?.sortOrder, 7);
+    assert.deepEqual(
+      detail?.reports.map((item) => item.rowId),
+      ["E-sort-R1", "E-sort-R2", "E-sort-R3"]
+    );
+  } finally {
+    await sqliteClient.close();
+    mutableEnv.SQLITE_ENABLED = originalSqliteEnabled;
+    mutableEnv.SQLITE_DB_FILE = originalSqliteDbFile;
+    await rm(root, { recursive: true, force: true });
+  }
+});

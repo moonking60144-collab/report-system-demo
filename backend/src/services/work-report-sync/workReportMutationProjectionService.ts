@@ -21,6 +21,8 @@ export const workReportMutationProjectionService = new WorkReportMutationProject
       buildRefreshEntryOptions("background")
     );
   },
+  patchSortOrderSnapshot:
+    workReportSqliteRepository.patchEntrySortOrderSnapshot.bind(workReportSqliteRepository),
   upsertEntrySnapshot:
     workReportSqliteRepository.upsertEntrySnapshot.bind(workReportSqliteRepository),
   deleteEntrySnapshot:

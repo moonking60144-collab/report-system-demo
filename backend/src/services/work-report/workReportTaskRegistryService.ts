@@ -5,6 +5,12 @@ import {
   getWorkReportTaskStatusMergeRank,
   parseWorkReportTaskTimestamp,
 } from "./workReportTaskStatusMerge";
+import {
+  isConfirmedMutationLifecycleState,
+  isMutationLifecycleState,
+  resolveMutationLifecycleState,
+  type MutationLifecycleState,
+} from "../../types/mutationLifecycle";
 
 const TASK_REGISTRY_SNAPSHOT_VERSION = "v1";
 
@@ -22,6 +28,26 @@ export type WorkReportQueueTaskType =
 
 export type WorkReportQueueTaskStatus = "pending" | "running" | "success" | "failed";
 
+const SINGLE_MUTATION_TASK_TYPES: ReadonlySet<WorkReportQueueTaskType> = new Set([
+  "create-report",
+  "update-report",
+  "delete-report",
+  "create-downtime",
+  "update-downtime",
+  "delete-downtime",
+]);
+
+const BATCH_MUTATION_TASK_TYPES: ReadonlySet<WorkReportQueueTaskType> = new Set([
+  "create-report-batch",
+  "delete-report-batch",
+]);
+
+export type WorkReportQueueTaskOperationKind =
+  | "update-sort-order"
+  | "update-main-machine"
+  | "close-work-order"
+  | "reopen-work-order";
+
 export interface WorkReportQueueTaskRecord {
   taskId: string;
   taskType: WorkReportQueueTaskType;
@@ -34,6 +60,9 @@ export interface WorkReportQueueTaskRecord {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  lifecycleState?: MutationLifecycleState;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   updatedAt: string;
   message: string | null;
   errorCode: string | null;
@@ -43,11 +72,15 @@ export interface WorkReportQueueTaskRecord {
   actorIp: string | null;
   /** 使用者端裝置 label（x-debug-device-label header）；只該存真正的裝置/人員資訊 */
   actorLabel: string | null;
+  operationKind?: WorkReportQueueTaskOperationKind | null;
   /** 系統事件來源（e.g. ragic-callback-16、ragic-form-save）；跟 actorLabel 分流，避免把 callback tag 誤當裝置名 */
   source: string | null;
   batchCreatedRowIds?: string[] | null;
   batchFinalizeFailed?: boolean | null;
   batchWriteIndeterminate?: boolean | null;
+  writeIndeterminate?: boolean | null;
+  deletedCount?: number | null;
+  deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
 }
 
@@ -63,6 +96,8 @@ interface UpsertWorkReportQueueTaskInput {
   createdAt?: string;
   startedAt?: string | null;
   finishedAt?: string | null;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   updatedAt?: string;
   message?: string | null;
   errorCode?: string | null;
@@ -71,10 +106,14 @@ interface UpsertWorkReportQueueTaskInput {
   actorTabId?: string | null;
   actorIp?: string | null;
   actorLabel?: string | null;
+  operationKind?: WorkReportQueueTaskOperationKind | null;
   source?: string | null;
   batchCreatedRowIds?: string[] | null;
   batchFinalizeFailed?: boolean | null;
   batchWriteIndeterminate?: boolean | null;
+  writeIndeterminate?: boolean | null;
+  deletedCount?: number | null;
+  deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
 }
 
@@ -94,6 +133,12 @@ interface ListWorkReportQueueTasksOptions {
   limit?: number;
 }
 
+interface ListReplayableWorkReportQueueTasksOptions {
+  formId: string;
+  taskType: WorkReportQueueTaskType;
+  errorCode: string;
+}
+
 function normalizeOptionalString(value: string | null | undefined): string | null {
   const normalized = String(value ?? "").trim();
   return normalized || null;
@@ -101,7 +146,7 @@ function normalizeOptionalString(value: string | null | undefined): string | nul
 
 const PERSIST_DEBOUNCE_MS = 200;
 
-class WorkReportTaskRegistryService {
+export class WorkReportTaskRegistryService {
   private readonly tasks = new Map<string, WorkReportQueueTaskRecord>();
   private persistChain: Promise<void> = Promise.resolve();
   private persistTimer: NodeJS.Timeout | null = null;
@@ -157,19 +202,31 @@ class WorkReportTaskRegistryService {
         normalizeOptionalString(input.finishedAt) ??
         existing?.finishedAt ??
         null,
+      acceptedAt:
+        input.acceptedAt === null
+          ? null
+          : normalizeOptionalString(input.acceptedAt) ??
+            existing?.acceptedAt ??
+            (!existing ? createdAt : null),
+      confirmedAt:
+        input.confirmedAt === null
+          ? null
+          : normalizeOptionalString(input.confirmedAt) ??
+            existing?.confirmedAt ??
+            null,
       updatedAt: input.updatedAt ?? new Date().toISOString(),
       message:
         normalizeOptionalString(input.message) ??
         existing?.message ??
         null,
       errorCode:
-        normalizeOptionalString(input.errorCode) ??
-        existing?.errorCode ??
-        null,
+        input.errorCode === undefined
+          ? existing?.errorCode ?? null
+          : normalizeOptionalString(input.errorCode),
       errorMessage:
-        normalizeOptionalString(input.errorMessage) ??
-        existing?.errorMessage ??
-        null,
+        input.errorMessage === undefined
+          ? existing?.errorMessage ?? null
+          : normalizeOptionalString(input.errorMessage),
       actorClientId:
         normalizeOptionalString(input.actorClientId) ??
         existing?.actorClientId ??
@@ -186,6 +243,13 @@ class WorkReportTaskRegistryService {
         normalizeOptionalString(input.actorLabel) ??
         existing?.actorLabel ??
         null,
+      operationKind:
+        input.operationKind === "update-sort-order" ||
+        input.operationKind === "update-main-machine" ||
+        input.operationKind === "close-work-order" ||
+        input.operationKind === "reopen-work-order"
+          ? input.operationKind
+          : existing?.operationKind ?? null,
       source:
         normalizeOptionalString(input.source) ??
         existing?.source ??
@@ -204,13 +268,43 @@ class WorkReportTaskRegistryService {
         typeof input.batchWriteIndeterminate === "boolean"
           ? input.batchWriteIndeterminate
           : existing?.batchWriteIndeterminate ?? null,
+      writeIndeterminate:
+        typeof input.writeIndeterminate === "boolean"
+          ? input.writeIndeterminate
+          : input.writeIndeterminate === null
+            ? null
+            : existing?.writeIndeterminate ?? null,
+      deletedCount:
+        typeof input.deletedCount === "number" && Number.isFinite(input.deletedCount)
+          ? Math.max(0, Math.trunc(input.deletedCount))
+          : input.deletedCount === null
+            ? null
+            : existing?.deletedCount ?? null,
+      deleteFinalizeFailed:
+        typeof input.deleteFinalizeFailed === "boolean"
+          ? input.deleteFinalizeFailed
+          : input.deleteFinalizeFailed === null
+            ? null
+            : existing?.deleteFinalizeFailed ?? null,
       retriedFromTaskId:
         normalizeOptionalString(input.retriedFromTaskId) ??
         existing?.retriedFromTaskId ??
         null,
     };
 
-    const merged = this.mergeTaskRecords(existing, next);
+    next.lifecycleState = resolveMutationLifecycleState(next);
+    if (
+      input.confirmedAt === undefined &&
+      normalizeOptionalString(input.finishedAt) &&
+      isConfirmedMutationLifecycleState(next.lifecycleState)
+    ) {
+      next.confirmedAt = normalizeOptionalString(input.finishedAt);
+    }
+    if (next.lifecycleState === "indeterminate" || next.lifecycleState === "unknown") {
+      next.confirmedAt = null;
+    }
+
+    const merged = this.normalizeTaskLifecycle(this.mergeTaskRecords(existing, next));
     this.tasks.set(merged.taskId, merged);
     this.pruneHistory();
     this.schedulePersist();
@@ -264,6 +358,21 @@ class WorkReportTaskRegistryService {
       .map((task) => this.copyTask(task));
   }
 
+  listTasksForReplay(
+    options: ListReplayableWorkReportQueueTasksOptions
+  ): WorkReportQueueTaskRecord[] {
+    return Array.from(this.tasks.values())
+      .filter(
+        (task) =>
+          task.formId === options.formId &&
+          task.taskType === options.taskType &&
+          task.status === "failed" &&
+          task.errorCode === options.errorCode
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((task) => this.copyTask(task));
+  }
+
   private async loadFromDisk(): Promise<void> {
     if (!env.WORK_REPORT_TASK_REGISTRY_PERSIST_ENABLED) {
       return;
@@ -280,7 +389,10 @@ class WorkReportTaskRegistryService {
 
       for (const task of parsed.tasks) {
         const existing = this.tasks.get(task.taskId);
-        this.tasks.set(task.taskId, this.mergeTaskRecords(existing, task));
+        this.tasks.set(
+          task.taskId,
+          this.normalizeTaskLifecycle(this.mergeTaskRecords(existing, task))
+        );
       }
 
       this.recoverInterruptedTasks();
@@ -304,15 +416,32 @@ class WorkReportTaskRegistryService {
       if (task.status !== "pending" && task.status !== "running") {
         continue;
       }
-      this.tasks.set(taskId, {
+      const isRunningSingleMutation =
+        task.status === "running" && SINGLE_MUTATION_TASK_TYPES.has(task.taskType);
+      const isRunningBatchMutation =
+        task.status === "running" && BATCH_MUTATION_TASK_TYPES.has(task.taskType);
+      const isRunningMutation = isRunningSingleMutation || isRunningBatchMutation;
+      const recoveryMessage =
+        isRunningMutation
+          ? "服務重啟時寫入任務正在執行，結果尚未確認；請先重新整理確認，不可直接重送"
+          : "服務重啟，原未完成任務已標記為失敗";
+      const recoveredTask: WorkReportQueueTaskRecord = {
         ...task,
         status: "failed",
         updatedAt: recoveredAt,
         finishedAt: recoveredAt,
+        confirmedAt: isRunningMutation ? null : recoveredAt,
         errorCode: "TASK_REGISTRY_RECOVERED_AFTER_RESTART",
-        errorMessage: "服務重啟，原未完成任務已標記為失敗",
-        message: "服務重啟，原未完成任務已標記為失敗",
-      });
+        errorMessage: recoveryMessage,
+        message: recoveryMessage,
+        ...(SINGLE_MUTATION_TASK_TYPES.has(task.taskType)
+          ? { writeIndeterminate: isRunningSingleMutation }
+          : {}),
+        ...(BATCH_MUTATION_TASK_TYPES.has(task.taskType)
+          ? { batchWriteIndeterminate: isRunningBatchMutation }
+          : {}),
+      };
+      this.tasks.set(taskId, this.normalizeTaskLifecycle(recoveredTask));
     }
   }
 
@@ -326,17 +455,58 @@ class WorkReportTaskRegistryService {
 
     const existingRank = getWorkReportTaskStatusMergeRank(existing.status);
     const nextRank = getWorkReportTaskStatusMergeRank(next.status);
+    let selected: WorkReportQueueTaskRecord;
     if (existingRank !== nextRank) {
-      return nextRank > existingRank ? next : existing;
+      selected = nextRank > existingRank ? next : existing;
+    } else {
+      const existingUpdatedAt = parseWorkReportTaskTimestamp(existing.updatedAt);
+      const nextUpdatedAt = parseWorkReportTaskTimestamp(next.updatedAt);
+      selected = existingUpdatedAt > nextUpdatedAt ? existing : next;
     }
 
-    const existingUpdatedAt = parseWorkReportTaskTimestamp(existing.updatedAt);
-    const nextUpdatedAt = parseWorkReportTaskTimestamp(next.updatedAt);
-    if (existingUpdatedAt > nextUpdatedAt) {
-      return existing;
+    if (selected.status !== "failed") {
+      return selected;
     }
 
-    return next;
+    const indeterminateSource =
+      next.writeIndeterminate === true
+        ? next
+        : existing.writeIndeterminate === true
+          ? existing
+          : null;
+    if (
+      indeterminateSource &&
+      SINGLE_MUTATION_TASK_TYPES.has(selected.taskType)
+    ) {
+      return {
+        ...selected,
+        writeIndeterminate: true,
+        message: indeterminateSource.message ?? selected.message,
+        errorCode: indeterminateSource.errorCode ?? selected.errorCode,
+        errorMessage: indeterminateSource.errorMessage ?? selected.errorMessage,
+      };
+    }
+
+    const indeterminateBatchSource =
+      next.batchWriteIndeterminate === true
+        ? next
+        : existing.batchWriteIndeterminate === true
+          ? existing
+          : null;
+    if (
+      indeterminateBatchSource &&
+      BATCH_MUTATION_TASK_TYPES.has(selected.taskType)
+    ) {
+      return {
+        ...selected,
+        batchWriteIndeterminate: true,
+        message: indeterminateBatchSource.message ?? selected.message,
+        errorCode: indeterminateBatchSource.errorCode ?? selected.errorCode,
+        errorMessage: indeterminateBatchSource.errorMessage ?? selected.errorMessage,
+      };
+    }
+
+    return selected;
   }
 
   private pruneHistory(): void {
@@ -346,7 +516,15 @@ class WorkReportTaskRegistryService {
     }
 
     const completedTasks = Array.from(this.tasks.values())
-      .filter((task) => task.status === "success" || task.status === "failed")
+      .filter(
+        (task) =>
+          (task.status === "success" || task.status === "failed") &&
+          !(
+            task.formId === "16" &&
+            task.taskType === "callback-refresh" &&
+            task.errorCode === "TASK_REGISTRY_RECOVERED_AFTER_RESTART"
+          )
+      )
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
 
     for (const task of completedTasks) {
@@ -438,8 +616,21 @@ class WorkReportTaskRegistryService {
   }
 
   private copyTask(task: WorkReportQueueTaskRecord): WorkReportQueueTaskRecord {
+    return this.normalizeTaskLifecycle(task);
+  }
+
+  private normalizeTaskLifecycle(
+    task: WorkReportQueueTaskRecord
+  ): WorkReportQueueTaskRecord {
+    const lifecycleState = resolveMutationLifecycleState(task);
     return {
       ...task,
+      lifecycleState,
+      acceptedAt: normalizeOptionalString(task.acceptedAt),
+      confirmedAt:
+        lifecycleState === "indeterminate" || lifecycleState === "unknown"
+          ? null
+          : normalizeOptionalString(task.confirmedAt),
     };
   }
 
@@ -478,9 +669,34 @@ class WorkReportTaskRegistryService {
       (candidate.batchWriteIndeterminate === null ||
         candidate.batchWriteIndeterminate === undefined ||
         typeof candidate.batchWriteIndeterminate === "boolean") &&
+      (candidate.writeIndeterminate === null ||
+        candidate.writeIndeterminate === undefined ||
+        typeof candidate.writeIndeterminate === "boolean") &&
+      (candidate.deletedCount === null ||
+        candidate.deletedCount === undefined ||
+        (typeof candidate.deletedCount === "number" &&
+          Number.isInteger(candidate.deletedCount) &&
+          candidate.deletedCount >= 0)) &&
+      (candidate.deleteFinalizeFailed === null ||
+        candidate.deleteFinalizeFailed === undefined ||
+        typeof candidate.deleteFinalizeFailed === "boolean") &&
       (candidate.retriedFromTaskId === null ||
         candidate.retriedFromTaskId === undefined ||
         typeof candidate.retriedFromTaskId === "string") &&
+      (candidate.operationKind === null ||
+        candidate.operationKind === undefined ||
+        candidate.operationKind === "update-sort-order" ||
+        candidate.operationKind === "update-main-machine" ||
+        candidate.operationKind === "close-work-order" ||
+        candidate.operationKind === "reopen-work-order") &&
+      (candidate.lifecycleState === undefined ||
+        isMutationLifecycleState(candidate.lifecycleState)) &&
+      (candidate.acceptedAt === undefined ||
+        candidate.acceptedAt === null ||
+        typeof candidate.acceptedAt === "string") &&
+      (candidate.confirmedAt === undefined ||
+        candidate.confirmedAt === null ||
+        typeof candidate.confirmedAt === "string") &&
       typeof candidate.createdAt === "string" &&
       typeof candidate.updatedAt === "string"
     );

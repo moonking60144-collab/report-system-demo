@@ -8,6 +8,7 @@ import type { CreateTaskMonitor, WorkReportFormId, WorkReportMutationTaskKind } 
 import { formatStatusDateTime, getErrorMessage } from "../../utils";
 import type { LoadEntryOptions } from "./types";
 import { saveRetryableMutationRecord } from "../../taskRetryStore";
+import type { WorkReportOptimisticMutationInput } from "../../workReportOptimisticMutation";
 
 interface PendingMutationReplay {
   kind: Extract<WorkReportMutationTaskKind, "create" | "update">;
@@ -16,6 +17,7 @@ interface PendingMutationReplay {
   rowId?: string;
   payload: ReportMutationPayload;
   clientMutationId: string;
+  createIdempotencyKey?: string;
   expectedEntryLastUpdatedAt?: string;
   editSessionId?: string;
   editLockVersion?: number;
@@ -51,10 +53,30 @@ export function resolveTerminalMutationTask(
   t: (key: string, options?: Record<string, unknown>) => string
 ): TerminalMutationTaskResolution {
   if (task.status !== "success") {
+    const hasCompletedDelete =
+      (task.kind === "delete" || task.kind === "delete-batch") &&
+      (task.deletedCount ?? 0) > 0;
     return {
       notice: {
         type: "error",
         message: task.message,
+      },
+      loadEntryOptions: {
+        mode: hasCompletedDelete ? "refreshing" : "background",
+        forceRefresh: true,
+      },
+    };
+  }
+
+  if (task.kind === "create-batch") {
+    return {
+      notice: {
+        type: "success",
+        message: task.message,
+      },
+      loadEntryOptions: {
+        mode: "background",
+        forceRefresh: true,
       },
     };
   }
@@ -74,6 +96,21 @@ export function resolveTerminalMutationTask(
       loadEntryOptions: {
         mode: "refreshing",
         forceRefresh: true,
+      },
+    };
+  }
+
+  if (task.kind === "update" && !task.rowId) {
+    return {
+      notice: {
+        type: "success",
+        message:
+          task.message ||
+          t("workReport:messages.taskBackgroundUpdateCompleted"),
+      },
+      loadEntryOptions: {
+        mode: "background",
+        forceRefresh: false,
       },
     };
   }
@@ -171,7 +208,8 @@ export function useWorkReportDetailStatusController({
   registerAcceptedMutationTask: (
     kind: WorkReportMutationTaskKind,
     accepted: Awaited<ReturnType<typeof createReportAccepted>>,
-    rowId?: string
+    rowId?: string,
+    optimisticInput?: WorkReportOptimisticMutationInput
   ) => Promise<void>;
   pendingMutationReplayStorageKey: string;
   setNotice: Dispatch<SetStateAction<DetailNoticeState | null>>;
@@ -252,6 +290,8 @@ export function useWorkReportDetailStatusController({
                 pendingReplay.payload,
                 {
                   clientMutationId: pendingReplay.clientMutationId,
+                  createIdempotencyKey:
+                    pendingReplay.createIdempotencyKey ?? pendingReplay.clientMutationId,
                   workOrderNo,
                   expectedEntryLastUpdatedAt: pendingReplay.expectedEntryLastUpdatedAt,
                   editSessionId: pendingReplay.editSessionId,
@@ -268,6 +308,10 @@ export function useWorkReportDetailStatusController({
           workOrderNo,
           payload: pendingReplay.payload,
           clientMutationId: pendingReplay.clientMutationId,
+          createIdempotencyKey:
+            pendingReplay.kind === "create"
+              ? pendingReplay.createIdempotencyKey ?? pendingReplay.clientMutationId
+              : undefined,
           expectedEntryLastUpdatedAt: pendingReplay.expectedEntryLastUpdatedAt,
           editSessionId: pendingReplay.editSessionId,
           editLockVersion: pendingReplay.editLockVersion,
@@ -310,7 +354,7 @@ export function useWorkReportDetailStatusController({
   const systemStatus = useMemo<SystemStatusState>(() => {
     if (activeMutationTask) {
       const statusMessage =
-        activeMutationTask.kind === "create"
+        activeMutationTask.kind === "create" || activeMutationTask.kind === "create-batch"
           ? activeMutationTask.status === "pending"
             ? t("workReport:messages.createTaskQueuedContinue")
             : t("workReport:messages.createTaskBackgroundRunning")
@@ -322,7 +366,7 @@ export function useWorkReportDetailStatusController({
             ? t("workReport:messages.taskQueuedWaitingPrevious")
             : t("workReport:messages.taskBackgroundRecalcRunning");
       const acceptedTaskMessage = t(
-        activeMutationTask.kind === "create"
+        activeMutationTask.kind === "create" || activeMutationTask.kind === "create-batch"
           ? "workReport:messages.createAcceptedTaskProcessing"
           : activeMutationTask.kind === "delete" || activeMutationTask.kind === "delete-batch"
             ? "workReport:messages.deleteAcceptedTaskProcessing"
@@ -408,8 +452,8 @@ export function useWorkReportDetailStatusController({
   useEffect(() => {
     const unhandledTerminalTasks = currentEntryTaskMonitors.filter(
       (task) =>
-        task.status !== "pending" &&
-        task.status !== "running" &&
+        (task.stale === true ||
+          (task.status !== "pending" && task.status !== "running")) &&
         !handledCreateTaskTerminalIdsRef.current.has(task.taskId)
     );
 

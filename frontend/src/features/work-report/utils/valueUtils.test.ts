@@ -18,6 +18,10 @@ describe("compareAlphaNumeric", () => {
     expect(compareAlphaNumeric("abc", "ABC")).toBe(0);
   });
 
+  test("重音符號不影響 base sensitivity 比較", () => {
+    expect(compareAlphaNumeric("resume", "résumé")).toBe(0);
+  });
+
   test("純數字字串也依數值大小排序", () => {
     const values = ["10", "2", "1"];
     const sorted = [...values].sort(compareAlphaNumeric);
@@ -73,8 +77,14 @@ describe("toSortableDate", () => {
     expect(result).not.toBe(null);
   });
 
-  test("兩種格式解析結果一致（dash 會被轉成 slash 再 new Date）", () => {
+  test("兩種本地日期格式解析結果一致", () => {
     expect(toSortableDate("2026-04-22")).toBe(toSortableDate("2026/04/22"));
+  });
+
+  test("ISO 8601 時區格式不會被連字號正規化破壞", () => {
+    const value = "2026-08-10T00:00:00.000+08:00";
+
+    expect(toSortableDate(value)).toBe(Date.parse(value));
   });
 
   test("null / undefined / 空字串回 null", () => {

@@ -62,6 +62,8 @@ test("reservePending 新 key 會建立 pending 紀錄", async () => {
   const result = await repo.reservePending({
     clientRowKey: "pending-key",
     source: "work-report-104",
+    operationFingerprint: "fingerprint-pending",
+    reservationToken: "reservation-pending",
     createdAt: "2026-06-01T00:00:00.000Z",
   });
 
@@ -69,6 +71,8 @@ test("reservePending 新 key 會建立 pending 紀錄", async () => {
   assert.equal(result.record?.clientRowKey, "pending-key");
   assert.equal(result.record?.entryId, "");
   assert.equal(result.record?.source, "work-report-104");
+  assert.equal(result.record?.operationFingerprint, "fingerprint-pending");
+  assert.equal(result.record?.reservationToken, "reservation-pending");
   assert.equal(result.record?.status, "pending");
   assert.equal(result.record?.createdAt, "2026-06-01T00:00:00.000Z");
   assert.equal(result.record?.updatedAt, "2026-06-01T00:00:00.000Z");
@@ -76,19 +80,48 @@ test("reservePending 新 key 會建立 pending 紀錄", async () => {
 
 test("confirm 會把 pending 轉成 confirmed 並寫入 entryId", async () => {
   const { repo } = await buildRepo();
-  await repo.reservePending({ clientRowKey: "confirm-key", source: "downtime" });
-  await repo.confirm({
+  await repo.reservePending({
+    clientRowKey: "confirm-key",
+    source: "downtime",
+    operationFingerprint: "fingerprint-confirm",
+  });
+  const confirmed = await repo.confirm({
     clientRowKey: "confirm-key",
     entryId: "E-CONFIRMED",
     source: "downtime",
+    operationFingerprint: "fingerprint-confirm",
     updatedAt: "2026-06-02T00:00:00.000Z",
   });
 
+  assert.equal(confirmed, 1);
   const hit = await repo.lookup("confirm-key");
   assert.equal(hit?.entryId, "E-CONFIRMED");
   assert.equal(hit?.status, "confirmed");
   assert.equal(hit?.errorMessage, undefined);
+  assert.equal(hit?.operationFingerprint, "fingerprint-confirm");
   assert.equal(hit?.updatedAt, "2026-06-02T00:00:00.000Z");
+});
+
+test("confirm fingerprint 不符時不接管其他 reservation", async () => {
+  const { repo } = await buildRepo();
+  await repo.reservePending({
+    clientRowKey: "confirm-conflict-key",
+    source: "downtime",
+    operationFingerprint: "fingerprint-original",
+  });
+
+  const confirmed = await repo.confirm({
+    clientRowKey: "confirm-conflict-key",
+    entryId: "E-WRONG",
+    source: "downtime",
+    operationFingerprint: "fingerprint-other",
+  });
+
+  assert.equal(confirmed, 0);
+  const hit = await repo.lookup("confirm-conflict-key");
+  assert.equal(hit?.status, "pending");
+  assert.equal(hit?.entryId, "");
+  assert.equal(hit?.operationFingerprint, "fingerprint-original");
 });
 
 test("markIndeterminate 只更新 pending 紀錄", async () => {
@@ -129,6 +162,45 @@ test("releasePending 只刪 pending 紀錄", async () => {
   assert.equal(await repo.lookup("release-key"), null);
   assert.equal(await repo.releasePending({ clientRowKey: "keep-key", source: "downtime" }), 0);
   assert.equal((await repo.lookup("keep-key"))?.entryId, "E-KEEP");
+});
+
+test("deleteByReservationIdentity 只清掉原 reservation，不會刪除 retry 後的新映射", async () => {
+  const { repo } = await buildRepo();
+  await repo.reservePending({
+    clientRowKey: "reverify-key",
+    source: "downtime",
+    reservationToken: "reservation-old",
+  });
+
+  assert.equal(
+    await repo.deleteByReservationIdentity({
+      clientRowKey: "reverify-key",
+      source: "downtime",
+      reservationToken: "reservation-old",
+      entryId: "E-OLD",
+    }),
+    1
+  );
+  await repo.reservePending({
+    clientRowKey: "reverify-key",
+    source: "downtime",
+    reservationToken: "reservation-new",
+  });
+  await repo.confirm({
+    clientRowKey: "reverify-key",
+    entryId: "E-NEW",
+    source: "downtime",
+  });
+  assert.equal(
+    await repo.deleteByReservationIdentity({
+      clientRowKey: "reverify-key",
+      source: "downtime",
+      reservationToken: "reservation-old",
+      entryId: "E-OLD",
+    }),
+    0
+  );
+  assert.equal((await repo.lookup("reverify-key"))?.entryId, "E-NEW");
 });
 
 test("record 空 key 靜默 noop（不拋錯）", async () => {

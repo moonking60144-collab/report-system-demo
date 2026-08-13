@@ -1,7 +1,10 @@
 import { randomUUID } from "crypto";
 import { env } from "../../config/env";
 import { getFormConfig } from "../../config/forms";
-import { publishWorkReportFormUpdated } from "../../events/realtimeEventBus";
+import {
+  publishWorkReportEntriesUpdated,
+  publishWorkReportFormUpdated,
+} from "../../events/realtimeEventBus";
 import { ragicClient } from "../../ragic/client";
 import { workReportSqliteRepository } from "../../storage/sqlite/workReportSqliteRepository";
 import { sqliteClient } from "../../storage/sqlite/sqliteClient";
@@ -12,6 +15,10 @@ import { normalizeRows, type RagicRow } from "../work-report/shared/ragicRowUtil
 import { prepareLinkedSourceMaps } from "../work-report/queries/linkedSources";
 import { transformRow } from "../work-report/queries/rowTransform";
 import { WorkReportSyncService } from "./workReportSyncServiceFactory";
+import {
+  WorkReportAutoSyncYieldRequestedError,
+  workReportMutationSyncCoordinator,
+} from "./workReportMutationSyncCoordinator";
 
 function normalizeEntryId(value: unknown): string {
   return String(value ?? "").trim();
@@ -19,8 +26,16 @@ function normalizeEntryId(value: unknown): string {
 
 async function scanFormRecords(
   formId: string,
-  onProgress: (count: number) => void
+  onProgress: (count: number) => void,
+  options: { shouldYieldToMutation?: () => boolean } = {}
 ): Promise<WorkReportRecord[]> {
+  const yieldToMutationIfNeeded = (): void => {
+    if (options.shouldYieldToMutation?.()) {
+      throw new WorkReportAutoSyncYieldRequestedError();
+    }
+  };
+
+  yieldToMutationIfNeeded();
   const config = getFormConfig(formId);
   // sync 全表掃 → 同條 lane（sync）；不跟使用者 / background 搶資源
   const linkedSources = await prepareLinkedSourceMaps(config.linkedFields, "sync");
@@ -57,6 +72,7 @@ async function scanFormRecords(
   let baseOffset = 0;
   let done = false;
   while (!done) {
+    yieldToMutationIfNeeded();
     const offsets = Array.from(
       { length: waveSize },
       (_unused, index) => baseOffset + index * pageLimit
@@ -82,6 +98,7 @@ async function scanFormRecords(
     }
 
     onProgress(recordsByEntryId.size);
+    yieldToMutationIfNeeded();
     baseOffset += waveSize * pageLimit;
   }
 
@@ -98,6 +115,7 @@ async function scanFormRecords(
 export { type WorkReportSyncTask } from "./workReportSyncServiceFactory";
 
 export const workReportSyncService = new WorkReportSyncService({
+  coordinator: workReportMutationSyncCoordinator,
   scanFormRecords,
   refreshEntry(formId, entryId) {
     return workReportReadService.getReportByEntryId(
@@ -132,6 +150,7 @@ export const workReportSyncService = new WorkReportSyncService({
     workReportSqliteRepository.getFormSnapshotCounts.bind(workReportSqliteRepository),
   cleanupOldFormGenerations:
     workReportSqliteRepository.cleanupOldFormGenerations.bind(workReportSqliteRepository),
+  publishWorkReportEntriesUpdated,
   publishWorkReportFormUpdated,
   generateTaskId: () => randomUUID(),
 });

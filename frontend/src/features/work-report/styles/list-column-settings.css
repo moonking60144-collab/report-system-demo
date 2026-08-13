@@ -1,0 +1,369 @@
+.work-report-column-settings-drawer .ant-drawer-header {
+  border-bottom-color: #d7e0ea;
+}
+
+.work-report-column-settings-drawer .ant-drawer-body {
+  padding: 0;
+  background: #f6f8fb;
+}
+
+.work-report-column-settings-intro {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #d7e0ea;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(8px);
+}
+
+.work-report-column-settings-intro p {
+  margin: 0;
+  color: #526276;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.work-report-column-settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.work-report-column-settings-actions button,
+.work-report-column-settings-move-actions button,
+.work-report-column-color-trigger {
+  display: inline-grid;
+  place-items: center;
+  min-height: 32px;
+  border: 1px solid #c9d4e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #25364a;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.work-report-column-settings-actions button {
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.work-report-column-settings-actions button:hover,
+.work-report-column-settings-move-actions button:hover:not(:disabled),
+.work-report-column-color-trigger:hover {
+  border-color: #4f7eae;
+  background: #f2f7fc;
+  color: #174f83;
+}
+
+.work-report-column-settings-list {
+  display: grid;
+  gap: 1px;
+  padding: 12px 18px 24px;
+}
+
+.work-report-column-settings-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 34px auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 50px;
+  padding: 8px 10px;
+  border: 1px solid #dbe3ec;
+  background: #fff;
+  transition: border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.work-report-column-settings-row:hover {
+  border-color: #aebdce;
+  box-shadow: 0 2px 8px rgba(28, 47, 68, 0.06);
+}
+
+.work-report-column-settings-row.is-dragging {
+  opacity: 0.48;
+  border-color: #4f7eae;
+}
+
+.work-report-column-settings-handle {
+  color: #7c8da1;
+  cursor: grab;
+}
+
+.work-report-column-settings-row:active .work-report-column-settings-handle {
+  cursor: grabbing;
+}
+
+.work-report-column-settings-visibility {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+  color: #1f2c3d;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.work-report-column-settings-visibility span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-report-column-settings-visibility input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #2f67a5;
+}
+
+.work-report-column-settings-move-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.work-report-column-settings-move-actions button {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.work-report-column-settings-move-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.work-report-column-color-trigger {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.work-report-column-color-trigger > span,
+.work-report-column-color-option-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(37, 54, 74, 0.2);
+  border-radius: 2px;
+  background: var(--work-report-column-tone, #fff);
+}
+
+.work-report-column-color-popover .ant-popover-inner {
+  padding: 6px;
+  border: 1px solid #d7e0ea;
+  border-radius: 6px;
+  box-shadow: 0 12px 30px rgba(28, 47, 68, 0.16);
+}
+
+.work-report-column-color-options {
+  display: grid;
+  gap: 2px;
+  min-width: 170px;
+}
+
+.work-report-column-color-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: #25364a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.work-report-column-color-option:hover,
+.work-report-column-color-option.is-selected {
+  border-color: #bfd0e1;
+  background: #f2f7fc;
+}
+
+.work-report-column-tone--none {
+  --work-report-column-tone: #fff;
+}
+
+.work-report-column-tone--gray-soft {
+  --work-report-column-tone: #eef1f4;
+}
+
+.work-report-column-tone--amber-soft {
+  --work-report-column-tone: #fff5c7;
+}
+
+.work-report-column-tone--blue-soft {
+  --work-report-column-tone: #e3effc;
+}
+
+.work-report-column-tone--cyan-soft {
+  --work-report-column-tone: #ddf4f6;
+}
+
+.work-report-column-tone--green-soft {
+  --work-report-column-tone: #e3f5e8;
+}
+
+.work-report-column-tone--rose-soft {
+  --work-report-column-tone: #fde8e8;
+}
+
+.work-report-column-tone--violet-soft {
+  --work-report-column-tone: #eee8fb;
+}
+
+.ragic-table .ant-table-tbody > tr.ant-table-row > td[class*="work-report-column-tone--"] {
+  background: var(--work-report-column-tone);
+}
+
+.ragic-table .ant-table-thead > tr > th[class*="work-report-column-tone--"] {
+  background: var(--work-report-column-tone) !important;
+}
+
+@media (max-width: 640px) {
+  .work-report-column-settings-intro,
+  .work-report-column-settings-list {
+    padding-inline: 12px;
+  }
+
+  .work-report-column-settings-row {
+    grid-template-columns: 20px minmax(0, 1fr) 34px;
+  }
+
+  .work-report-column-settings-move-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .work-report-column-settings-actions button,
+  .work-report-column-settings-move-actions button,
+  .work-report-column-color-trigger {
+    min-height: 44px;
+  }
+
+  .work-report-column-settings-move-actions button,
+  .work-report-column-color-trigger {
+    width: 44px;
+  }
+}
+
+.work-report-sort-order-cell {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.work-report-sort-order-value {
+  min-width: 0;
+}
+
+.work-report-sort-order-edit-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: #66788d;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.work-report-sort-order-cell:hover .work-report-sort-order-edit-btn,
+.work-report-sort-order-edit-btn:focus-visible {
+  border-color: #b9c8d8;
+  color: #245f98;
+  opacity: 1;
+}
+
+.work-report-sort-order-popover .ant-popover-inner {
+  padding: 12px;
+  border: 1px solid #cbd7e3;
+  border-radius: 6px;
+}
+
+.work-report-sort-order-editor {
+  display: grid;
+  gap: 8px;
+  width: 220px;
+}
+
+.work-report-sort-order-editor label {
+  color: #25364a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.work-report-sort-order-editor input {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 1px solid #aebdce;
+  border-radius: 4px;
+  background: #fff;
+  color: #172337;
+  font-size: 16px;
+}
+
+.work-report-sort-order-editor input:focus {
+  border-color: #3c78b2;
+  outline: 2px solid rgba(60, 120, 178, 0.16);
+}
+
+.work-report-sort-order-editor p {
+  margin: 0;
+  color: #b42318;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.work-report-sort-order-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.work-report-sort-order-actions button {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid #c4d0dd;
+  border-radius: 4px;
+  background: #fff;
+  color: #33475f;
+  cursor: pointer;
+}
+
+.work-report-sort-order-actions button.is-primary {
+  border-color: #2f67a5;
+  background: #2f67a5;
+  color: #fff;
+}
+
+.work-report-sort-order-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+@media (max-width: 640px) {
+  .work-report-sort-order-edit-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .work-report-sort-order-actions {
+    gap: 8px;
+  }
+
+  .work-report-sort-order-actions button {
+    min-height: 44px;
+  }
+}

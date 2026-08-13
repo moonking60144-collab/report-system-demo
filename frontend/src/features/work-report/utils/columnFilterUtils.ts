@@ -31,6 +31,10 @@ export function hasActiveColumnFilters(state: ColumnFilterState): boolean {
   return Object.values(state).some((rule) => hasActiveColumnFilterRule(rule));
 }
 
+export function countActiveColumnFilters(state: ColumnFilterState): number {
+  return Object.values(state).filter((rule) => hasActiveColumnFilterRule(rule)).length;
+}
+
 export function applyColumnFilters(
   records: WorkReportRecord[],
   filters: ColumnFilterState,

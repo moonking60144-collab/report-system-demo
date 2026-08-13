@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ALL_FILTER_VALUE } from "../../constants";
 import type {
   ColumnSortRule,
@@ -6,7 +6,11 @@ import type {
   GlobalFilters,
   SidebarPlaceholderView,
 } from "../../types";
-import { getDefaultSortRulesForCurrentFilters, hasActiveGlobalFilters } from "../../utils";
+import {
+  buildUpdatedDateRangeQuery,
+  getDefaultSortRulesForCurrentFilters,
+  hasActiveGlobalFilters,
+} from "../../utils";
 
 interface UseWorkReportListQueryControllerArgs {
   activePlaceholderViewId: SidebarPlaceholderView["id"] | null;
@@ -29,6 +33,24 @@ export function useWorkReportListQueryController({
   isColumnAnalysisOpen,
   hasActiveColumnSortRules,
 }: UseWorkReportListQueryControllerArgs) {
+  const [localDayStartTimestamp, setLocalDayStartTimestamp] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  });
+
+  useEffect(() => {
+    const nextLocalMidnight = new Date(localDayStartTimestamp);
+    nextLocalMidnight.setDate(nextLocalMidnight.getDate() + 1);
+    const timeoutId = window.setTimeout(() => {
+      const nextDate = new Date();
+      setLocalDayStartTimestamp(
+        new Date(nextDate.getFullYear(), nextDate.getMonth(), nextDate.getDate()).getTime()
+      );
+    }, Math.max(0, nextLocalMidnight.getTime() - Date.now()));
+
+    return () => window.clearTimeout(timeoutId);
+  }, [localDayStartTimestamp]);
+
   const isGlobalFilterActive = useMemo(
     () => hasActiveGlobalFilters(globalFilters),
     [globalFilters]
@@ -64,7 +86,9 @@ export function useWorkReportListQueryController({
       globalFilters.ragicUnfinishedStatus !== ALL_FILTER_VALUE ||
       globalFilters.machineCode !== ALL_FILTER_VALUE ||
       globalFilters.siteRunning !== "all" ||
-      globalFilters.startSchedule !== "all";
+      globalFilters.startSchedule !== "all" ||
+      globalFilters.updatedDateFrom !== "" ||
+      globalFilters.updatedDateTo !== "";
     const hasSupportedSorts =
       columnSortRules.length > 0 || activePlaceholderViewId === "last-updated";
     const hasSupportedQuickView = activePlaceholderViewId === "starred";
@@ -80,6 +104,8 @@ export function useWorkReportListQueryController({
     globalFilters.siteRunning,
     globalFilters.startSchedule,
     globalFilters.status,
+    globalFilters.updatedDateFrom,
+    globalFilters.updatedDateTo,
     globalFilters.workOrderKeyword,
     hasActiveColumnMenuFilters,
     hasOnlyServerPreviewSortRules,
@@ -97,10 +123,10 @@ export function useWorkReportListQueryController({
       return { enabled: false as const };
     }
 
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const todayEnd = new Date(todayStart);
-    todayEnd.setDate(todayEnd.getDate() + 1);
+    const todayStart = new Date(localDayStartTimestamp);
+    const todayEnd = new Date(localDayStartTimestamp);
+    todayEnd.setHours(23, 59, 59, 999);
+    const updatedDateRange = buildUpdatedDateRangeQuery(globalFilters);
     const sort = columnSortRules
       .filter(
         (rule) =>
@@ -144,8 +170,13 @@ export function useWorkReportListQueryController({
       siteRunning: globalFilters.siteRunning,
       startSchedule: globalFilters.startSchedule,
       updatedDateFrom:
-        activePlaceholderViewId === "starred" ? todayStart.toISOString() : undefined,
-      updatedDateTo: activePlaceholderViewId === "starred" ? todayEnd.toISOString() : undefined,
+        activePlaceholderViewId === "starred"
+          ? todayStart.toISOString()
+          : updatedDateRange.updatedDateFrom,
+      updatedDateTo:
+        activePlaceholderViewId === "starred"
+          ? todayEnd.toISOString()
+          : updatedDateRange.updatedDateTo,
       sort:
         sort ||
         defaultPresetSort ||
@@ -157,6 +188,7 @@ export function useWorkReportListQueryController({
     columnSortRules,
     currentFormId,
     globalFilters,
+    localDayStartTimestamp,
     shouldUseServerSidePreview,
   ]);
 

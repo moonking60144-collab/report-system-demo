@@ -1,8 +1,16 @@
 import { randomUUID } from "crypto";
 import { env } from "../../config/env";
-import { createKeyedSerialQueue } from "../../utils/keyedSerialQueue";
+import {
+  createKeyedSerialQueue,
+  KeyedSerialQueueClosedError,
+  type KeyedSerialQueueStats,
+} from "../../utils/keyedSerialQueue";
+import { HttpError } from "../../utils/httpError";
 import type { RagicCallbackEventType } from "../ragicCallbackRefreshServiceFactory";
-import { workReportTaskRegistryService } from "../work-report/workReportTaskRegistryService";
+import {
+  workReportTaskRegistryService,
+  type WorkReportQueueTaskRecord,
+} from "../work-report/workReportTaskRegistryService";
 import { form16DowntimeService } from "./form16DowntimeService";
 
 type Form16CallbackTaskStatus = "pending" | "running" | "success" | "failed";
@@ -19,9 +27,107 @@ interface Form16CallbackTask {
   errorMessage?: string;
 }
 
-class Form16DowntimeCallbackRefreshService {
+interface Form16DowntimeCallbackRefreshServiceDeps {
+  delayMs: number;
+  refreshEntrySnapshotFromRagic: (entryId: string) => Promise<unknown>;
+  registry: {
+    initialize: () => Promise<void>;
+    listTasksForReplay: (
+      options: Parameters<typeof workReportTaskRegistryService.listTasksForReplay>[0]
+    ) => WorkReportQueueTaskRecord[];
+    upsertTask: (
+      input: Parameters<typeof workReportTaskRegistryService.upsertTask>[0]
+    ) => WorkReportQueueTaskRecord;
+  };
+}
+
+export class Form16DowntimeCallbackRefreshService {
   private readonly tasks = new Map<string, Form16CallbackTask>();
   private readonly queueChainByEntryKey = createKeyedSerialQueue();
+  private initializedPromise: Promise<void> | null = null;
+
+  constructor(
+    private readonly deps: Form16DowntimeCallbackRefreshServiceDeps = {
+      delayMs: env.RAGIC_CALLBACK_DELAY_MS,
+      refreshEntrySnapshotFromRagic: (entryId) =>
+        form16DowntimeService.refreshEntrySnapshotFromRagic(entryId),
+      registry: workReportTaskRegistryService,
+    }
+  ) {}
+
+  async initialize(): Promise<void> {
+    if (this.initializedPromise) {
+      await this.initializedPromise;
+      return;
+    }
+
+    const initialization = (async () => {
+      await this.deps.registry.initialize();
+      const interruptedTasks = this.deps.registry
+        .listTasksForReplay({
+          formId: "16",
+          taskType: "callback-refresh",
+          errorCode: "TASK_REGISTRY_RECOVERED_AFTER_RESTART",
+        })
+        .filter(
+          (task) => /^\d+$/.test(String(task.entryId ?? "").trim())
+        );
+
+      for (const interruptedTask of interruptedTasks) {
+        const replayTask = this.enqueue({
+          entryId: interruptedTask.entryId!,
+          eventType: "entry-updated",
+          source: "ragic-callback-16-recovered",
+          ...(interruptedTask.actorIp ? { actorIp: interruptedTask.actorIp } : {}),
+          ...(interruptedTask.actorLabel
+            ? { actorLabel: interruptedTask.actorLabel }
+            : {}),
+        });
+        const replayScheduledAt = new Date().toISOString();
+        this.deps.registry.upsertTask({
+          taskId: interruptedTask.taskId,
+          taskType: "callback-refresh",
+          status: "failed",
+          formId: "16",
+          entryId: interruptedTask.entryId,
+          rowId: interruptedTask.rowId,
+          queueKey: interruptedTask.queueKey,
+          createdAt: interruptedTask.createdAt,
+          startedAt: interruptedTask.startedAt,
+          finishedAt: interruptedTask.finishedAt,
+          updatedAt: replayScheduledAt,
+          message: `服務重啟後已重新排入 Form 16 callback refresh（${replayTask.taskId}）`,
+          errorCode: "FORM16_CALLBACK_REPLAY_SCHEDULED",
+          errorMessage: null,
+          actorClientId: interruptedTask.actorClientId,
+          actorTabId: interruptedTask.actorTabId,
+          actorIp: interruptedTask.actorIp,
+          actorLabel: interruptedTask.actorLabel,
+          source: interruptedTask.source,
+        });
+      }
+    })();
+
+    this.initializedPromise = initialization;
+    try {
+      await initialization;
+    } catch (error) {
+      this.initializedPromise = null;
+      throw error;
+    }
+  }
+
+  closeAdmission(): void {
+    this.queueChainByEntryKey.closeAdmission();
+  }
+
+  drain(): Promise<void> {
+    return this.queueChainByEntryKey.drain();
+  }
+
+  getQueueStats(): KeyedSerialQueueStats {
+    return this.queueChainByEntryKey.getStats();
+  }
 
   enqueue(input: {
     entryId: string;
@@ -30,6 +136,19 @@ class Form16DowntimeCallbackRefreshService {
     actorIp?: string;
     actorLabel?: string;
   }): Form16CallbackTask {
+    try {
+      this.queueChainByEntryKey.assertAccepting();
+    } catch (error) {
+      if (error instanceof KeyedSerialQueueClosedError) {
+        throw new HttpError(
+          503,
+          "Form 16 callback refresh queue 正在關閉，暫不接受新任務",
+          "RAGIC_CALLBACK_QUEUE_CLOSED"
+        );
+      }
+      throw error;
+    }
+
     const normalizedEntryId = String(input.entryId ?? "").trim();
     const createdAt = new Date().toISOString();
     const task: Form16CallbackTask = {
@@ -77,15 +196,15 @@ class Form16DowntimeCallbackRefreshService {
     this.syncTaskToRegistry(runningTask, input);
 
     try {
-      if (env.RAGIC_CALLBACK_DELAY_MS > 0) {
+      if (this.deps.delayMs > 0) {
         await new Promise<void>((resolve) => {
-          setTimeout(resolve, env.RAGIC_CALLBACK_DELAY_MS);
+          setTimeout(resolve, this.deps.delayMs);
         });
       }
 
       // refreshEntrySnapshotFromRagic 內部會自己處理「Ragic 找不到 entry → 從 SQLite 刪掉」
       // 所以 created/updated/deleted 三種都用同一條路徑
-      await form16DowntimeService.refreshEntrySnapshotFromRagic(runningTask.entryId);
+      await this.deps.refreshEntrySnapshotFromRagic(runningTask.entryId);
 
       const finishedAt = new Date().toISOString();
       const successTask: Form16CallbackTask = {
@@ -123,7 +242,7 @@ class Form16DowntimeCallbackRefreshService {
     }
   ): void {
     const sourceLabel = input?.source ?? task.source ?? "ragic-callback-16";
-    workReportTaskRegistryService.upsertTask({
+    this.deps.registry.upsertTask({
       taskId: task.taskId,
       taskType: "callback-refresh",
       status: task.status,

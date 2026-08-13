@@ -1,18 +1,35 @@
 import type { parseAnalysisQuery, parseReportsQuery, RagicCallbackEventType } from "./workReportRequest";
 import type {
   WorkReportQueueTaskRecord,
+  WorkReportQueueTaskOperationKind,
   WorkReportQueueTaskStatus,
   WorkReportQueueTaskType,
 } from "../services/work-report/workReportTaskRegistryService";
 import type { RagicReadPriority } from "../infra/ragicRequestScheduler";
+import type {
+  ProjectionApplyResult,
+  ProjectionReason,
+  SortOrderProjectionResult,
+} from "../services/work-report-sync/workReportMutationProjectionServiceFactory";
+import type { RagicRecord } from "../ragic/client";
+import type { MutationLifecycleState } from "../types/mutationLifecycle";
 
 interface SyncTaskResponse {
   taskId?: string;
   status?: string;
   createdAt?: string;
+  lifecycleState?: MutationLifecycleState;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   result?: {
     rowId?: string;
   };
+}
+
+interface AcceptedMutationTaskResponse extends SyncTaskResponse {
+  taskId: string;
+  status: WorkReportQueueTaskStatus;
+  createdAt: string;
 }
 
 interface CreateTaskLookupResult {
@@ -23,6 +40,12 @@ interface CreateTaskLookupResult {
 }
 
 export interface WorkReportRouterDeps {
+  runEntryMutationExclusive<T>(
+    formId: string,
+    entryId: string,
+    worker: () => Promise<T>,
+    options?: { signal?: AbortSignal }
+  ): Promise<T>;
   requestSync(formId: string, options: {
     triggeredBy: string;
     waitForCompletion: boolean;
@@ -79,10 +102,13 @@ export interface WorkReportRouterDeps {
       editSessionId?: string;
       editLockVersion?: number;
       clientMutationId?: string;
+      createIdempotencyKey?: string;
+      clientMutationFingerprint?: string;
       skipEntryPreflight?: boolean;
+      loadPreconditionEntrySnapshot?: () => Promise<RagicRecord>;
     }
   ): Promise<unknown>;
-  assertCreateEntryAcceptsReports(formId: string, entryId: string): Promise<void>;
+  assertCreateEntryAcceptsReports(formId: string, entryId: string): Promise<RagicRecord>;
   enqueueCreateTask(input: {
     taskType: "create-report" | "update-report";
     formId: string;
@@ -90,12 +116,14 @@ export interface WorkReportRouterDeps {
     workOrderNo?: string;
     queueKey: string;
     clientMutationId?: string;
+    operationFingerprint: string;
+    operationKind?: WorkReportQueueTaskOperationKind;
     actorClientId?: string;
     actorTabId?: string;
     actorIp?: string;
     actorLabel?: string;
     worker: () => Promise<unknown>;
-  }): SyncTaskResponse;
+  }): AcceptedMutationTaskResponse;
   sleep?(ms: number): Promise<void>;
   getCreateTask(taskId: string): CreateTaskLookupResult | null;
   requestBatchDelete(input: {
@@ -106,16 +134,18 @@ export interface WorkReportRouterDeps {
     rowIds: string[];
     expectedEntryLastUpdatedAt?: string;
     editSessionId?: string;
+    editLockVersion?: number;
     actorClientId?: string;
     actorTabId?: string;
     actorIp?: string;
     actorLabel?: string;
     /** 每列真的 Ragic 刪掉後觸發；用來寫 audit 等 side effect */
-    onRowDeleted?: (rowId: string, taskId?: string) => void | Promise<void>;
-  }): Promise<{
-    taskId?: string;
-    status?: string;
-    createdAt?: string;
+    onRowDeleted?: (
+      rowId: string,
+      taskId: string,
+      beforeSnapshot: unknown | null
+    ) => void | Promise<void>;
+  }): Promise<AcceptedMutationTaskResponse & {
     requestedCount?: number;
   }>;
   requestBatchCreate(input: {
@@ -130,10 +160,7 @@ export interface WorkReportRouterDeps {
     actorTabId?: string;
     actorIp?: string;
     actorLabel?: string;
-  }): Promise<{
-    taskId?: string;
-    status?: string;
-    createdAt?: string;
+  }): Promise<AcceptedMutationTaskResponse & {
     requestedCount?: number;
   }>;
   requestBatchCreateFinalizeRetry(input: {
@@ -144,10 +171,7 @@ export interface WorkReportRouterDeps {
     actorTabId?: string;
     actorIp?: string;
     actorLabel?: string;
-  }): Promise<{
-    taskId?: string;
-    status?: string;
-    createdAt?: string;
+  }): Promise<AcceptedMutationTaskResponse & {
     requestedCount?: number;
   }>;
   updateReport(
@@ -171,6 +195,20 @@ export interface WorkReportRouterDeps {
       editLockVersion?: number;
     }
   ): Promise<{ machineCode: string }>;
+  updateSortOrder(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    options?: {
+      expectedEntryLastUpdatedAt?: string;
+      editSessionId?: string;
+      editLockVersion?: number;
+    }
+  ): Promise<{
+    sortOrder: number;
+    previousSortOrder: number | null;
+    changed: boolean;
+  }>;
   manualCloseWorkOrder(
     formId: string,
     entryId: string,
@@ -246,11 +284,23 @@ export interface WorkReportRouterDeps {
     idleMs?: number;
     lockVersion?: number;
   }>;
-  projectSqliteAfterMutation(
+  enqueueSqliteProjectionAfterMutation(
     formId: string,
     entryId: string,
-    reason: "create" | "update" | "delete"
-  ): Promise<void>;
+    reason: ProjectionReason
+  ): Promise<number>;
+  applyQueuedSqliteProjectionAfterMutation(
+    formId: string,
+    entryId: string,
+    reason: ProjectionReason,
+    enqueuedSeq: number
+  ): Promise<ProjectionApplyResult>;
+  applyQueuedSortOrderSqliteAfterMutation(
+    formId: string,
+    entryId: string,
+    sortOrder: number,
+    enqueuedSeq: number
+  ): Promise<SortOrderProjectionResult>;
   requestRagicCallbackRefresh(input: {
     formId: string;
     entryId: string;

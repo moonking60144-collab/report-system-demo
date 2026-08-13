@@ -243,14 +243,14 @@ export interface WorkReportSyncStateSnapshot {
 
 export type CreateReportTaskStatus = "pending" | "running" | "success" | "failed";
 
-export interface CreateReportTaskAcceptedResult {
+export interface CreateReportTaskAcceptedResult extends MutationLifecycleTiming {
   taskId: string;
   status: CreateReportTaskStatus;
   createdAt: string;
   rowId?: string;
 }
 
-export interface CreateReportTaskResult {
+export interface CreateReportTaskResult extends MutationLifecycleTiming {
   taskId: string;
   taskType?: "create-report" | "update-report";
   formId: string;
@@ -261,11 +261,12 @@ export interface CreateReportTaskResult {
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
-  result?: ReportMutationResult;
+  result?: { rowId?: string };
   error?: {
     code?: string;
     message: string;
   };
+  writeIndeterminate?: boolean;
 }
 
 export type WorkReportQueueTaskType =
@@ -279,7 +280,13 @@ export type WorkReportQueueTaskType =
 
 export type WorkReportQueueTaskStatus = "pending" | "running" | "success" | "failed";
 
-export interface WorkReportQueueTask {
+export type WorkReportQueueTaskOperationKind =
+  | "update-sort-order"
+  | "update-main-machine"
+  | "close-work-order"
+  | "reopen-work-order";
+
+export interface WorkReportQueueTask extends MutationLifecycleTiming {
   taskId: string;
   taskType: WorkReportQueueTaskType;
   status: WorkReportQueueTaskStatus;
@@ -299,11 +306,15 @@ export interface WorkReportQueueTask {
   actorTabId: string | null;
   actorIp: string | null;
   actorLabel: string | null;
+  operationKind?: WorkReportQueueTaskOperationKind | null;
   /** 系統事件來源（e.g. ragic-callback-16、ragic-form-save）；跟 actorLabel 分流 */
   source: string | null;
   batchCreatedRowIds?: string[] | null;
   batchFinalizeFailed?: boolean | null;
   batchWriteIndeterminate?: boolean | null;
+  writeIndeterminate?: boolean | null;
+  deletedCount?: number | null;
+  deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
 }
 
@@ -346,7 +357,7 @@ export interface ReportMutationPayload {
   testingDiesMinutes?: number;
 }
 
-export interface BatchDeleteTaskAcceptedResult {
+export interface BatchDeleteTaskAcceptedResult extends MutationLifecycleTiming {
   taskId: string;
   status: WorkReportQueueTaskStatus;
   createdAt: string;
@@ -355,7 +366,7 @@ export interface BatchDeleteTaskAcceptedResult {
 
 export type DeleteReportTaskAcceptedResult = BatchDeleteTaskAcceptedResult;
 
-export interface BatchCreateTaskAcceptedResult {
+export interface BatchCreateTaskAcceptedResult extends MutationLifecycleTiming {
   taskId: string;
   status: WorkReportQueueTaskStatus;
   createdAt: string;
@@ -364,6 +375,7 @@ export interface BatchCreateTaskAcceptedResult {
 
 export interface BatchCreateRowRequest {
   payload: ReportMutationPayload;
-  /** 前端產生的 UUID，後端用於 idempotency 映射（可省略，向後相容） */
-  clientRowKey?: string;
+  /** 前端產生的 UUID，後端用於 durable idempotency 映射。 */
+  clientRowKey: string;
 }
+import type { MutationLifecycleTiming } from "./mutationLifecycleTypes";

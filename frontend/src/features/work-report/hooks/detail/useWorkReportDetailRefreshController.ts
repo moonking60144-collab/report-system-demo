@@ -108,14 +108,17 @@ export function useWorkReportDetailRefreshController({
   ]);
 
   const handleRealtimeEntryUpdated = useCallback(
-    (event: { formId?: string; entryId?: string }) => {
+    (event: { formId?: string; entryId?: string; entryIds?: string[] }) => {
       if (!formId || !safeEntryId) {
         return;
       }
       if (String(event.formId ?? "").trim() !== formId) {
         return;
       }
-      if (String(event.entryId ?? "").trim() !== safeEntryId) {
+      const targetsCurrentEntry = event.entryIds
+        ? event.entryIds.includes(safeEntryId)
+        : String(event.entryId ?? "").trim() === safeEntryId;
+      if (!targetsCurrentEntry) {
         return;
       }
       runImmediateRefresh();
@@ -127,6 +130,7 @@ export function useWorkReportDetailRefreshController({
     useWorkReportRealtime({
       enabled,
       onEntryUpdated: handleRealtimeEntryUpdated,
+      onEntriesUpdated: handleRealtimeEntryUpdated,
     });
 
   useEffect(() => {

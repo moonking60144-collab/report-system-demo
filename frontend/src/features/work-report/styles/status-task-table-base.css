@@ -163,8 +163,8 @@
   align-items: center;
   gap: 0.55rem 0.7rem;
   flex-wrap: wrap;
-  margin: 0.55rem 0 0.65rem;
-  padding: 0.55rem 0.75rem;
+  margin: 0 0 0.45rem;
+  padding: 0.4rem 0.65rem;
   border: 1px solid #dbe3eb;
   border-radius: 10px;
   background: #f1f5f9;
@@ -240,6 +240,21 @@
 
 .system-notice-panel.is-collapsed {
   padding: 0.35rem 0.75rem;
+}
+
+.system-notice-panel.is-compact-idle {
+  padding: 0.3rem 0.6rem;
+  border-color: #dbe3eb;
+  background: #f8fafc;
+}
+
+.system-notice-panel.is-compact-idle .system-notice-panel-header {
+  margin-bottom: 0;
+}
+
+.system-notice-panel.is-compact-idle .system-notice-panel-title {
+  color: #526578;
+  font-size: 0.78rem;
 }
 
 .system-notice-panel-header {

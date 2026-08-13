@@ -35,7 +35,10 @@ interface UseWorkReportListRefreshControllerArgs {
   ) => Promise<void>;
   hydrateAllRecords: (
     forceRefresh?: boolean,
-    options?: { mode?: "foreground" | "background" }
+    options?: {
+      mode?: "foreground" | "background";
+      reloadFromBackend?: boolean;
+    }
   ) => Promise<unknown[]>;
   setNotice: Dispatch<SetStateAction<NoticeState | null>>;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -260,7 +263,7 @@ export function useWorkReportListRefreshController({
         taskId: completedTask.taskId,
       });
       if (shouldUseFullHydrationForList) {
-        await hydrateAllRecords(false);
+        await hydrateAllRecords(false, { reloadFromBackend: true });
       } else {
         await loadReports(false, { throwOnError: true });
       }
@@ -380,7 +383,10 @@ export function useWorkReportListRefreshController({
               return;
             }
             if (shouldUseFullHydrationForList) {
-              await hydrateAllRecords(false, { mode: "background" });
+              await hydrateAllRecords(false, {
+                mode: "background",
+                reloadFromBackend: true,
+              });
             } else {
               await loadReports(false, { mode: "background", throwOnError: true });
             }

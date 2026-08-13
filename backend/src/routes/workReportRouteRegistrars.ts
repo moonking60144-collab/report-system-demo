@@ -17,26 +17,31 @@ import {
   parseAsyncFlag,
   parseEditingPresencePayload,
   parseMainMachineUpdatePayload,
+  parseSortOrderUpdatePayload,
   parseRagicCallbackPayload,
   parseRawLimit,
   parseRefreshFlag,
   parseReportsQuery,
   parseRequestedFields,
+  parseStrictRefreshFlag,
 } from "./workReportRequest";
 import {
   assertFullMutationPreconditions,
   assertLocalMutationPreconditions,
   parseMutationRequestContext,
   readTaskActorContext,
+  runRequestEntryMutationExclusive,
   runPostMutationHooks,
-  tryRouteMutationEntryPrecheck,
+  runPostSortOrderMutationHooks,
 } from "./workReportMutationRouteHelpers";
 import { safeInsertRecordAudit } from "../services/audit/recordAuditLogger";
 import { readWorkReportRowSnapshot } from "../services/audit/recordAuditSnapshotResolver";
+import { createStableJsonFingerprint } from "../utils/stableJsonFingerprint";
 import {
   getWorkReportTaskStatusMergeRank,
   parseWorkReportTaskTimestamp,
 } from "../services/work-report/workReportTaskStatusMerge";
+import type { RagicRecord } from "../ragic/client";
 
 const CREATE_REPORT_STATUS_CHECK_RETRY_DELAYS_MS = [5_000, 10_000, 20_000];
 
@@ -136,11 +141,10 @@ async function assertCreateEntryAcceptsReportsWithRetry(
   deps: WorkReportRouterDeps,
   formId: string,
   entryId: string
-): Promise<void> {
+): Promise<RagicRecord> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await deps.assertCreateEntryAcceptsReports(formId, entryId);
-      return;
+      return await deps.assertCreateEntryAcceptsReports(formId, entryId);
     } catch (error) {
       const delayMs = CREATE_REPORT_STATUS_CHECK_RETRY_DELAYS_MS[attempt];
       if (!isEntryStatusUnknownError(error) || delayMs === undefined) {
@@ -412,11 +416,17 @@ export function registerWorkReportReadRoutes(router: Router, deps: WorkReportRou
       assertReadableFormId(formId);
       assertRequiredPathValue(entryId, "entryId");
       const refresh = parseRefreshFlag(req.query as Record<string, unknown>);
+      const strictRefresh = parseStrictRefreshFlag(req.query as Record<string, unknown>);
 
       const data = await deps.getReportByEntryId(formId, entryId, {
         refresh,
-        allowSqliteFallbackOnRefresh: refresh,
-        ragicReadMaxRetries: 0,
+        allowSqliteFallbackOnRefresh: refresh && !strictRefresh,
+        ...(strictRefresh
+          ? {
+              ragicReadTimeoutMs: Math.min(env.RAGIC_MUTATION_READ_TIMEOUT_MS, 10_000),
+              ragicReadMaxRetries: 1,
+            }
+          : { ragicReadMaxRetries: 0 }),
         persistRefreshToSqlite: refresh,
       });
       res.json({ data });
@@ -611,21 +621,41 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
       const ctx = parseMutationRequestContext(req);
       const payload = req.body as Record<string, unknown>;
       const useAsync = parseAsyncFlag(req.query as Record<string, unknown>);
-      await assertLocalMutationPreconditions(deps, ctx);
 
       const { formId, entryId, editSessionId, editLockVersion, expectedEntryLastUpdatedAt } = ctx;
+      const createIdempotencyKey = ctx.createIdempotencyKey ?? ctx.clientMutationId;
       const createOptions = {
         expectedEntryLastUpdatedAt,
         editSessionId,
         editLockVersion,
-        // 傳 clientMutationId 給 createReport 做 Form 16 寫入的 idempotency
-        // （跟 enqueueCreateTask 的 task-level dedup 是不同層保護）
+        // clientMutationId 只識別本次 task attempt；createIdempotencyKey 才跨 retry 防重複寫入。
         ...(ctx.clientMutationId ? { clientMutationId: ctx.clientMutationId } : {}),
+        ...(createIdempotencyKey ? { createIdempotencyKey } : {}),
+        ...(createIdempotencyKey
+          ? {
+              clientMutationFingerprint: createStableJsonFingerprint({
+                operation: "create-report",
+                formId,
+                entryId,
+                payload,
+              }),
+            }
+          : {}),
       };
 
       if (!useAsync) {
-        const result = await deps.createReport(formId, entryId, payload, createOptions);
-        await runPostMutationHooks(deps, formId, entryId, "create");
+        const result = await runRequestEntryMutationExclusive({
+          deps,
+          ctx,
+          req,
+          res,
+          worker: async () => {
+            await assertLocalMutationPreconditions(deps, ctx);
+            const createdReport = await deps.createReport(formId, entryId, payload, createOptions);
+            await runPostMutationHooks(deps, formId, entryId, "create");
+            return createdReport;
+          },
+        });
         res.status(201).json({
           data: result,
           meta: { formId, entryId },
@@ -633,6 +663,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         return;
       }
 
+      await assertLocalMutationPreconditions(deps, ctx);
       if (!ctx.clientMutationId) {
         throw new HttpError(
           400,
@@ -647,16 +678,24 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         workOrderNo: ctx.actor.workOrderNo ?? undefined,
         queueKey: `${formId}:${entryId}`,
         clientMutationId: ctx.clientMutationId,
+        operationFingerprint: createStableJsonFingerprint({
+          operation: "create-report",
+          formId,
+          entryId,
+          payload,
+        }),
         actorClientId: ctx.actor.actorClientId ?? undefined,
         actorTabId: ctx.actor.actorTabId ?? undefined,
         actorIp: ctx.actor.actorIp ?? undefined,
         actorLabel: ctx.actor.actorLabel ?? undefined,
         worker: async () => {
-          await assertCreateEntryAcceptsReportsWithRetry(deps, formId, entryId);
+          await assertLocalMutationPreconditions(deps, ctx);
           const result = await deps.createReport(formId, entryId, payload, {
             ...createOptions,
             expectedEntryLastUpdatedAt: undefined,
             skipEntryPreflight: true,
+            loadPreconditionEntrySnapshot: () =>
+              assertCreateEntryAcceptsReportsWithRetry(deps, formId, entryId),
           });
           await runPostMutationHooks(deps, formId, entryId, "create");
           return result;
@@ -668,6 +707,9 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
           taskId: task.taskId,
           status: task.status,
           createdAt: task.createdAt,
+          lifecycleState: task.lifecycleState ?? "accepted",
+          acceptedAt: task.acceptedAt ?? task.createdAt,
+          confirmedAt: task.confirmedAt ?? null,
           ...(task.result?.rowId ? { rowId: task.result.rowId } : {}),
         },
         meta: {
@@ -703,7 +745,12 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
       });
 
       res.status(202).json({
-        data: task,
+        data: {
+          ...task,
+          lifecycleState: "accepted",
+          acceptedAt: task.createdAt,
+          confirmedAt: null,
+        },
         meta: {
           formId: ctx.formId,
           entryId: ctx.entryId,
@@ -733,7 +780,12 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
       });
 
       res.status(202).json({
-        data: task,
+        data: {
+          ...task,
+          lifecycleState: "accepted",
+          acceptedAt: task.createdAt,
+          confirmedAt: null,
+        },
         meta: {
           formId: ctx.formId,
           entryId: ctx.entryId,
@@ -770,17 +822,185 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
   );
 
   router.put(
+    "/:formId/reports/:entryId/sort-order",
+    asyncHandler(async (req, res) => {
+      const ctx = parseMutationRequestContext(req);
+      const payload = parseSortOrderUpdatePayload(req.body);
+      await assertLocalMutationPreconditions(deps, ctx);
+      if (!ctx.clientMutationId) {
+        throw new HttpError(
+          400,
+          "排序更新必須提供 x-client-mutation-id，才能安全處理重試與服務重啟。",
+          "CLIENT_MUTATION_ID_REQUIRED"
+        );
+      }
+      const routePrecheck = "skipped";
+
+      const task = deps.enqueueCreateTask({
+        taskType: "update-report",
+        formId: ctx.formId,
+        entryId: ctx.entryId,
+        workOrderNo: ctx.actor.workOrderNo ?? undefined,
+        queueKey: `${ctx.formId}:${ctx.entryId}`,
+        clientMutationId: ctx.clientMutationId,
+        operationKind: "update-sort-order",
+        operationFingerprint: createStableJsonFingerprint({
+          operation: "update-sort-order",
+          formId: ctx.formId,
+          entryId: ctx.entryId,
+          payload,
+        }),
+        actorClientId: ctx.actor.actorClientId ?? undefined,
+        actorTabId: ctx.actor.actorTabId ?? undefined,
+        actorIp: ctx.actor.actorIp ?? undefined,
+        actorLabel: ctx.actor.actorLabel ?? undefined,
+        worker: async () => {
+          await assertLocalMutationPreconditions(deps, ctx);
+          const result = await deps.updateSortOrder(
+            ctx.formId,
+            ctx.entryId,
+            payload.sortOrder,
+            {
+              expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+              editSessionId: ctx.editSessionId,
+              editLockVersion: ctx.editLockVersion,
+            }
+          );
+          if (result.changed) {
+            void safeInsertRecordAudit({
+              scope: "work-report",
+              formId: ctx.formId,
+              entryId: ctx.entryId,
+              action: "update",
+              actorClientId: ctx.actor.actorClientId,
+              actorTabId: ctx.actor.actorTabId,
+              actorIp: ctx.actor.actorIp,
+              actorLabel: ctx.actor.actorLabel,
+              taskId: task.taskId,
+              beforeSnapshot: { sortOrder: result.previousSortOrder },
+              afterPatch: { sortOrder: result.sortOrder },
+            });
+          }
+          await runPostSortOrderMutationHooks(
+            deps,
+            ctx.formId,
+            ctx.entryId,
+            result.sortOrder
+          );
+          return result;
+        },
+      });
+
+      res.status(202).json({
+        data: {
+          taskId: task.taskId,
+          status: task.status,
+          createdAt: task.createdAt,
+          lifecycleState: task.lifecycleState ?? "accepted",
+          acceptedAt: task.acceptedAt ?? task.createdAt,
+          confirmedAt: task.confirmedAt ?? null,
+        },
+        meta: {
+          formId: ctx.formId,
+          entryId: ctx.entryId,
+          accepted: true,
+          preconditionCheck: routePrecheck,
+        },
+      });
+    })
+  );
+
+  router.put(
     "/:formId/reports/:entryId/main-machine",
     asyncHandler(async (req, res) => {
       const ctx = parseMutationRequestContext(req);
       const payload = parseMainMachineUpdatePayload(req.body);
-      await assertLocalMutationPreconditions(deps, ctx);
-      const result = await deps.updateMainMachine(ctx.formId, ctx.entryId, payload.machineCode, {
-        expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
-        editSessionId: ctx.editSessionId,
-        editLockVersion: ctx.editLockVersion,
+      const useAsync = parseAsyncFlag(req.query as Record<string, unknown>);
+
+      if (useAsync) {
+        await assertLocalMutationPreconditions(deps, ctx);
+        if (!ctx.clientMutationId) {
+          throw new HttpError(
+            400,
+            "背景更新主表機台必須提供 x-client-mutation-id，才能安全處理重試與服務重啟。",
+            "CLIENT_MUTATION_ID_REQUIRED"
+          );
+        }
+        const task = deps.enqueueCreateTask({
+          taskType: "update-report",
+          operationKind: "update-main-machine",
+          formId: ctx.formId,
+          entryId: ctx.entryId,
+          workOrderNo: ctx.actor.workOrderNo ?? undefined,
+          queueKey: `${ctx.formId}:${ctx.entryId}`,
+          clientMutationId: ctx.clientMutationId,
+          operationFingerprint: createStableJsonFingerprint({
+            operation: "update-main-machine",
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+            payload,
+          }),
+          actorClientId: ctx.actor.actorClientId ?? undefined,
+          actorTabId: ctx.actor.actorTabId ?? undefined,
+          actorIp: ctx.actor.actorIp ?? undefined,
+          actorLabel: ctx.actor.actorLabel ?? undefined,
+          worker: async () => {
+            await assertLocalMutationPreconditions(deps, ctx);
+            const result = await deps.updateMainMachine(
+              ctx.formId,
+              ctx.entryId,
+              payload.machineCode,
+              {
+                expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+                editSessionId: ctx.editSessionId,
+                editLockVersion: ctx.editLockVersion,
+              }
+            );
+            await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+            return result;
+          },
+        });
+
+        res.status(202).json({
+          data: {
+            taskId: task.taskId,
+            status: task.status,
+            createdAt: task.createdAt,
+            lifecycleState: task.lifecycleState ?? "accepted",
+            acceptedAt: task.acceptedAt ?? task.createdAt,
+            confirmedAt: task.confirmedAt ?? null,
+          },
+          meta: {
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+            accepted: true,
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+          },
+        });
+        return;
+      }
+
+      const result = await runRequestEntryMutationExclusive({
+        deps,
+        ctx,
+        req,
+        res,
+        worker: async () => {
+          await assertLocalMutationPreconditions(deps, ctx);
+          const updatedMachine = await deps.updateMainMachine(
+            ctx.formId,
+            ctx.entryId,
+            payload.machineCode,
+            {
+              expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+              editSessionId: ctx.editSessionId,
+              editLockVersion: ctx.editLockVersion,
+            }
+          );
+          await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+          return updatedMachine;
+        },
       });
-      await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
 
       res.json({
         data: result,
@@ -793,13 +1013,91 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
     "/:formId/reports/:entryId/close",
     asyncHandler(async (req, res) => {
       const ctx = parseMutationRequestContext(req);
-      await assertFullMutationPreconditions(deps, ctx);
-      const result = await deps.manualCloseWorkOrder(ctx.formId, ctx.entryId, "close", {
-        expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
-        editSessionId: ctx.editSessionId,
-        editLockVersion: ctx.editLockVersion,
+      const useAsync = parseAsyncFlag(req.query as Record<string, unknown>);
+
+      if (useAsync) {
+        await assertLocalMutationPreconditions(deps, ctx);
+        if (!ctx.clientMutationId) {
+          throw new HttpError(
+            400,
+            "背景人工結案必須提供 x-client-mutation-id，才能安全處理重試與服務重啟。",
+            "CLIENT_MUTATION_ID_REQUIRED"
+          );
+        }
+        const task = deps.enqueueCreateTask({
+          taskType: "update-report",
+          operationKind: "close-work-order",
+          formId: ctx.formId,
+          entryId: ctx.entryId,
+          workOrderNo: ctx.actor.workOrderNo ?? undefined,
+          queueKey: `${ctx.formId}:${ctx.entryId}`,
+          clientMutationId: ctx.clientMutationId,
+          operationFingerprint: createStableJsonFingerprint({
+            operation: "close-work-order",
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+          }),
+          actorClientId: ctx.actor.actorClientId ?? undefined,
+          actorTabId: ctx.actor.actorTabId ?? undefined,
+          actorIp: ctx.actor.actorIp ?? undefined,
+          actorLabel: ctx.actor.actorLabel ?? undefined,
+          worker: async () => {
+            await assertFullMutationPreconditions(deps, ctx);
+            const result = await deps.manualCloseWorkOrder(
+              ctx.formId,
+              ctx.entryId,
+              "close",
+              {
+                expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+                editSessionId: ctx.editSessionId,
+                editLockVersion: ctx.editLockVersion,
+              }
+            );
+            await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+            return result;
+          },
+        });
+
+        res.status(202).json({
+          data: {
+            taskId: task.taskId,
+            status: task.status,
+            createdAt: task.createdAt,
+            lifecycleState: task.lifecycleState ?? "accepted",
+            acceptedAt: task.acceptedAt ?? task.createdAt,
+            confirmedAt: task.confirmedAt ?? null,
+          },
+          meta: {
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+            accepted: true,
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+          },
+        });
+        return;
+      }
+
+      const result = await runRequestEntryMutationExclusive({
+        deps,
+        ctx,
+        req,
+        res,
+        worker: async () => {
+          await assertFullMutationPreconditions(deps, ctx);
+          const closedWorkOrder = await deps.manualCloseWorkOrder(
+            ctx.formId,
+            ctx.entryId,
+            "close",
+            {
+              expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+              editSessionId: ctx.editSessionId,
+              editLockVersion: ctx.editLockVersion,
+            }
+          );
+          await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+          return closedWorkOrder;
+        },
       });
-      await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
 
       res.json({ data: result, meta: { formId: ctx.formId, entryId: ctx.entryId } });
     })
@@ -809,13 +1107,91 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
     "/:formId/reports/:entryId/reopen",
     asyncHandler(async (req, res) => {
       const ctx = parseMutationRequestContext(req);
-      await assertFullMutationPreconditions(deps, ctx);
-      const result = await deps.manualCloseWorkOrder(ctx.formId, ctx.entryId, "reopen", {
-        expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
-        editSessionId: ctx.editSessionId,
-        editLockVersion: ctx.editLockVersion,
+      const useAsync = parseAsyncFlag(req.query as Record<string, unknown>);
+
+      if (useAsync) {
+        await assertLocalMutationPreconditions(deps, ctx);
+        if (!ctx.clientMutationId) {
+          throw new HttpError(
+            400,
+            "背景重新開啟工令必須提供 x-client-mutation-id，才能安全處理重試與服務重啟。",
+            "CLIENT_MUTATION_ID_REQUIRED"
+          );
+        }
+        const task = deps.enqueueCreateTask({
+          taskType: "update-report",
+          operationKind: "reopen-work-order",
+          formId: ctx.formId,
+          entryId: ctx.entryId,
+          workOrderNo: ctx.actor.workOrderNo ?? undefined,
+          queueKey: `${ctx.formId}:${ctx.entryId}`,
+          clientMutationId: ctx.clientMutationId,
+          operationFingerprint: createStableJsonFingerprint({
+            operation: "reopen-work-order",
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+          }),
+          actorClientId: ctx.actor.actorClientId ?? undefined,
+          actorTabId: ctx.actor.actorTabId ?? undefined,
+          actorIp: ctx.actor.actorIp ?? undefined,
+          actorLabel: ctx.actor.actorLabel ?? undefined,
+          worker: async () => {
+            await assertFullMutationPreconditions(deps, ctx);
+            const result = await deps.manualCloseWorkOrder(
+              ctx.formId,
+              ctx.entryId,
+              "reopen",
+              {
+                expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+                editSessionId: ctx.editSessionId,
+                editLockVersion: ctx.editLockVersion,
+              }
+            );
+            await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+            return result;
+          },
+        });
+
+        res.status(202).json({
+          data: {
+            taskId: task.taskId,
+            status: task.status,
+            createdAt: task.createdAt,
+            lifecycleState: task.lifecycleState ?? "accepted",
+            acceptedAt: task.acceptedAt ?? task.createdAt,
+            confirmedAt: task.confirmedAt ?? null,
+          },
+          meta: {
+            formId: ctx.formId,
+            entryId: ctx.entryId,
+            accepted: true,
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+          },
+        });
+        return;
+      }
+
+      const result = await runRequestEntryMutationExclusive({
+        deps,
+        ctx,
+        req,
+        res,
+        worker: async () => {
+          await assertFullMutationPreconditions(deps, ctx);
+          const reopenedWorkOrder = await deps.manualCloseWorkOrder(
+            ctx.formId,
+            ctx.entryId,
+            "reopen",
+            {
+              expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
+              editSessionId: ctx.editSessionId,
+              editLockVersion: ctx.editLockVersion,
+            }
+          );
+          await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
+          return reopenedWorkOrder;
+        },
       });
-      await runPostMutationHooks(deps, ctx.formId, ctx.entryId, "update");
 
       res.json({ data: result, meta: { formId: ctx.formId, entryId: ctx.entryId } });
     })
@@ -827,7 +1203,6 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
       const ctx = parseMutationRequestContext(req, { includeRowId: true });
       const payload = req.body as Record<string, unknown>;
       const useAsync = parseAsyncFlag(req.query as Record<string, unknown>);
-      await assertLocalMutationPreconditions(deps, ctx);
 
       const { formId, entryId, rowId, editSessionId, editLockVersion, expectedEntryLastUpdatedAt } = ctx;
       const updateOptions = {
@@ -836,10 +1211,8 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         editLockVersion,
       };
 
-      // 在 mutation 之前抓 before snapshot；之後抓會抓到新值
-      const beforeSnapshot = await readWorkReportRowSnapshot(formId, entryId, rowId!);
-
       if (useAsync) {
+        await assertLocalMutationPreconditions(deps, ctx);
         if (!ctx.clientMutationId) {
           throw new HttpError(
             400,
@@ -847,7 +1220,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             "CLIENT_MUTATION_ID_REQUIRED"
           );
         }
-        const routePrecheck = await tryRouteMutationEntryPrecheck(deps, ctx);
+        const routePrecheck = ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped";
 
         const task = deps.enqueueCreateTask({
           taskType: "update-report",
@@ -856,11 +1229,20 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
           workOrderNo: ctx.actor.workOrderNo ?? undefined,
           queueKey: `${formId}:${entryId}`,
           clientMutationId: ctx.clientMutationId,
+          operationFingerprint: createStableJsonFingerprint({
+            operation: "update-report",
+            formId,
+            entryId,
+            rowId,
+            payload,
+          }),
           actorClientId: ctx.actor.actorClientId ?? undefined,
           actorTabId: ctx.actor.actorTabId ?? undefined,
           actorIp: ctx.actor.actorIp ?? undefined,
           actorLabel: ctx.actor.actorLabel ?? undefined,
           worker: async () => {
+            await assertLocalMutationPreconditions(deps, ctx);
+            const beforeSnapshot = await readWorkReportRowSnapshot(formId, entryId, rowId!);
             const result = await deps.updateReport(formId, entryId, rowId!, payload, updateOptions);
             // audit 放在 Ragic 寫入成功之後、projection hook 之前；
             // 若 updateReport 拋錯 / worker 整個 fail，這筆 audit 不會被寫出來，避免「假的更新紀錄」
@@ -888,6 +1270,9 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             taskId: task.taskId,
             status: task.status,
             createdAt: task.createdAt,
+            lifecycleState: task.lifecycleState ?? "accepted",
+            acceptedAt: task.acceptedAt ?? task.createdAt,
+            confirmedAt: task.confirmedAt ?? null,
             ...(task.result?.rowId ? { rowId: task.result.rowId } : {}),
           },
           meta: {
@@ -901,25 +1286,39 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         return;
       }
 
-      const result = await deps.updateReport(formId, entryId, rowId!, payload, updateOptions);
-      // audit 放在 Ragic 寫入成功之後、projection hook 之前：
-      // hook 拋錯（projection/SSE 問題）不會吃掉真正已經成功的操作紀錄。
-      // sync branch 沒 taskId 概念（task registry 僅 async branch 才發），audit 的 task_id 為 null；
-      // 這是預期的 asymmetry — 要追該次操作可用 clientId + occurredAt 組合
-      void safeInsertRecordAudit({
-        scope: "work-report",
-        formId,
-        entryId,
-        rowId: rowId!,
-        action: "update",
-        actorClientId: ctx.actor.actorClientId,
-        actorTabId: ctx.actor.actorTabId,
-        actorIp: ctx.actor.actorIp,
-        actorLabel: ctx.actor.actorLabel,
-        beforeSnapshot,
-        afterPatch: payload,
+      const result = await runRequestEntryMutationExclusive({
+        deps,
+        ctx,
+        req,
+        res,
+        worker: async () => {
+          await assertLocalMutationPreconditions(deps, ctx);
+          const beforeSnapshot = await readWorkReportRowSnapshot(formId, entryId, rowId!);
+          const updatedReport = await deps.updateReport(
+            formId,
+            entryId,
+            rowId!,
+            payload,
+            updateOptions
+          );
+          // sync branch 沒 taskId；可用 clientId + occurredAt 追查該次操作。
+          void safeInsertRecordAudit({
+            scope: "work-report",
+            formId,
+            entryId,
+            rowId: rowId!,
+            action: "update",
+            actorClientId: ctx.actor.actorClientId,
+            actorTabId: ctx.actor.actorTabId,
+            actorIp: ctx.actor.actorIp,
+            actorLabel: ctx.actor.actorLabel,
+            beforeSnapshot,
+            afterPatch: payload,
+          });
+          await runPostMutationHooks(deps, formId, entryId, "update");
+          return updatedReport;
+        },
       });
-      await runPostMutationHooks(deps, formId, entryId, "update");
 
       res.json({
         data: result,
@@ -933,8 +1332,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
     asyncHandler(async (req, res) => {
       const ctx = parseMutationRequestContext(req, { includeRowId: true });
       await assertLocalMutationPreconditions(deps, ctx);
-      const routePrecheck = await tryRouteMutationEntryPrecheck(deps, ctx);
-      const beforeSnapshot = await readWorkReportRowSnapshot(ctx.formId, ctx.entryId, ctx.rowId!);
+      const routePrecheck = ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped";
 
       const task = await deps.requestBatchDelete({
         taskType: "delete-report",
@@ -944,11 +1342,12 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         rowIds: [ctx.rowId!],
         expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
         editSessionId: ctx.editSessionId,
+        editLockVersion: ctx.editLockVersion,
         actorClientId: ctx.actor.actorClientId ?? undefined,
         actorTabId: ctx.actor.actorTabId ?? undefined,
         actorIp: ctx.actor.actorIp ?? undefined,
         actorLabel: ctx.actor.actorLabel ?? undefined,
-        onRowDeleted: (rowId, taskId) => {
+        onRowDeleted: (rowId, taskId, beforeSnapshot) => {
           void safeInsertRecordAudit({
             scope: "work-report",
             formId: ctx.formId,
@@ -959,14 +1358,19 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             actorTabId: ctx.actor.actorTabId,
             actorIp: ctx.actor.actorIp,
             actorLabel: ctx.actor.actorLabel,
-            taskId: taskId ?? null,
+            taskId,
             beforeSnapshot,
           });
         },
       });
 
       res.status(202).json({
-        data: task,
+        data: {
+          ...task,
+          lifecycleState: "accepted",
+          acceptedAt: task.createdAt,
+          confirmedAt: null,
+        },
         meta: {
           formId: ctx.formId,
           entryId: ctx.entryId,
@@ -985,29 +1389,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
       const ctx = parseMutationRequestContext(req);
       const payload = parseBatchDeletePayload(req.body);
       await assertLocalMutationPreconditions(deps, ctx);
-      const routePrecheck = await tryRouteMutationEntryPrecheck(deps, ctx);
-      await Promise.all(
-        payload.rowIds.map((rowId) =>
-          deps.assertEntryEditableBySession({
-            formId: ctx.formId,
-            entryId: ctx.entryId,
-            rowId,
-            editSessionId: ctx.editSessionId,
-          })
-        )
-      );
-
-      // 先把每列的 snapshot 抓起來存 map；實際 Ragic 刪掉那列時才寫 audit
-      // 這樣 audit 能精準反映「真的刪成功了哪幾筆」，跟 task registry 的成功列吻合
-      const snapshotByRowId = new Map<string, unknown | null>();
-      await Promise.all(
-        payload.rowIds.map(async (rowId) => {
-          snapshotByRowId.set(
-            rowId,
-            await readWorkReportRowSnapshot(ctx.formId, ctx.entryId, rowId)
-          );
-        })
-      );
+      const routePrecheck = ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped";
 
       const task = await deps.requestBatchDelete({
         formId: ctx.formId,
@@ -1016,11 +1398,12 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
         rowIds: payload.rowIds,
         expectedEntryLastUpdatedAt: ctx.expectedEntryLastUpdatedAt,
         editSessionId: ctx.editSessionId,
+        editLockVersion: ctx.editLockVersion,
         actorClientId: ctx.actor.actorClientId ?? undefined,
         actorTabId: ctx.actor.actorTabId ?? undefined,
         actorIp: ctx.actor.actorIp ?? undefined,
         actorLabel: ctx.actor.actorLabel ?? undefined,
-        onRowDeleted: (rowId, taskId) => {
+        onRowDeleted: (rowId, taskId, beforeSnapshot) => {
           void safeInsertRecordAudit({
             scope: "work-report",
             formId: ctx.formId,
@@ -1031,14 +1414,19 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             actorTabId: ctx.actor.actorTabId,
             actorIp: ctx.actor.actorIp,
             actorLabel: ctx.actor.actorLabel,
-            taskId: taskId ?? null,
-            beforeSnapshot: snapshotByRowId.get(rowId) ?? null,
+            taskId,
+            beforeSnapshot,
           });
         },
       });
 
       res.status(202).json({
-        data: task,
+        data: {
+          ...task,
+          lifecycleState: "accepted",
+          acceptedAt: task.createdAt,
+          confirmedAt: null,
+        },
         meta: {
           formId: ctx.formId,
           entryId: ctx.entryId,

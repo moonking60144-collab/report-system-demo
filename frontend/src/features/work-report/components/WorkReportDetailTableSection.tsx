@@ -421,6 +421,7 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
   const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
   const [virtualViewportHeight, setVirtualViewportHeight] = useState(0);
+  const scrollHintFrameRef = useRef<number | null>(null);
   // 雙層 scroll 的智慧鈕：接近頂顯示 ↓（帶往下）、接近底顯示 ↑（帶回頂）；點擊時 window + 表格內部一起動
   const [scrollHint, setScrollHint] = useState<"down" | "up" | null>(null);
   useEffect(() => {
@@ -436,13 +437,25 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
       const wp = winMax > 40 ? window.scrollY / winMax : 0;
       setScrollHint(Math.max(tp, wp) < 0.5 ? "down" : "up");
     };
-    const raf = requestAnimationFrame(compute);
-    window.addEventListener("scroll", compute, { passive: true });
-    el?.addEventListener("scroll", compute, { passive: true });
+    const scheduleCompute = () => {
+      if (scrollHintFrameRef.current !== null) {
+        return;
+      }
+      scrollHintFrameRef.current = requestAnimationFrame(() => {
+        scrollHintFrameRef.current = null;
+        compute();
+      });
+    };
+    scheduleCompute();
+    window.addEventListener("scroll", scheduleCompute, { passive: true });
+    el?.addEventListener("scroll", scheduleCompute, { passive: true });
     return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("scroll", compute);
-      el?.removeEventListener("scroll", compute);
+      if (scrollHintFrameRef.current !== null) {
+        cancelAnimationFrame(scrollHintFrameRef.current);
+        scrollHintFrameRef.current = null;
+      }
+      window.removeEventListener("scroll", scheduleCompute);
+      el?.removeEventListener("scroll", scheduleCompute);
     };
   }, [detailTableScrollRef]);
   // sticky 卡頂：量標題列(sticky-stack)高度 → CSS 變數，讓表格區(outer)黏在它下方、高度自適應視窗
@@ -498,16 +511,35 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
     [autoHighlightedInlineKeys]
   );
   const [measuredRowHeightsByRowId, setMeasuredRowHeightsByRowId] = useState<Record<string, number>>({});
+  const pendingMeasuredRowHeightsRef = useRef<Record<string, number>>({});
+  const measuredRowHeightFrameRef = useRef<number | null>(null);
   const handleMeasuredRowHeight = useCallback((rowId: string, height: number) => {
-    setMeasuredRowHeightsByRowId((previous) => {
-      if (previous[rowId] === height) {
-        return previous;
-      }
-      return {
-        ...previous,
-        [rowId]: height,
-      };
+    pendingMeasuredRowHeightsRef.current[rowId] = height;
+    if (measuredRowHeightFrameRef.current !== null) {
+      return;
+    }
+    measuredRowHeightFrameRef.current = requestAnimationFrame(() => {
+      measuredRowHeightFrameRef.current = null;
+      const pending = pendingMeasuredRowHeightsRef.current;
+      pendingMeasuredRowHeightsRef.current = {};
+      setMeasuredRowHeightsByRowId((previous) => {
+        const changedEntries = Object.entries(pending).filter(
+          ([pendingRowId, pendingHeight]) => previous[pendingRowId] !== pendingHeight
+        );
+        return changedEntries.length > 0
+          ? { ...previous, ...Object.fromEntries(changedEntries) }
+          : previous;
+      });
     });
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (measuredRowHeightFrameRef.current !== null) {
+        cancelAnimationFrame(measuredRowHeightFrameRef.current);
+        measuredRowHeightFrameRef.current = null;
+      }
+      pendingMeasuredRowHeightsRef.current = {};
+    };
   }, []);
   const rowEstimateHeights = useMemo(
     () =>
@@ -549,20 +581,33 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
       return;
     }
 
-    const syncMetrics = () => {
+    let metricsFrameId: number | null = null;
+    const publishMetrics = () => {
       setVirtualScrollTop(scrollRoot.scrollTop);
       setVirtualViewportHeight(scrollRoot.clientHeight);
     };
+    const scheduleMetrics = () => {
+      if (metricsFrameId !== null) {
+        return;
+      }
+      metricsFrameId = requestAnimationFrame(() => {
+        metricsFrameId = null;
+        publishMetrics();
+      });
+    };
 
-    syncMetrics();
-    scrollRoot.addEventListener("scroll", syncMetrics, { passive: true });
+    publishMetrics();
+    scrollRoot.addEventListener("scroll", scheduleMetrics, { passive: true });
     const resizeObserver = new ResizeObserver(() => {
-      syncMetrics();
+      scheduleMetrics();
     });
     resizeObserver.observe(scrollRoot);
 
     return () => {
-      scrollRoot.removeEventListener("scroll", syncMetrics);
+      if (metricsFrameId !== null) {
+        cancelAnimationFrame(metricsFrameId);
+      }
+      scrollRoot.removeEventListener("scroll", scheduleMetrics);
       resizeObserver.disconnect();
     };
   }, [detailTableScrollRef]);
@@ -709,9 +754,15 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
     refreshing ||
     submitting ||
     hasActiveMutationTask ||
+    hasBlockingMutationTask ||
     editingRowId !== null ||
     modalOpen;
-  const batchDeleteActionDisabled = loading || refreshing || submitting || hasActiveMutationTask;
+  const batchDeleteActionDisabled =
+    loading ||
+    refreshing ||
+    submitting ||
+    hasActiveMutationTask ||
+    hasBlockingMutationTask;
   const handleScrollHintJump = () => {
     const el = detailTableScrollRef.current;
     if (scrollHint === "up") {
@@ -760,7 +811,7 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
                 state={{
                   disableRefresh: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasActiveMutationTask,
                   disableTaskQueue: isDefaultModeButtonDisabled || loading || refreshing,
-                  disableMainMachine: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasActiveMutationTask || editingRowId !== null || modalOpen,
+                  disableMainMachine: isDefaultModeButtonDisabled || loading || refreshing || submitting || hasActiveMutationTask || hasBlockingMutationTask || editingRowId !== null || modalOpen,
                   disableBatchDelete: batchDeleteActionDisabled,
                   disableClose: closeActionDisabled,
                   disableReopen: closeActionDisabled,
@@ -906,6 +957,11 @@ export const WorkReportDetailTableSection = memo(function WorkReportDetailTableS
                       batchDeleteMode ? "detail-row-batch-selectable" : "",
                       groupIndex % 2 === 0 ? "detail-date-group-even" : "detail-date-group-odd",
                       isPlannedIdleYesValue(item.plannedIdle) ? "detail-row-planned-idle" : "",
+                      item.__optimisticState === "frozen"
+                        ? "detail-row-optimistic-frozen"
+                        : item.__optimisticState
+                          ? "detail-row-optimistic-syncing"
+                          : "",
                       batchDeleteMode && selectedBatchDeleteRowIds.has(item.rowId)
                         ? "detail-row-batch-selected"
                         : "",

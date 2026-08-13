@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   FixedFilterPreset,
@@ -43,7 +44,7 @@ interface FixedFilterSidebarProps {
   onApplyUnfinishedMachineShortcut: (preset: SidebarMachinePreset) => void;
 }
 
-export function FixedFilterSidebar({
+export const FixedFilterSidebar = memo(function FixedFilterSidebar({
   collapsed,
   mobileMode = false,
   mobileOpen = false,
@@ -264,4 +265,4 @@ export function FixedFilterSidebar({
       </aside>
     </div>
   );
-}
+});

@@ -94,13 +94,15 @@ test("停機紀錄 repository 寫入後可從 read connection 讀取 snapshot", 
     const state = await form16DowntimeSqliteRepository.getSnapshotState();
     assert.equal(state?.snapshotAt, "2026-06-25T00:00:00.000Z");
     assert.equal(state?.totalRecords, 5);
+    assert.equal(state?.revision, 1);
 
     const hash = await form16DowntimeSqliteRepository.getRecordSnapshotHash("105");
     assert.equal(hash, rows[0]?.snapshotHash);
 
     await form16DowntimeSqliteRepository.syncSnapshot(
       [downtimeRecord("102", 777), downtimeRecord("104", 40), downtimeRecord("106", 60)],
-      "2026-06-25T00:05:00.000Z"
+      "2026-06-25T00:05:00.000Z",
+      state?.revision ?? -1
     );
     const syncedRows = await form16DowntimeSqliteRepository.listRecords();
     assert.deepEqual(
@@ -110,6 +112,39 @@ test("停機紀錄 repository 寫入後可從 read connection 讀取 snapshot", 
     const syncedState = await form16DowntimeSqliteRepository.getSnapshotState();
     assert.equal(syncedState?.snapshotAt, "2026-06-25T00:05:00.000Z");
     assert.equal(syncedState?.totalRecords, 3);
+    assert.equal(syncedState?.revision, 2);
+
+    const revisionBeforeUpsert = syncedState?.revision ?? -1;
+    await form16DowntimeSqliteRepository.upsertRecord(
+      downtimeRecord("107", 700),
+      "2026-06-25T00:05:00.000Z"
+    );
+    const staleSyncResult = await form16DowntimeSqliteRepository.syncSnapshot(
+      [downtimeRecord("102", 1), downtimeRecord("104", 2)],
+      "2026-06-25T00:05:00.000Z",
+      revisionBeforeUpsert
+    );
+    assert.equal(staleSyncResult, "stale");
+    assert.deepEqual(
+      (await form16DowntimeSqliteRepository.listRecords()).map(
+        (row) => `${row.id}:${row.plannedIdleMinutes}`
+      ),
+      ["107:700", "106:60", "104:40", "102:777"]
+    );
+
+    const revisionBeforeDelete =
+      (await form16DowntimeSqliteRepository.getSnapshotState())?.revision ?? -1;
+    await form16DowntimeSqliteRepository.deleteRecord("104", "2026-06-25T00:05:00.000Z");
+    const staleResurrectionResult = await form16DowntimeSqliteRepository.syncSnapshot(
+      [downtimeRecord("104", 999)],
+      "2026-06-25T00:05:00.000Z",
+      revisionBeforeDelete
+    );
+    assert.equal(staleResurrectionResult, "stale");
+    assert.equal(
+      (await form16DowntimeSqliteRepository.listRecords()).some((row) => row.id === "104"),
+      false
+    );
   } finally {
     await sqliteClient.close();
     mutableEnv.SQLITE_ENABLED = originalSqliteEnabled;

@@ -5,7 +5,11 @@ import { env } from "../config/env";
 import { workReportDebugLog } from "../observability/workReportDebugLog";
 import type { WorkReportRecord } from "../types/workReport";
 import { HttpError } from "../utils/httpError";
-import { createKeyedSerialQueue } from "../utils/keyedSerialQueue";
+import {
+  createKeyedSerialQueue,
+  KeyedSerialQueueClosedError,
+  type KeyedSerialQueueStats,
+} from "../utils/keyedSerialQueue";
 import { workReportTaskRegistryService } from "./work-report/workReportTaskRegistryService";
 
 export type RagicCallbackEventType =
@@ -161,7 +165,32 @@ export class RagicCallbackRefreshService {
     await this.persistChain.catch(() => undefined);
   }
 
+  closeAdmission(): void {
+    this.queueChainByEntryKey.closeAdmission();
+  }
+
+  drain(): Promise<void> {
+    return this.queueChainByEntryKey.drain();
+  }
+
+  getQueueStats(): KeyedSerialQueueStats {
+    return this.queueChainByEntryKey.getStats();
+  }
+
   enqueue(input: EnqueueRagicCallbackInput): CallbackTask {
+    try {
+      this.queueChainByEntryKey.assertAccepting();
+    } catch (error) {
+      if (error instanceof KeyedSerialQueueClosedError) {
+        throw new HttpError(
+          503,
+          "Callback refresh queue 正在關閉，暫不接受新任務",
+          "RAGIC_CALLBACK_QUEUE_CLOSED"
+        );
+      }
+      throw error;
+    }
+
     const createdAt = new Date().toISOString();
     const callbackSeq = ++this.callbackSeq;
     const coalesceKey = this.buildCoalesceKey(input.formId, input.entryId, input.eventType);
@@ -643,6 +672,9 @@ export class RagicCallbackRefreshService {
 
   private enqueueFollowUpAfterCoalescedFailure(task: CallbackTask): void {
     if ((task.coalescedCount ?? 0) <= 0) {
+      return;
+    }
+    if (!this.queueChainByEntryKey.getStats().accepting) {
       return;
     }
 

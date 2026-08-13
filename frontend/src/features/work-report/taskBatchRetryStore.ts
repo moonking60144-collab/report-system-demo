@@ -1,12 +1,21 @@
-import type { BatchCreateRowRequest, ReportMutationPayload } from "../../api/workReport";
+import type { ReportMutationPayload } from "../../api/workReport";
 import type { WorkReportFormId } from "./types";
 import { getOrCreateClientId } from "../../utils/clientIdentity";
+import {
+  isStoredMutationLifecycle,
+  type OptimisticMutationLifecycle,
+} from "./mutationLifecycle";
 
 const WORK_REPORT_RETRYABLE_BATCH_CREATE_STORE_KEY =
   "work-report:retryable-batch-create-store:v1";
 const RETRYABLE_BATCH_CREATE_MAX_ITEMS = 20;
 const RETRYABLE_BATCH_CREATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const RETRYABLE_BATCH_CREATE_CHANGED_EVENT = "work-report:retryable-batch-create-changed";
+
+export interface StoredBatchCreateRowRequest {
+  payload: ReportMutationPayload;
+  clientRowKey?: string;
+}
 
 function dispatchStoreChanged(): void {
   if (typeof window === "undefined") return;
@@ -22,11 +31,12 @@ export interface RetryableBatchCreateRecord {
   entryId: string;
   workOrderNo?: string | null;
   /** 每筆 row 帶 clientRowKey 做 idempotency；舊版 store 可能只有 payload，讀取時會補 key=undefined */
-  rows: BatchCreateRowRequest[];
+  rows: StoredBatchCreateRowRequest[];
   expectedEntryLastUpdatedAt?: string;
   editSessionId?: string;
   actorClientId: string;
   createdAt: string;
+  lifecycle?: OptimisticMutationLifecycle;
 }
 
 function isLikelyReportMutationPayload(value: Record<string, unknown>): boolean {
@@ -35,7 +45,7 @@ function isLikelyReportMutationPayload(value: Record<string, unknown>): boolean 
   return typeof value.date === "string" && value.date.length > 0;
 }
 
-function normalizeStoredRow(raw: unknown): { row: BatchCreateRowRequest; migrated: boolean } | null {
+function normalizeStoredRow(raw: unknown): { row: StoredBatchCreateRowRequest; migrated: boolean } | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   const maybePayload = record.payload;
@@ -102,7 +112,9 @@ function isRetryableBatchCreateRecord(
     typeof candidate.entryId === "string" &&
     Array.isArray(candidate.rows) &&
     typeof candidate.actorClientId === "string" &&
-    typeof candidate.createdAt === "string"
+    typeof candidate.createdAt === "string" &&
+    (candidate.lifecycle === undefined ||
+      isStoredMutationLifecycle(candidate.lifecycle))
   );
 }
 
@@ -122,7 +134,7 @@ function readRetryableBatchCreateStore(): RetryableBatchCreateStore {
       .map(([taskId, record]): [string, RetryableBatchCreateRecord] => {
         const normalizedRows = (Array.isArray(record.rows) ? record.rows : [])
           .map(normalizeStoredRow)
-          .filter((item): item is { row: BatchCreateRowRequest; migrated: boolean } => item !== null);
+          .filter((item): item is { row: StoredBatchCreateRowRequest; migrated: boolean } => item !== null);
         if (normalizedRows.some((item) => item.migrated)) didMigrate = true;
         return [taskId, { ...record, rows: normalizedRows.map((item) => item.row) }];
       })

@@ -40,6 +40,7 @@ interface WorkReportBatchDeleteTask {
   actorTabId?: string;
   actorIp?: string;
   actorLabel?: string;
+  runningMessage?: string;
 }
 
 interface RequestBatchDeleteInput {
@@ -54,7 +55,13 @@ interface RequestBatchDeleteInput {
   actorLabel?: string;
   concurrency?: number;
   beforeRun?: () => Promise<void>;
+  beforeDeleteRow?: (rowId: string) => Promise<unknown | null>;
   deleteRow: (rowId: string) => Promise<{ rowId: string }>;
+  onRowDeleted?: (
+    rowId: string,
+    taskId: string,
+    beforeSnapshot: unknown | null
+  ) => void | Promise<void>;
   finalizeAfterDelete?: (summary: {
     formId: string;
     entryId: string;
@@ -100,6 +107,14 @@ function resolveDeleteError(error: unknown): {
   };
 }
 
+function isDeleteWriteIndeterminate(item: BatchDeleteFailedItem): boolean {
+  return (
+    item.rowId !== "*precondition*" &&
+    item.rowId !== "*finalize*" &&
+    String(item.errorCode ?? "").trim().toUpperCase().endsWith("_INDETERMINATE")
+  );
+}
+
 class WorkReportBatchDeleteTaskService {
   private readonly tasks = new Map<string, WorkReportBatchDeleteTask>();
   private readonly queueChainByKey = workReportEntryMutationQueue;
@@ -112,6 +127,8 @@ class WorkReportBatchDeleteTaskService {
     if (rowIds.length === 0) {
       throw new HttpError(400, "至少要選擇一筆可刪除的明細", "BATCH_DELETE_EMPTY");
     }
+
+    this.queueChainByKey.assertAccepting(`${input.formId}:${input.entryId}`);
 
     const taskId = randomUUID();
     const createdAt = new Date().toISOString();
@@ -141,8 +158,14 @@ class WorkReportBatchDeleteTaskService {
     this.tasks.set(taskId, task);
     this.syncTaskToRegistry(task);
 
-    void this.queueChainByKey.enqueue(task.queueKey, () =>
-      this.runTask(taskId, input)
+    void this.queueChainByKey.enqueue(
+      task.queueKey,
+      () => this.runTask(taskId, input),
+      {
+        onWaitingForSync: () => {
+          this.markWaitingForSync(taskId);
+        },
+      }
     );
 
     return {
@@ -159,13 +182,14 @@ class WorkReportBatchDeleteTaskService {
       return;
     }
 
-    const taskStartedAtMs = Date.now();
-    const startedAt = new Date().toISOString();
+    const startedAt = task.startedAt ?? new Date().toISOString();
+    const taskStartedAtMs = Date.parse(startedAt);
     this.patchTask(taskId, {
       status: "running",
       phase: "deleting",
       startedAt,
       updatedAt: startedAt,
+      runningMessage: undefined,
     });
 
     const deletedRowIds: string[] = [];
@@ -227,8 +251,37 @@ class WorkReportBatchDeleteTaskService {
         const rowId = rowIds[currentIndex];
         const rowStartedAtMs = Date.now();
         try {
+          let beforeSnapshot: unknown | null = null;
+          if (input.beforeDeleteRow) {
+            try {
+              beforeSnapshot = await input.beforeDeleteRow(rowId);
+            } catch (error) {
+              log.warn({
+                event: "batch-delete.snapshot-read-failed",
+                taskId,
+                formId: task.formId,
+                entryId: task.entryId,
+                rowId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
           await input.deleteRow(rowId);
           deletedRowIds.push(rowId);
+          if (input.onRowDeleted) {
+            try {
+              await input.onRowDeleted(rowId, taskId, beforeSnapshot);
+            } catch (error) {
+              log.warn({
+                event: "batch-delete.on-row-deleted-failed",
+                taskId,
+                formId: task.formId,
+                entryId: task.entryId,
+                rowId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
           log.info({
             event: "batch-delete.row-deleted",
             taskId,
@@ -367,11 +420,30 @@ class WorkReportBatchDeleteTaskService {
     pruneTerminalTaskHistory(this.tasks);
   }
 
+  private markWaitingForSync(taskId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return;
+    }
+    const waitingAt = new Date().toISOString();
+    this.patchTask(taskId, {
+      status: "running",
+      startedAt: task.startedAt ?? waitingAt,
+      updatedAt: waitingAt,
+      runningMessage: "正在等待資料重新整理完成",
+    });
+  }
+
   private syncTaskToRegistry(task: WorkReportBatchDeleteTask): void {
     const isSingleDelete = task.taskType === "delete-report";
+    const writeIndeterminate = task.failedItems.some(isDeleteWriteIndeterminate);
     const preconditionFailedItem = task.failedItems.find(
       (item) => item.rowId === "*precondition*"
     );
+    const finalizeFailedItem = task.failedItems.find(
+      (item) => item.rowId === "*finalize*"
+    );
+    const deleteFinalizeFailed = Boolean(finalizeFailedItem);
     const progressLabel = `${task.deletedCount + task.failedCount}/${task.requestedCount}`;
     const successLabel = `${task.deletedCount}/${task.requestedCount}`;
     const finalizingProgressLabel =
@@ -392,24 +464,28 @@ class WorkReportBatchDeleteTaskService {
       ? task.status === "pending"
         ? "刪除報工排隊中"
         : task.status === "running"
-          ? task.phase === "finalizing"
+          ? task.runningMessage ?? (task.phase === "finalizing"
             ? "刪除報工收尾中（正在回算工令）"
-            : "刪除報工進行中"
+            : "刪除報工進行中")
           : preconditionFailedItem
             ? "刪除報工前置檢查失敗"
           : task.status === "success"
             ? "刪除報工完成"
+            : deleteFinalizeFailed && task.deletedCount > 0
+              ? "報工已刪除，但工令回算或資料同步收尾失敗"
             : "刪除報工失敗"
       : task.status === "pending"
         ? `批次刪除排隊中（0/${task.requestedCount}）`
         : task.status === "running"
-          ? task.phase === "finalizing"
+          ? task.runningMessage ?? (task.phase === "finalizing"
             ? `批次刪除收尾中（${finalizingProgressLabel}，正在回算工令）`
-            : `批次刪除進行中（${progressLabel}）`
+            : `批次刪除進行中（${progressLabel}）`)
           : preconditionFailedItem
             ? "批次刪除前置檢查失敗"
           : task.status === "success"
             ? `批次刪除完成（${successLabel}）`
+            : deleteFinalizeFailed && task.deletedCount > 0
+              ? `批次刪除已完成 ${task.deletedCount}/${task.requestedCount} 筆實體刪除，但工令回算或資料同步收尾失敗`
             : `批次刪除部分失敗（成功 ${task.deletedCount} / ${task.requestedCount}，失敗 ${task.failedCount}）${failedSummary}`;
 
     const errorMessage =
@@ -439,15 +515,23 @@ class WorkReportBatchDeleteTaskService {
       errorCode:
         preconditionFailedItem?.errorCode ??
         (task.status === "failed"
-          ? isSingleDelete
-            ? task.failedItems[0]?.errorCode ?? "DELETE_REPORT_FAILED"
-            : "BATCH_DELETE_PARTIAL_FAILURE"
+          ? deleteFinalizeFailed
+            ? isSingleDelete
+              ? "DELETE_REPORT_FINALIZE_FAILED"
+              : "BATCH_DELETE_FINALIZE_FAILED"
+            : isSingleDelete
+              ? task.failedItems[0]?.errorCode ?? "DELETE_REPORT_FAILED"
+              : "BATCH_DELETE_PARTIAL_FAILURE"
           : null),
       errorMessage,
       actorClientId: task.actorClientId ?? null,
       actorTabId: task.actorTabId ?? null,
       actorIp: task.actorIp ?? null,
       actorLabel: task.actorLabel ?? null,
+      writeIndeterminate: isSingleDelete ? writeIndeterminate : null,
+      batchWriteIndeterminate: isSingleDelete ? null : writeIndeterminate,
+      deletedCount: task.deletedCount,
+      deleteFinalizeFailed,
     });
   }
 }

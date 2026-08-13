@@ -1,20 +1,28 @@
-import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Modal } from "antd";
 import "../../../App.css";
 import { FixedFilterSidebar } from "../components/FixedFilterSidebar";
 import { WorkReportSyncProgressModal } from "../components/WorkReportSyncProgressModal";
 import { WorkReportToolbar } from "../components/WorkReportToolbar";
+import { WorkReportWorkspaceToolbar } from "../components/WorkReportWorkspaceToolbar";
+import { WorkReportFilterPanel } from "../components/WorkReportFilterPanel";
 import { PendingBatchTasksBadge } from "../components/PendingBatchTasksBadge";
 import { WorkReportStatusArea } from "../components/WorkReportStatusArea";
 import { WorkReportTableSection } from "../components/WorkReportTableSection";
 import { ColumnTextFilterDialog } from "../components/ColumnTextFilterDialog";
 import { ColumnAnalysisDrawer } from "../components/ColumnAnalysisDrawer";
 import { WorkReportLocalSettingsPanel } from "../components/WorkReportLocalSettingsPanel";
+import { WorkReportTaskQueueDrawer } from "../components/WorkReportTaskQueueDrawer";
 import { useWorkReportTaskMonitorContext } from "../context/useWorkReportTaskMonitorContext";
 import { useWorkReportViewState } from "../hooks/useWorkReportViewState";
 import { useColumnMenuState } from "../hooks/useColumnMenuState";
-import { useWorkReportDataPipeline } from "../hooks/useWorkReportDataPipeline";
+import {
+  buildScopedWorkReportRecords,
+  runWorkReportRecordPipeline,
+  useWorkReportDataPipeline,
+} from "../hooks/useWorkReportDataPipeline";
 import { useWorkReportColumns } from "../hooks/useWorkReportColumns";
 import { getSelectableWorkReportColumns } from "../hooks/workReportColumnDefinitions";
 import { useWorkReportListNavigation } from "../hooks/useWorkReportListNavigation";
@@ -34,26 +42,75 @@ import { useWorkReportClientPresence } from "../hooks/useWorkReportClientPresenc
 import { useWorkReportSessionExpiryGuard } from "../hooks/useWorkReportSessionExpiryGuard";
 import { WORK_REPORT_LANDING_PAGE_CONFIGS } from "../constants";
 import type {
-  ColumnWidthOverrides,
+  ColumnDisplayMode,
   ColumnKey,
   NoticeState,
   SidebarPlaceholderView,
   UiLanguage,
+  WorkReportColumnColor,
+  WorkReportFormId,
   WorkReportLocalPreferences,
   WorkReportListLocationState,
+  WorkReportTableLayoutPreferences,
 } from "../types";
 import {
+  createDefaultWorkReportTableLayout,
+  countActiveColumnFilters,
+  countActiveGlobalFilters,
+  getErrorMessage,
+  isSameGlobalFilters,
   parseColumnSortRulesFromSearch,
+  readWorkReportTableLayout,
+  reconcileWorkReportTableLayout,
+  resetWorkReportTableLayout,
   resolveWorkReportListLocationState,
   readColumnDisplayMode,
-  readColumnWidthOverrides,
-  readHiddenColumns,
   readWorkReportLocalPreferences,
-  writeColumnWidthOverrides,
   writeColumnDisplayMode,
-  writeHiddenColumns,
+  writeWorkReportTableLayout,
 } from "../utils";
 import { translateWorkOrderStatusValue } from "../../../i18n/valueMappers";
+import {
+  fetchWorkReportQueueTasks,
+  fetchWorkReportEntry,
+  updateWorkOrderSortOrderAccepted,
+  type WorkReportRecord,
+} from "../../../api/workReport";
+import {
+  buildWorkReportPrintDocument,
+  buildWorkReportPrintLoadingDocument,
+  fetchActiveSortOrderTasks,
+  fetchWorkReportPrintRecords,
+  isWorkReportPrintRecordCountAllowed,
+  WORK_REPORT_PRINT_MAX_RECORDS,
+  writeWorkReportPrintWindow,
+} from "../workReportPrint";
+import {
+  bindRetryableSortOrderMutationTask,
+  deleteRetryableSortOrderMutationByTaskId,
+  getOrCreateRetryableSortOrderMutation,
+  getRetryableSortOrderMutationByTaskId,
+  listRetryableSortOrderMutations,
+  resolveSortOrderTaskRecordPatch,
+} from "../sortOrderTaskRetryStore";
+import {
+  readWorkReportDeviceLabel,
+  writeWorkReportDeviceLabel,
+} from "../../../utils/clientIdentity";
+import { resolveTaskMutationLifecycleState } from "../mutationLifecycle";
+import {
+  createWorkReportOptimisticMutation,
+  reconcileWorkReportOptimisticMutation,
+} from "../workReportOptimisticMutation";
+import { WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED } from "../optimisticMutationFeatureFlags";
+
+function parseRollbackSortOrder(value: unknown): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
 
 export function WorkReportListPage() {
   const location = useLocation();
@@ -73,6 +130,10 @@ export function WorkReportListPage() {
   const [localPreferences, setLocalPreferences] = useState<WorkReportLocalPreferences>(() =>
     readWorkReportLocalPreferences()
   );
+  const [deviceLabel, setDeviceLabel] = useState(() => readWorkReportDeviceLabel());
+  const [taskQueueOpen, setTaskQueueOpen] = useState(false);
+  const [printViewChecking, setPrintViewChecking] = useState(false);
+  const printViewCheckInFlightRef = useRef(false);
   const {
     fixedFilterSidebarCollapsed,
     setFixedFilterSidebarCollapsed,
@@ -124,7 +185,11 @@ export function WorkReportListPage() {
     taskRunningCount,
     taskFailedCount,
     latestTaskMonitor,
+    upsertCreateTaskMonitor,
   } = useWorkReportTaskMonitorContext();
+  const processedEntryUpdateTaskIdsRef = useRef<Set<string>>(new Set());
+  const processedFailedEntryUpdateTaskIdsRef = useRef<Set<string>>(new Set());
+  const restoredSortOrderTaskIdsRef = useRef<Set<string>>(new Set());
   const translateStatusDisplay = useCallback(
     (status: string): string => translateWorkOrderStatusValue(status, t),
     [t]
@@ -173,62 +238,237 @@ export function WorkReportListPage() {
   const currentFormId = activeLandingPageConfig.formId;
   const currentPageProdTypeCode = activeLandingPageConfig.prodTypeCode;
   const currentPageGroupLabel = t(activeLandingPageConfig.groupLabelI18nKey);
-  const currentColumnLayoutKey = `${currentFormId}:${columnDisplayMode}`;
-  const [columnWidthOverridesByKey, setColumnWidthOverridesByKey] = useState<
-    Record<string, ColumnWidthOverrides>
-  >(() => ({
-    [currentColumnLayoutKey]: readColumnWidthOverrides(currentFormId, columnDisplayMode),
-  }));
-  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
-  const [hiddenColumnKeysByKey, setHiddenColumnKeysByKey] = useState<Record<string, ColumnKey[]>>(
-    () => ({
-      [currentColumnLayoutKey]: readHiddenColumns(currentFormId, columnDisplayMode),
-    })
+  const hasPendingFilterChanges = useMemo(
+    () => !isSameGlobalFilters(globalFilterDraft, globalFilters),
+    [globalFilterDraft, globalFilters]
   );
-  const columnWidthOverrides =
-    columnWidthOverridesByKey[currentColumnLayoutKey] ??
-    readColumnWidthOverrides(currentFormId, columnDisplayMode);
-  const hiddenColumnKeysList =
-    hiddenColumnKeysByKey[currentColumnLayoutKey] ??
-    readHiddenColumns(currentFormId, columnDisplayMode);
-  const hiddenColumnKeySet = useMemo(() => new Set(hiddenColumnKeysList), [hiddenColumnKeysList]);
-  const resizeFrameRef = useRef<number | null>(null);
+  const activeColumnFilterCount = useMemo(
+    () => countActiveColumnFilters(columnFilterState),
+    [columnFilterState]
+  );
+  const currentColumnLayoutKey = `${currentFormId}:${columnDisplayMode}`;
   const selectableColumns = useMemo(
     () => getSelectableWorkReportColumns(currentFormId, columnDisplayMode),
     [columnDisplayMode, currentFormId]
   );
+  const selectableColumnKeys = useMemo(
+    () => selectableColumns.map((column) => column.key),
+    [selectableColumns]
+  );
+  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [workspaceStickyHeight, setWorkspaceStickyHeight] = useState(0);
+  const [tableLayoutsByKey, setTableLayoutsByKey] = useState<
+    Record<string, WorkReportTableLayoutPreferences>
+  >(() => ({
+    [currentColumnLayoutKey]: readWorkReportTableLayout(
+      currentFormId,
+      columnDisplayMode,
+      selectableColumnKeys
+    ),
+  }));
+  const tableLayoutsByKeyRef = useRef(tableLayoutsByKey);
+  const currentTableLayout =
+    tableLayoutsByKey[currentColumnLayoutKey] ??
+    readWorkReportTableLayout(
+      currentFormId,
+      columnDisplayMode,
+      selectableColumnKeys
+    );
+  const columnWidthOverrides = currentTableLayout.columnWidths;
+  const hiddenColumnKeySet = useMemo(
+    () => new Set(currentTableLayout.hiddenColumnKeys),
+    [currentTableLayout.hiddenColumnKeys]
+  );
+  const resizeFrameRef = useRef<number | null>(null);
+
+  const applyCurrentTableLayoutState = useCallback(
+    (layout: WorkReportTableLayoutPreferences) => {
+      const nextLayouts = {
+        ...tableLayoutsByKeyRef.current,
+        [currentColumnLayoutKey]: layout,
+      };
+      tableLayoutsByKeyRef.current = nextLayouts;
+      setTableLayoutsByKey(nextLayouts);
+    },
+    [currentColumnLayoutKey]
+  );
+
+  const handleWorkspaceToolbarHeightChange = useCallback((height: number) => {
+    setWorkspaceStickyHeight((previous) => (previous === height ? previous : height));
+  }, []);
+
+  const handleOpenFiltersFromWorkspace = useCallback(() => {
+    if (filterPanelOpen) {
+      setFilterPanelOpen(false);
+      return;
+    }
+    setFilterPanelOpen(true);
+    window.requestAnimationFrame(() => {
+      const filterPanel = document.getElementById("work-report-filter-panel");
+      if (!filterPanel) {
+        return;
+      }
+      window.scrollTo({
+        top:
+          filterPanel.getBoundingClientRect().top +
+          window.scrollY -
+          workspaceStickyHeight,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+  }, [filterPanelOpen, workspaceStickyHeight]);
+  const handleToggleFixedFilterSidebar = useCallback(() => {
+    setFixedFilterSidebarCollapsed((previous) => !previous);
+  }, [setFixedFilterSidebarCollapsed]);
+  const handleCloseMobileSidebar = useCallback(() => {
+    setMobileSidebarOpen(false);
+  }, [setMobileSidebarOpen]);
+  const handleGlobalSearchDraftChange = useCallback(
+    (globalKeyword: string) => {
+      setGlobalFilterDraft((previous) => ({ ...previous, globalKeyword }));
+    },
+    [setGlobalFilterDraft]
+  );
+  const handlePreviousPage = useCallback(() => {
+    setPage((previous) => Math.max(1, previous - 1));
+  }, [setPage]);
+  const handleNextPage = useCallback(() => {
+    setPage((previous) => previous + 1);
+  }, [setPage]);
+  const handlePageSizeChange = useCallback(
+    (nextPageSize: number) => {
+      setPageSize(nextPageSize);
+      setPage(1);
+    },
+    [setPage, setPageSize]
+  );
+  const handleColumnDisplayModeChange = useCallback((mode: ColumnDisplayMode) => {
+    setColumnSettingsOpen(false);
+    setColumnDisplayMode(mode);
+    writeColumnDisplayMode(mode);
+  }, []);
+  const handleOpenColumnSettings = useCallback(() => {
+    setColumnSettingsOpen(true);
+  }, []);
+  const handleOpenTaskQueue = useCallback(() => {
+    setTaskQueueOpen(true);
+  }, []);
+
+  const updateCurrentTableLayout = useCallback(
+    (
+      updater: (
+        current: WorkReportTableLayoutPreferences
+      ) => WorkReportTableLayoutPreferences
+    ) => {
+      const current =
+        tableLayoutsByKeyRef.current[currentColumnLayoutKey] ??
+        readWorkReportTableLayout(
+          currentFormId,
+          columnDisplayMode,
+          selectableColumnKeys
+        );
+      const next = reconcileWorkReportTableLayout(
+        updater(current),
+        selectableColumnKeys
+      );
+      applyCurrentTableLayoutState(next);
+      writeWorkReportTableLayout(
+        currentFormId,
+        columnDisplayMode,
+        next,
+        selectableColumnKeys
+      );
+    },
+    [
+      applyCurrentTableLayoutState,
+      columnDisplayMode,
+      currentColumnLayoutKey,
+      currentFormId,
+      selectableColumnKeys,
+    ]
+  );
+
   const handleToggleColumnVisibility = useCallback(
     (columnKey: ColumnKey) => {
-      setHiddenColumnKeysByKey((previous) => {
-        const current =
-          previous[currentColumnLayoutKey] ??
-          readHiddenColumns(currentFormId, columnDisplayMode);
-        const next = current.includes(columnKey)
-          ? current.filter((key) => key !== columnKey)
-          : [...current, columnKey];
-        writeHiddenColumns(currentFormId, columnDisplayMode, next);
-        return {
-          ...previous,
-          [currentColumnLayoutKey]: next,
-        };
+      updateCurrentTableLayout((current) => {
+        const hiddenColumnKeys = current.hiddenColumnKeys.includes(columnKey)
+          ? current.hiddenColumnKeys.filter((key) => key !== columnKey)
+          : [...current.hiddenColumnKeys, columnKey];
+        return { ...current, hiddenColumnKeys };
       });
     },
-    [columnDisplayMode, currentColumnLayoutKey, currentFormId]
+    [updateCurrentTableLayout]
   );
   const handleShowAllColumns = useCallback(() => {
-    setHiddenColumnKeysByKey((previous) => ({
-      ...previous,
-      [currentColumnLayoutKey]: [],
+    updateCurrentTableLayout((current) => ({
+      ...current,
+      hiddenColumnKeys: [],
     }));
-    writeHiddenColumns(currentFormId, columnDisplayMode, []);
-  }, [columnDisplayMode, currentColumnLayoutKey, currentFormId]);
+  }, [updateCurrentTableLayout]);
   const handleResetDefaultColumns = useCallback(() => {
-    setHiddenColumnKeysByKey((previous) => ({
-      ...previous,
-      [currentColumnLayoutKey]: [],
-    }));
-    writeHiddenColumns(currentFormId, columnDisplayMode, []);
-  }, [columnDisplayMode, currentColumnLayoutKey, currentFormId]);
+    resetWorkReportTableLayout(currentFormId, columnDisplayMode);
+    applyCurrentTableLayoutState(
+      createDefaultWorkReportTableLayout(selectableColumnKeys)
+    );
+  }, [
+    applyCurrentTableLayoutState,
+    columnDisplayMode,
+    currentFormId,
+    selectableColumnKeys,
+  ]);
+  const handleMoveColumn = useCallback(
+    (columnKey: ColumnKey, targetColumnKey: ColumnKey) => {
+      updateCurrentTableLayout((current) => {
+        const withoutSource = current.columnOrder.filter(
+          (key) => key !== columnKey
+        );
+        const targetIndex = withoutSource.indexOf(targetColumnKey);
+        if (targetIndex < 0) {
+          return current;
+        }
+        withoutSource.splice(targetIndex, 0, columnKey);
+        return { ...current, columnOrder: withoutSource };
+      });
+    },
+    [updateCurrentTableLayout]
+  );
+  const handleMoveColumnByOffset = useCallback(
+    (columnKey: ColumnKey, offset: -1 | 1) => {
+      updateCurrentTableLayout((current) => {
+        const currentIndex = current.columnOrder.indexOf(columnKey);
+        const targetIndex = currentIndex + offset;
+        if (
+          currentIndex < 0 ||
+          targetIndex < 0 ||
+          targetIndex >= current.columnOrder.length
+        ) {
+          return current;
+        }
+        const columnOrder = [...current.columnOrder];
+        [columnOrder[currentIndex], columnOrder[targetIndex]] = [
+          columnOrder[targetIndex],
+          columnOrder[currentIndex],
+        ];
+        return { ...current, columnOrder };
+      });
+    },
+    [updateCurrentTableLayout]
+  );
+  const handleChangeColumnColor = useCallback(
+    (columnKey: ColumnKey, color: WorkReportColumnColor) => {
+      updateCurrentTableLayout((current) => {
+        const columnColors = { ...current.columnColors };
+        if (color === "none") {
+          delete columnColors[columnKey];
+        } else {
+          columnColors[columnKey] = color;
+        }
+        return { ...current, columnColors };
+      });
+    },
+    [updateCurrentTableLayout]
+  );
   const handleColumnResizeStart = useCallback(
     (
       columnKey: string,
@@ -242,7 +482,6 @@ export function WorkReportListPage() {
       const minWidth = Math.max(48, Math.min(96, startWidth));
       const maxWidth = 420;
       let latestWidth = startWidth;
-      let draftOverrides: ColumnWidthOverrides | null = null;
       document.body.classList.add("work-report-column-resizing");
 
       const handlePointerMove = (moveEvent: PointerEvent) => {
@@ -257,24 +496,28 @@ export function WorkReportListPage() {
         }
         resizeFrameRef.current = window.requestAnimationFrame(() => {
           resizeFrameRef.current = null;
-          setColumnWidthOverridesByKey((previous) => {
-            const current =
-              previous[currentColumnLayoutKey] ??
-              readColumnWidthOverrides(currentFormId, columnDisplayMode);
-            if (current[columnKey] === latestWidth) {
-              draftOverrides = current;
-              return previous;
-            }
-            const next = {
-              ...current,
-              [columnKey]: latestWidth,
-            };
-            draftOverrides = next;
-            return {
-              ...previous,
-              [currentColumnLayoutKey]: next,
-            };
-          });
+          const current =
+            tableLayoutsByKeyRef.current[currentColumnLayoutKey] ??
+            readWorkReportTableLayout(
+              currentFormId,
+              columnDisplayMode,
+              selectableColumnKeys
+            );
+          if (current.columnWidths[columnKey] === latestWidth) {
+            return;
+          }
+          applyCurrentTableLayoutState(
+            reconcileWorkReportTableLayout(
+              {
+                ...current,
+                columnWidths: {
+                  ...current.columnWidths,
+                  [columnKey]: latestWidth,
+                },
+              },
+              selectableColumnKeys
+            )
+          );
         });
       };
 
@@ -284,14 +527,25 @@ export function WorkReportListPage() {
           resizeFrameRef.current = null;
         }
         document.body.classList.remove("work-report-column-resizing");
-        const persistedOverrides = draftOverrides ?? {
-          ...columnWidthOverrides,
-          [columnKey]: latestWidth,
-        };
-        writeColumnWidthOverrides(
+        const current =
+          tableLayoutsByKeyRef.current[currentColumnLayoutKey] ??
+          currentTableLayout;
+        const persistedLayout = reconcileWorkReportTableLayout(
+          {
+            ...current,
+            columnWidths: {
+              ...current.columnWidths,
+              [columnKey]: latestWidth,
+            },
+          },
+          selectableColumnKeys
+        );
+        applyCurrentTableLayoutState(persistedLayout);
+        writeWorkReportTableLayout(
           currentFormId,
           columnDisplayMode,
-          persistedOverrides
+          persistedLayout,
+          selectableColumnKeys
         );
         window.removeEventListener("pointermove", handlePointerMove);
         window.removeEventListener("pointerup", handlePointerUp);
@@ -302,7 +556,14 @@ export function WorkReportListPage() {
       window.addEventListener("pointerup", handlePointerUp);
       window.addEventListener("pointercancel", handlePointerUp);
     },
-    [columnDisplayMode, columnWidthOverrides, currentColumnLayoutKey, currentFormId]
+    [
+      applyCurrentTableLayoutState,
+      columnDisplayMode,
+      currentColumnLayoutKey,
+      currentFormId,
+      currentTableLayout,
+      selectableColumnKeys,
+    ]
   );
   const { logListEvent } = useWorkReportListEventLogger(currentFormId);
   const isStandaloneTopView = activeTopView !== "report";
@@ -344,9 +605,14 @@ export function WorkReportListPage() {
     allRecords,
     hasMore,
     previewTotalCount,
+    previewTransitionPending,
+    displayedPreviewPage,
+    displayedPreviewPageSize,
     hydration,
     loadReports,
     hydrateAllRecords,
+    mergeListRecord,
+    patchListRecord,
     resetListDataState,
     resetHydrationState,
   } = useWorkReportListData({
@@ -359,6 +625,168 @@ export function WorkReportListPage() {
     t,
     setNotice,
   });
+  const effectiveListLoading = loading || previewTransitionPending;
+  useEffect(() => {
+    if (!WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED) {
+      return;
+    }
+    for (const task of createTaskMonitors) {
+      const mutation = task.optimisticMutation;
+      if (
+        task.formId !== currentFormId ||
+        !mutation ||
+        mutation.patch.kind !== "update-entry" ||
+        (mutation.lifecycle.optimisticState !== "applied" &&
+          mutation.lifecycle.optimisticState !== "confirmed" &&
+          mutation.lifecycle.optimisticState !== "frozen")
+      ) {
+        continue;
+      }
+      patchListRecord(currentFormId, task.entryId, mutation.patch.patch);
+    }
+  }, [createTaskMonitors, currentFormId, patchListRecord]);
+  useEffect(() => {
+    for (const retryRecord of listRetryableSortOrderMutations(currentFormId)) {
+      const pendingPatch = resolveSortOrderTaskRecordPatch(retryRecord, "pending");
+      if (WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED && pendingPatch) {
+        patchListRecord(pendingPatch.formId, pendingPatch.entryId, {
+          sortOrder: pendingPatch.sortOrder,
+        });
+      }
+      if (
+        !retryRecord.taskId ||
+        restoredSortOrderTaskIdsRef.current.has(retryRecord.taskId)
+      ) {
+        continue;
+      }
+      restoredSortOrderTaskIdsRef.current.add(retryRecord.taskId);
+      if (createTaskMonitors.some((task) => task.taskId === retryRecord.taskId)) {
+        continue;
+      }
+      upsertCreateTaskMonitor({
+        taskId: retryRecord.taskId,
+        kind: "update",
+        formId: retryRecord.formId,
+        entryId: retryRecord.entryId,
+        workOrderNo: String(retryRecord.workOrderNo ?? retryRecord.entryId),
+        status: "pending",
+        lifecycleState: "accepted",
+        acceptedAt: retryRecord.createdAt,
+        confirmedAt: null,
+        message: t("workReport:table.sortOrderQueued"),
+        updatedAt: retryRecord.createdAt,
+        ...(retryRecord.lifecycle
+          ? {
+              optimisticMutation: {
+                lifecycle: retryRecord.lifecycle,
+                patch: {
+                  kind: "update-entry" as const,
+                  patch: { sortOrder: retryRecord.sortOrder },
+                },
+              },
+            }
+          : {}),
+      });
+    }
+  }, [createTaskMonitors, currentFormId, patchListRecord, records, t, upsertCreateTaskMonitor]);
+  useEffect(() => {
+    for (const task of createTaskMonitors) {
+      if (
+        task.kind !== "update" ||
+        task.rowId ||
+        (task.formId !== "104" && task.formId !== "105")
+      ) {
+        continue;
+      }
+      if (task.status === "failed" || task.stale === true) {
+        if (processedFailedEntryUpdateTaskIdsRef.current.has(task.taskId)) {
+          continue;
+        }
+        const targetFormId: WorkReportFormId = task.formId;
+        const targetEntryId = task.entryId;
+        const optimisticMutation = task.optimisticMutation;
+        const isVerificationPending =
+          task.stale === true ||
+          optimisticMutation?.lifecycle.optimisticState === "frozen";
+        if (!isVerificationPending) {
+          const retryRecord = getRetryableSortOrderMutationByTaskId(task.taskId);
+          const rollbackPatch = resolveSortOrderTaskRecordPatch(retryRecord, "failed");
+          if (rollbackPatch) {
+            patchListRecord(rollbackPatch.formId, rollbackPatch.entryId, {
+              sortOrder: rollbackPatch.sortOrder,
+            });
+          } else if (
+            optimisticMutation?.lifecycle.optimisticState === "rolled-back" &&
+            optimisticMutation.patch.kind === "update-entry" &&
+            optimisticMutation.lifecycle.previousSnapshot &&
+            typeof optimisticMutation.lifecycle.previousSnapshot === "object" &&
+            !Array.isArray(optimisticMutation.lifecycle.previousSnapshot)
+          ) {
+            patchListRecord(
+              targetFormId,
+              targetEntryId,
+              optimisticMutation.lifecycle.previousSnapshot as Partial<WorkReportRecord>
+            );
+          }
+        }
+        processedFailedEntryUpdateTaskIdsRef.current.add(task.taskId);
+        if (!isVerificationPending) {
+          deleteRetryableSortOrderMutationByTaskId(task.taskId);
+        }
+        void fetchWorkReportEntry(targetFormId, targetEntryId, true, {
+          strictRefresh: true,
+        })
+          .then((freshRecord) => {
+            mergeListRecord(targetFormId, freshRecord);
+          })
+          .catch((refreshError) => {
+            setNotice({
+              type: "error",
+              message: t("workReport:table.sortOrderRefreshFailed", {
+                error: getErrorMessage(refreshError),
+              }),
+            });
+          });
+        continue;
+      }
+      if (
+        task.status !== "success" ||
+        processedEntryUpdateTaskIdsRef.current.has(task.taskId)
+      ) {
+        continue;
+      }
+      processedEntryUpdateTaskIdsRef.current.add(task.taskId);
+      const targetFormId: WorkReportFormId = task.formId;
+      const retryRecord = getRetryableSortOrderMutationByTaskId(task.taskId);
+      const successPatch = resolveSortOrderTaskRecordPatch(retryRecord, "success");
+      if (successPatch) {
+        patchListRecord(successPatch.formId, successPatch.entryId, {
+          sortOrder: successPatch.sortOrder,
+        });
+      } else {
+        void fetchWorkReportEntry(targetFormId, task.entryId, true, {
+          strictRefresh: true,
+        })
+          .then((freshRecord) => {
+            mergeListRecord(targetFormId, freshRecord);
+          })
+          .catch((refreshError) => {
+            setNotice({
+              type: "error",
+              message: t("workReport:table.sortOrderRefreshFailed", {
+                error: getErrorMessage(refreshError),
+              }),
+            });
+          });
+      }
+      deleteRetryableSortOrderMutationByTaskId(task.taskId);
+    }
+  }, [
+    createTaskMonitors,
+    mergeListRecord,
+    patchListRecord,
+    t,
+  ]);
   const {
     hasHydratedAllRecords,
     isHydratingAllRecords,
@@ -397,6 +825,8 @@ export function WorkReportListPage() {
   });
   const {
     visibleRecords,
+    effectiveColumnSortRules,
+    displayedPage,
     pageFrom,
     pageTo,
     hasMoreForPager,
@@ -405,6 +835,7 @@ export function WorkReportListPage() {
     pageSizeOptions,
     unfinishedMachineShortcuts,
     activeUnfinishedMachineShortcut,
+    machineFilterOptions,
     statusFilterOptions,
     siteRunningFilterOptions,
     openColumnFacetOptionsFiltered,
@@ -418,6 +849,8 @@ export function WorkReportListPage() {
     allRecords,
     records,
     previewTotalCount,
+    displayedPreviewPage,
+    displayedPreviewPageSize,
     hideTestCustomerPartRecords: localPreferences.hideTestCustomerPartRecords,
     pageProdTypeCode: currentPageProdTypeCode,
     shouldUseFullHydrationForList,
@@ -454,8 +887,6 @@ export function WorkReportListPage() {
     currentFormId,
     activeLandingPageKey,
     activePlaceholderViewId,
-    activeFixedFilterPresetId,
-    activeUnfinishedMachineShortcut,
     globalFilters,
     globalFilterDraft,
     columnSortRules,
@@ -479,6 +910,10 @@ export function WorkReportListPage() {
     logListEvent,
     t,
   });
+  const activeFilterCount =
+    countActiveGlobalFilters(globalFilters) +
+    activeColumnFilterCount +
+    (activePlaceholderViewId === "starred" ? 1 : 0);
   useWorkReportListEffectsController({
     highlightedEntryId,
     setHighlightedEntryId,
@@ -499,24 +934,245 @@ export function WorkReportListPage() {
     pageSize,
     columnFilterState,
     columnSortRules,
-    loading,
+    loading: effectiveListLoading,
     visibleRecords,
     setHighlightedEntryId,
   });
+  const handleOpenDetailRef = useRef(handleOpenDetail);
+  handleOpenDetailRef.current = handleOpenDetail;
+  // 保留最新返回列表草稿，但不要讓每次輸入草稿都重建 columns 並重繪整張 Ant Table。
+  const handleOpenDetailFromTable = useCallback((entryId: string) => {
+    handleOpenDetailRef.current(entryId);
+  }, []);
   const handleOpenDowntimePage = useCallback(() => {
     navigate("/downtime");
   }, [navigate]);
+
+  const handleOpenPrintView = useCallback(async () => {
+    if (printViewCheckInFlightRef.current) {
+      return;
+    }
+    printViewCheckInFlightRef.current = true;
+    setPrintViewChecking(true);
+    const printWindow = window.open("about:blank", "_blank");
+    if (!printWindow) {
+      Modal.warning({
+        title: t("workReport:table.printPopupBlockedTitle"),
+        content: t("workReport:table.printPopupBlockedMessage"),
+        okText: t("common:actions.ok"),
+        centered: true,
+      });
+      printViewCheckInFlightRef.current = false;
+      setPrintViewChecking(false);
+      return;
+    }
+    printWindow.opener = null;
+    writeWorkReportPrintWindow(
+      printWindow,
+      buildWorkReportPrintLoadingDocument(currentFormId, uiLanguage)
+    );
+
+    try {
+      const activeSortOrderTasks = await fetchActiveSortOrderTasks(
+        currentFormId,
+        fetchWorkReportQueueTasks
+      );
+      if (activeSortOrderTasks.length > 0) {
+        printWindow.close();
+        Modal.warning({
+          title: t("workReport:table.printSortOrderPendingTitle"),
+          content: t("workReport:table.printSortOrderPendingMessage", {
+            count: activeSortOrderTasks.length,
+          }),
+          okText: t("common:actions.ok"),
+          centered: true,
+        });
+        return;
+      }
+
+      const fullRecords = await fetchWorkReportPrintRecords(hydrateAllRecords);
+      const scopedRecords = buildScopedWorkReportRecords(fullRecords, {
+        currentFormId,
+        pageProdTypeCode: currentPageProdTypeCode,
+        hideTestCustomerPartRecords: localPreferences.hideTestCustomerPartRecords,
+      });
+      const printRecords = runWorkReportRecordPipeline(scopedRecords, {
+        isGlobalFilterActive,
+        globalFilters,
+        columnFilterState,
+        sortRules: effectiveColumnSortRules,
+      });
+      if (printRecords.length === 0) {
+        printWindow.close();
+        Modal.info({
+          title: t("workReport:table.printNoRecordsTitle"),
+          content: t("workReport:table.printNoRecordsMessage"),
+          okText: t("common:actions.ok"),
+          centered: true,
+        });
+        return;
+      }
+      if (!isWorkReportPrintRecordCountAllowed(printRecords.length)) {
+        printWindow.close();
+        Modal.warning({
+          title: t("workReport:table.printTooManyRecordsTitle"),
+          content: t("workReport:table.printTooManyRecordsMessage", {
+            count: printRecords.length,
+            limit: WORK_REPORT_PRINT_MAX_RECORDS,
+          }),
+          okText: t("common:actions.ok"),
+          centered: true,
+        });
+        return;
+      }
+      if (printWindow.closed) {
+        throw new Error(t("workReport:table.printWindowClosedMessage"));
+      }
+      writeWorkReportPrintWindow(
+        printWindow,
+        buildWorkReportPrintDocument({
+          formId: currentFormId,
+          records: printRecords,
+          language: uiLanguage,
+        })
+      );
+      printWindow.focus();
+    } catch (printError) {
+      printWindow.close();
+      Modal.error({
+        title: t("workReport:table.printGenerateFailedTitle"),
+        content: t("workReport:table.printGenerateFailedMessage", {
+          error: getErrorMessage(printError),
+        }),
+        okText: t("common:actions.confirm"),
+        centered: true,
+      });
+    } finally {
+      printViewCheckInFlightRef.current = false;
+      setPrintViewChecking(false);
+    }
+  }, [
+    columnFilterState,
+    currentFormId,
+    currentPageProdTypeCode,
+    effectiveColumnSortRules,
+    globalFilters,
+    hydrateAllRecords,
+    isGlobalFilterActive,
+    localPreferences.hideTestCustomerPartRecords,
+    t,
+    uiLanguage,
+  ]);
+  const handleOpenPrintViewClick = useCallback(() => {
+    void handleOpenPrintView();
+  }, [handleOpenPrintView]);
+
+  const handleUpdateSortOrder = useCallback(
+    async (record: WorkReportRecord, sortOrder: number) => {
+      const retryRecord = getOrCreateRetryableSortOrderMutation({
+        formId: currentFormId,
+        entryId: String(record.id),
+        sortOrder,
+        previousSortOrder: parseRollbackSortOrder(record.sortOrder),
+        workOrderNo: record.workOrderNo,
+        expectedEntryLastUpdatedAt: record.lastUpdatedAt ?? undefined,
+      });
+      const accepted = await updateWorkOrderSortOrderAccepted(
+        retryRecord.formId,
+        retryRecord.entryId,
+        retryRecord.sortOrder,
+        {
+          clientMutationId: retryRecord.clientMutationId,
+          workOrderNo: retryRecord.workOrderNo,
+          expectedEntryLastUpdatedAt: retryRecord.expectedEntryLastUpdatedAt,
+        }
+      );
+      bindRetryableSortOrderMutationTask(
+        retryRecord.clientMutationId,
+        accepted.taskId,
+        accepted.acceptedAt ?? accepted.createdAt
+      );
+      if (accepted.status === "failed") {
+        deleteRetryableSortOrderMutationByTaskId(accepted.taskId);
+      } else if (WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED) {
+        patchListRecord(currentFormId, String(record.id), {
+          sortOrder,
+        });
+      }
+      const updatedAt = new Date().toISOString();
+      const lifecycleState = accepted.lifecycleState ??
+        resolveTaskMutationLifecycleState({ status: accepted.status });
+      const optimisticMutation = WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED
+        ? reconcileWorkReportOptimisticMutation(
+            createWorkReportOptimisticMutation({
+              taskId: accepted.taskId,
+              mutationId: retryRecord.clientMutationId,
+              operation: "work-report-sort-order",
+              target: {
+                domain: "work-report",
+                formId: retryRecord.formId,
+                entryId: retryRecord.entryId,
+              },
+              acceptedAt: accepted.acceptedAt ?? accepted.createdAt,
+              reconcilePolicy: "replace-target",
+              failurePolicy: "rollback",
+              previousSnapshot: retryRecord.previousSortOrder ?? null,
+              patch: {
+                kind: "update-entry",
+                patch: { sortOrder: retryRecord.sortOrder },
+              },
+            }),
+            {
+              lifecycleState,
+              confirmedAt: accepted.confirmedAt,
+            }
+          )
+        : undefined;
+      upsertCreateTaskMonitor({
+        taskId: accepted.taskId,
+        kind: "update",
+        formId: retryRecord.formId,
+        entryId: retryRecord.entryId,
+        workOrderNo: String(record.workOrderNo ?? record.id),
+        status: accepted.status,
+        lifecycleState,
+        acceptedAt: accepted.acceptedAt ?? accepted.createdAt,
+        confirmedAt: accepted.confirmedAt ?? null,
+        message:
+          accepted.status === "success"
+            ? t("workReport:table.sortOrderUpdated")
+            : accepted.status === "failed"
+              ? t("workReport:table.sortOrderUpdateFailed")
+              : t("workReport:table.sortOrderQueued"),
+        updatedAt,
+        ...(optimisticMutation ? { optimisticMutation } : {}),
+      });
+      setNotice({
+        type: accepted.status === "failed" ? "error" : "info",
+        message:
+          accepted.status === "success"
+            ? t("workReport:table.sortOrderUpdated")
+            : accepted.status === "failed"
+              ? t("workReport:table.sortOrderUpdateFailed")
+              : t("workReport:table.sortOrderQueued"),
+      });
+    },
+    [currentFormId, patchListRecord, t, upsertCreateTaskMonitor]
+  );
 
   const { columns } = useWorkReportColumns({
     enabled: isReportTopView,
     currentFormId,
     columnDisplayMode,
     columnWidthOverrides,
+    columnOrder: currentTableLayout.columnOrder,
     hiddenColumnKeys: hiddenColumnKeySet,
+    columnColors: currentTableLayout.columnColors,
     onColumnResizeStart: handleColumnResizeStart,
     disableFixedColumns: isMobileViewport,
     uiLanguage,
-    onOpenDetail: handleOpenDetail,
+    onOpenDetail: handleOpenDetailFromTable,
+    onUpdateSortOrder: handleUpdateSortOrder,
     globalSearchKeyword: globalFilters.globalKeyword,
     menuState: {
       columnFilterState,
@@ -567,7 +1223,11 @@ export function WorkReportListPage() {
     logListEvent,
   });
 
-  const filterControlDisabled = loading || submitting || isHydratingAllRecords;
+  const effectiveTableSoftBusy = tableSoftBusy || previewTransitionPending;
+  const effectiveTableSoftBusyLabel = tableSoftBusyLabel ?? (
+    previewTransitionPending ? t("workReport:status.tableBusy.loading") : null
+  );
+  const filterControlDisabled = effectiveListLoading || submitting || isHydratingAllRecords;
 
   const { systemStatusNotice } = useWorkReportListStatusController({
     activeTopView,
@@ -733,8 +1393,8 @@ export function WorkReportListPage() {
             activePlaceholderViewId={activePlaceholderViewId}
             activeUnfinishedMachineShortcut={activeUnfinishedMachineShortcut}
             unfinishedMachineShortcuts={unfinishedMachineShortcuts}
-            onToggleCollapsed={() => setFixedFilterSidebarCollapsed((prev) => !prev)}
-            onCloseMobile={() => setMobileSidebarOpen(false)}
+            onToggleCollapsed={handleToggleFixedFilterSidebar}
+            onCloseMobile={handleCloseMobileSidebar}
             onApplyFixedFilterPreset={applyFixedFilterPreset}
             onPlaceholderViewClick={handleSidebarPlaceholderViewClick}
             onApplyUnfinishedMachineShortcut={applyUnfinishedMachineShortcut}
@@ -748,43 +1408,25 @@ export function WorkReportListPage() {
             activeTopView={activeTopView}
             activeLandingPageKey={activeLandingPageKey}
             currentPageGroupLabel={currentPageGroupLabel}
+            currentPageContextLabel={`${currentFormId} / ${currentPageProdTypeCode}`}
             onOpenLandingPage={handleOpenLandingPage}
             onOpenDowntimePage={handleOpenDowntimePage}
             onOpenTechnicalInfoView={() => navigate("/dev")}
             onOpenLocalSettingsView={openLocalSettingsView}
             showMobileFilterButton={activeTopView === "report" && isMobileViewport}
             onOpenMobileFilters={openMobileFilters}
-            globalFilterDraft={globalFilterDraft}
-            setGlobalFilterDraft={setGlobalFilterDraft}
-            statusFilterOptions={statusFilterOptions}
-            siteRunningFilterOptions={siteRunningFilterOptions}
-            pageSizeOptions={pageSizeOptions}
-            columnDisplayMode={columnDisplayMode}
-            setColumnDisplayMode={(mode) => {
-              setColumnSettingsOpen(false);
-              setColumnDisplayMode(mode);
-              writeColumnDisplayMode(mode);
-            }}
             columnSettingsOpen={columnSettingsOpen}
             setColumnSettingsOpen={setColumnSettingsOpen}
             selectableColumns={selectableColumns}
+            columnOrder={currentTableLayout.columnOrder}
             hiddenColumnKeys={hiddenColumnKeySet}
+            columnColors={currentTableLayout.columnColors}
             onToggleColumnVisibility={handleToggleColumnVisibility}
+            onMoveColumn={handleMoveColumn}
+            onMoveColumnByOffset={handleMoveColumnByOffset}
+            onChangeColumnColor={handleChangeColumnColor}
             onShowAllColumns={handleShowAllColumns}
             onResetDefaultColumns={handleResetDefaultColumns}
-            pageSize={pageSize}
-            setPageSize={setPageSize}
-            setPage={setPage}
-            filterControlDisabled={filterControlDisabled}
-            loading={loading}
-            submitting={submitting}
-            isHydratingAllRecords={isHydratingAllRecords}
-            isSyncingFromRagic={isSyncingFromRagic}
-            activeFilterChips={activeFilterChips}
-            onRemoveActiveFilterChip={handleRemoveActiveFilterChip}
-            onApplyFilters={handleApplyFilters}
-            onClearFilters={handleClearFilters}
-            onRefresh={handleRefresh}
             onSystemNoticeForceRefresh={handleSystemNoticeForceRefresh}
             systemNoticeForceReloadToken={sseNoticeReloadToken}
             systemStatusNotice={systemStatusNotice}
@@ -792,8 +1434,13 @@ export function WorkReportListPage() {
           {activeTopView === "local-settings" ? (
             <WorkReportLocalSettingsPanel
               value={localPreferences}
+              deviceLabel={deviceLabel}
               onChange={setLocalPreferences}
-              onSave={handleSaveLocalSettings}
+              onDeviceLabelChange={setDeviceLabel}
+              onSave={() => {
+                writeWorkReportDeviceLabel(deviceLabel);
+                handleSaveLocalSettings();
+              }}
               onBackToReport={() => setActiveTopView("report")}
             />
           ) : activeTopView === "technical-info" ? (
@@ -801,8 +1448,57 @@ export function WorkReportListPage() {
             <Navigate to="/dev" replace />
           ) : (
             <>
-              <PendingBatchTasksBadge />
-              <WorkReportStatusArea
+              <div className="work-report-list-workspace">
+                <WorkReportWorkspaceToolbar
+                currentPageGroupLabel={currentPageGroupLabel}
+                currentPageContextLabel={`${currentFormId} / ${currentPageProdTypeCode}`}
+                matchedCount={matchedRecordCount}
+                searchValue={globalFilterDraft.globalKeyword}
+                onSearchValueChange={handleGlobalSearchDraftChange}
+                onSearchSubmit={handleApplyFilters}
+                page={displayedPage}
+                hasMoreForPager={hasMoreForPager}
+                onPrevPage={handlePreviousPage}
+                onNextPage={handleNextPage}
+                activeFilterCount={activeFilterCount}
+                hasPendingFilterChanges={hasPendingFilterChanges}
+                filterPanelOpen={filterPanelOpen}
+                onOpenFilters={handleOpenFiltersFromWorkspace}
+                columnDisplayMode={columnDisplayMode}
+                onChangeColumnDisplayMode={handleColumnDisplayModeChange}
+                columnSettingsOpen={columnSettingsOpen}
+                onOpenColumnSettings={handleOpenColumnSettings}
+                onOpenTaskQueue={handleOpenTaskQueue}
+                onOpenPrintView={handleOpenPrintViewClick}
+                printViewChecking={printViewChecking}
+                pageSize={pageSize}
+                pageSizeOptions={pageSizeOptions}
+                onChangePageSize={handlePageSizeChange}
+                controlsDisabled={filterControlDisabled}
+                isSyncingFromRagic={isSyncingFromRagic}
+                onRefresh={handleRefresh}
+                stickyEnabled={!isMobileViewport}
+                onHeightChange={handleWorkspaceToolbarHeightChange}
+              />
+                {filterPanelOpen ? (
+                  <WorkReportFilterPanel
+                    currentFormId={currentFormId}
+                    globalFilterDraft={globalFilterDraft}
+                    setGlobalFilterDraft={setGlobalFilterDraft}
+                    machineFilterOptions={machineFilterOptions}
+                    statusFilterOptions={statusFilterOptions}
+                    siteRunningFilterOptions={siteRunningFilterOptions}
+                    filterControlDisabled={filterControlDisabled}
+                    activeFilterChips={activeFilterChips}
+                    columnFilterCount={activeColumnFilterCount}
+                    hasPendingChanges={hasPendingFilterChanges}
+                    onRemoveActiveFilterChip={handleRemoveActiveFilterChip}
+                    onApplyFilters={handleApplyFilters}
+                    onClearFilters={handleClearFilters}
+                  />
+                ) : null}
+                <PendingBatchTasksBadge />
+                <WorkReportStatusArea
                 uiLanguage={uiLanguage}
                 hydration={statusHydration}
                 summary={statusSummary}
@@ -811,30 +1507,32 @@ export function WorkReportListPage() {
                 suppressSuccessHumanNote={activeTopView === "report"}
                 suppressInlineNotice={activeTopView === "report"}
                 taskMonitor={statusTaskMonitor}
-                loading={loading}
+                loading={effectiveListLoading}
                 error={error}
-              />
+                />
 
-              {!loading && !error && (
-                <WorkReportTableSection
+                {!error && (!effectiveListLoading || visibleRecords.length > 0) && (
+                  <WorkReportTableSection
                   columns={columns}
                   columnDisplayMode={columnDisplayMode}
                   visibleRecords={visibleRecords}
                   pageFrom={pageFrom}
                   pageTo={pageTo}
-                  page={page}
-                  loading={loading}
+                  page={displayedPage}
+                  loading={effectiveListLoading}
                   submitting={submitting}
                   isHydratingAllRecords={isHydratingAllRecords}
                   hasMoreForPager={hasMoreForPager}
-                  softBusy={tableSoftBusy}
-                  softBusyLabel={tableSoftBusyLabel}
+                  softBusy={effectiveTableSoftBusy}
+                  softBusyLabel={effectiveTableSoftBusyLabel}
+                  stickyHeaderOffset={Math.max(0, workspaceStickyHeight - 2)}
                   highlightedEntryId={highlightedEntryId}
-                  onPrevPage={() => setPage((prev) => Math.max(1, prev - 1))}
-                  onNextPage={() => setPage((prev) => prev + 1)}
-                  onOpenDetail={handleOpenDetail}
-                />
-              )}
+                  onPrevPage={handlePreviousPage}
+                  onNextPage={handleNextPage}
+                  onOpenDetail={handleOpenDetailFromTable}
+                  />
+                )}
+              </div>
             </>
           )}
 
@@ -858,6 +1556,13 @@ export function WorkReportListPage() {
             isHydratingAllRecords={isHydratingAllRecords}
             summary={columnAnalysisSummary}
             onClose={closeColumnAnalysis}
+          />
+          <WorkReportTaskQueueDrawer
+            open={taskQueueOpen}
+            context="list"
+            formId={currentFormId}
+            entryId={null}
+            onClose={() => setTaskQueueOpen(false)}
           />
         </>
       )}

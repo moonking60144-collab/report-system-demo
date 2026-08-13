@@ -1,6 +1,13 @@
 import type { CreateReportTaskStatus, WorkReportItem, WorkReportRecord } from "../../api/workReport";
+import type { MutationLifecycleState } from "../../api/mutationLifecycleTypes";
+import type { WorkReportOptimisticMutation } from "./workReportOptimisticMutation";
 
-export type WorkReportMutationTaskKind = "create" | "update" | "delete" | "delete-batch";
+export type WorkReportMutationTaskKind =
+  | "create"
+  | "create-batch"
+  | "update"
+  | "delete"
+  | "delete-batch";
 
 export type HydrationSource = "network" | "cache" | "sqlite" | null;
 export type BackendCacheState = "fresh" | "stale" | "building" | null;
@@ -26,10 +33,17 @@ export interface CreateTaskMonitor {
   entryId: string;
   workOrderNo: string;
   status: CreateReportTaskStatus;
+  lifecycleState?: MutationLifecycleState;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   message: string;
   updatedAt: string;
   rowId?: string;
   stale?: boolean;
+  deletedCount?: number;
+  deleteFinalizeFailed?: boolean;
+  batchCreatedRowIds?: string[];
+  optimisticMutation?: WorkReportOptimisticMutation;
 }
 
 export interface GlobalFilters {
@@ -42,6 +56,8 @@ export interface GlobalFilters {
   ragicUnfinishedStatus: string;
   siteRunning: "all" | "yes" | "no";
   startSchedule: "all" | "yes" | "no";
+  updatedDateFrom: string;
+  updatedDateTo: string;
 }
 
 export type FixedFilterPresetId =
@@ -138,8 +154,26 @@ export type ColumnDataType = "text" | "number" | "date" | "boolean";
 export type ColumnKey = string;
 export type ColumnSortDirection = "asc" | "desc";
 export type UiLanguage = "zh" | "en";
-export type ColumnDisplayMode = "compact" | "fit" | "full";
+export type ColumnDisplayMode = "compact" | "fit";
 export type ColumnWidthOverrides = Partial<Record<ColumnKey, number>>;
+export type WorkReportColumnColor =
+  | "none"
+  | "gray-soft"
+  | "amber-soft"
+  | "blue-soft"
+  | "cyan-soft"
+  | "green-soft"
+  | "rose-soft"
+  | "violet-soft";
+export type ColumnColorOverrides = Partial<Record<ColumnKey, WorkReportColumnColor>>;
+
+export interface WorkReportTableLayoutPreferences {
+  version: 2;
+  hiddenColumnKeys: ColumnKey[];
+  columnOrder: ColumnKey[];
+  columnWidths: ColumnWidthOverrides;
+  columnColors: ColumnColorOverrides;
+}
 
 export interface ColumnFilterRule {
   selectedTokens?: string[];

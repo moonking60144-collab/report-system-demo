@@ -1,20 +1,137 @@
-import { monitorEventLoopDelay } from "perf_hooks";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { env } from "../config/env";
 import { ragicRequestScheduler } from "../infra/ragicRequestScheduler";
 import { createReportTaskService } from "../services/createReportTaskService";
 import { form16WriteReverifyService } from "../services/form16/form16WriteReverifyService";
+import { getWorkReportEntryMutationQueueHealthStats } from "../services/work-report/workReportEntryMutationQueue";
 import { createLogger } from "./logger";
 
 const log = createLogger("runtime-health");
 
+interface EventLoopLagStats {
+  mean: number;
+  p95: number;
+  max: number;
+}
+
+interface RuntimeMemoryStats {
+  rssBytes: number;
+  heapTotalBytes: number;
+  heapUsedBytes: number;
+  heapUsedRatio: number;
+  externalBytes: number;
+  arrayBuffersBytes: number;
+}
+
+export interface RuntimeHealthSnapshot {
+  at: string;
+  ragic: ReturnType<typeof ragicRequestScheduler.getStats>;
+  createTasks: ReturnType<typeof createReportTaskService.getStats>;
+  form16WriteReverify: ReturnType<typeof form16WriteReverifyService.getStats>;
+  workReportMutationQueue: ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+  memory: RuntimeMemoryStats;
+  eventLoopLagMs: EventLoopLagStats;
+  warnings: string[];
+}
+
+interface RuntimeHealthCollectorDeps {
+  now?: () => Date;
+  getRagicStats?: () => ReturnType<typeof ragicRequestScheduler.getStats>;
+  getCreateTaskStats?: () => ReturnType<typeof createReportTaskService.getStats>;
+  getForm16WriteReverifyStats?: () => ReturnType<typeof form16WriteReverifyService.getStats>;
+  getMutationQueueStats?: () => ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+  getMemoryUsage?: () => NodeJS.MemoryUsage;
+  getEventLoopLagStats?: () => EventLoopLagStats;
+}
+
 let runtimeHealthTimer: NodeJS.Timeout | null = null;
 let eventLoopHistogram: ReturnType<typeof monitorEventLoopDelay> | null = null;
+let latestRuntimeHealthSnapshot: RuntimeHealthSnapshot | null = null;
+let sampleInProgress = false;
 
 function toMs(nanoseconds: number): number {
   if (!Number.isFinite(nanoseconds)) {
     return 0;
   }
   return Number((nanoseconds / 1_000_000).toFixed(2));
+}
+
+function readEventLoopLagStats(): EventLoopLagStats {
+  const lag = eventLoopHistogram;
+  return {
+    mean: lag ? toMs(lag.mean) : 0,
+    p95: lag ? toMs(lag.percentile(95)) : 0,
+    max: lag ? toMs(lag.max) : 0,
+  };
+}
+
+function resolveWarnings(input: {
+  eventLoopLagMs: EventLoopLagStats;
+  memory: RuntimeMemoryStats;
+  mutationQueue: ReturnType<typeof getWorkReportEntryMutationQueueHealthStats>;
+}): string[] {
+  const warnings: string[] = [];
+  if (input.eventLoopLagMs.p95 >= env.RUNTIME_HEALTH_EVENT_LOOP_P95_WARN_MS) {
+    warnings.push("EVENT_LOOP_LAG_HIGH");
+  }
+  if (input.memory.heapUsedRatio >= 0.85) {
+    warnings.push("HEAP_USAGE_HIGH");
+  }
+  if (
+    input.mutationQueue.pendingTaskCount >=
+      Math.ceil(input.mutationQueue.maxPendingTaskCount * 0.8) ||
+    input.mutationQueue.highestPendingTaskCountPerKey >=
+      Math.ceil(input.mutationQueue.maxPendingTaskCountPerKey * 0.8) ||
+    input.mutationQueue.oldestPendingTaskAgeMs >=
+      input.mutationQueue.maxOldestPendingTaskAgeMs
+  ) {
+    warnings.push("WORK_REPORT_MUTATION_QUEUE_PRESSURE");
+  }
+  return warnings;
+}
+
+export async function collectRuntimeHealthSnapshot(
+  deps: RuntimeHealthCollectorDeps = {}
+): Promise<RuntimeHealthSnapshot> {
+  const memoryUsage = (deps.getMemoryUsage ?? process.memoryUsage)();
+  const memory: RuntimeMemoryStats = {
+    rssBytes: memoryUsage.rss,
+    heapTotalBytes: memoryUsage.heapTotal,
+    heapUsedBytes: memoryUsage.heapUsed,
+    heapUsedRatio:
+      memoryUsage.heapTotal > 0
+        ? Number((memoryUsage.heapUsed / memoryUsage.heapTotal).toFixed(4))
+        : 0,
+    externalBytes: memoryUsage.external,
+    arrayBuffersBytes: memoryUsage.arrayBuffers,
+  };
+  const eventLoopLagMs = (deps.getEventLoopLagStats ?? readEventLoopLagStats)();
+  const workReportMutationQueue = (
+    deps.getMutationQueueStats ?? getWorkReportEntryMutationQueueHealthStats
+  )();
+  return {
+    at: (deps.now?.() ?? new Date()).toISOString(),
+    ragic: (deps.getRagicStats ?? (() => ragicRequestScheduler.getStats()))(),
+    createTasks: (
+      deps.getCreateTaskStats ?? (() => createReportTaskService.getStats())
+    )(),
+    form16WriteReverify: (
+      deps.getForm16WriteReverifyStats ??
+      (() => form16WriteReverifyService.getStats())
+    )(),
+    workReportMutationQueue,
+    memory,
+    eventLoopLagMs,
+    warnings: resolveWarnings({
+      eventLoopLagMs,
+      memory,
+      mutationQueue: workReportMutationQueue,
+    }),
+  };
+}
+
+export function getRuntimeHealthSnapshot(): RuntimeHealthSnapshot | null {
+  return latestRuntimeHealthSnapshot;
 }
 
 export function startRuntimeHealthLogger(): void {
@@ -28,31 +145,36 @@ export function startRuntimeHealthLogger(): void {
   eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 });
   eventLoopHistogram.enable();
 
-  const logIntervalMs = Math.max(5000, env.RUNTIME_HEALTH_LOG_INTERVAL_MS);
-  const emitRuntimeHealth = (): void => {
-    const ragic = ragicRequestScheduler.getStats();
-    const tasks = createReportTaskService.getStats();
-    const form16WriteReverify = form16WriteReverifyService.getStats();
-    const lag = eventLoopHistogram;
-
-    log.info({
-      event: "sample",
-      at: new Date().toISOString(),
-      ragic,
-      createTasks: tasks,
-      form16WriteReverify,
-      eventLoopLagMs: {
-        mean: lag ? toMs(lag.mean) : 0,
-        p95: lag ? toMs(lag.percentile(95)) : 0,
-        max: lag ? toMs(lag.max) : 0,
-      },
-    });
-
-    lag?.reset();
+  const emitRuntimeHealth = async (): Promise<void> => {
+    if (sampleInProgress) return;
+    sampleInProgress = true;
+    try {
+      const snapshot = await collectRuntimeHealthSnapshot();
+      latestRuntimeHealthSnapshot = snapshot;
+      if (env.RUNTIME_HEALTH_LOG_ENABLED) {
+        if (snapshot.warnings.length > 0) {
+          log.warn({ event: "sample", ...snapshot });
+        } else {
+          log.info({ event: "sample", ...snapshot });
+        }
+      }
+    } catch (error) {
+      log.warn({
+        event: "sample-failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      eventLoopHistogram?.reset();
+      sampleInProgress = false;
+    }
   };
 
-  runtimeHealthTimer = setInterval(emitRuntimeHealth, logIntervalMs);
-  runtimeHealthTimer.unref?.();
+  runtimeHealthTimer = setInterval(
+    () => void emitRuntimeHealth(),
+    Math.max(5000, env.RUNTIME_HEALTH_LOG_INTERVAL_MS)
+  );
+  runtimeHealthTimer.unref();
+  void emitRuntimeHealth();
 }
 
 export function stopRuntimeHealthLogger(): void {
@@ -64,4 +186,5 @@ export function stopRuntimeHealthLogger(): void {
     eventLoopHistogram.disable();
     eventLoopHistogram = null;
   }
+  sampleInProgress = false;
 }

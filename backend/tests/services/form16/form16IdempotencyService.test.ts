@@ -36,7 +36,7 @@ function mockReservePending(
 
 test("clientRowKey 為空字串 → 直接 create、不 reserve、不 confirm", async (t) => {
   const reserveMock = mockReservePending(t, { record: null, reserved: false });
-  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   const createMock = t.mock.fn(async () => ({ entryId: "E-NEW" }));
 
   const result = await checkOrCreateForm16Entry({
@@ -90,7 +90,7 @@ test("reserve 命中 confirmed 映射 → reused=true、不 call create", async 
     record: buildRecord({ clientRowKey: "uuid-1", entryId: "E-EXISTING" }),
     reserved: false,
   });
-  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   const createMock = t.mock.fn(async () => ({ entryId: "E-NEW" }));
 
   const result = await checkOrCreateForm16Entry({
@@ -105,12 +105,144 @@ test("reserve 命中 confirmed 映射 → reused=true、不 call create", async 
   assert.equal(confirmMock.mock.callCount(), 0);
 });
 
+test("部署前 confirmed 映射缺 fingerprint 時沿用既有 entry、不重新 create", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-legacy-confirmed",
+      entryId: "E-LEGACY-CONFIRMED",
+      operationFingerprint: undefined,
+    }),
+    reserved: false,
+  });
+  const createMock = t.mock.fn(async () => ({ entryId: "E-SHOULD-NOT-CREATE" }));
+
+  const result = await checkOrCreateForm16Entry({
+    clientRowKey: "uuid-legacy-confirmed",
+    source: "downtime",
+    operationFingerprint: "fingerprint-current-release",
+    create: createMock,
+  });
+
+  assert.deepEqual(result, {
+    entryId: "E-LEGACY-CONFIRMED",
+    reused: true,
+  });
+  assert.equal(createMock.mock.callCount(), 0);
+});
+
+test("部署前映射缺 fingerprint 仍不可跨 source 重用", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-legacy-other-source",
+      entryId: "E-LEGACY-OTHER-SOURCE",
+      source: "work-report-104",
+      operationFingerprint: undefined,
+    }),
+    reserved: false,
+  });
+  const createMock = t.mock.fn(async () => ({ entryId: "E-SHOULD-NOT-CREATE" }));
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-legacy-other-source",
+        source: "downtime",
+        operationFingerprint: "fingerprint-current-release",
+        create: createMock,
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "FORM16_IDEMPOTENCY_KEY_CONFLICT"
+  );
+  assert.equal(createMock.mock.callCount(), 0);
+});
+
+test("部署前 pending 映射缺 fingerprint 時仍回寫入不可確認、不重新 create", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-legacy-pending",
+      entryId: "",
+      status: "pending",
+      operationFingerprint: undefined,
+    }),
+    reserved: false,
+  });
+  const createMock = t.mock.fn(async () => ({ entryId: "E-SHOULD-NOT-CREATE" }));
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-legacy-pending",
+        source: "downtime",
+        operationFingerprint: "fingerprint-current-release",
+        create: createMock,
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "FORM16_WRITE_INDETERMINATE"
+  );
+  assert.equal(createMock.mock.callCount(), 0);
+});
+
+test("部署前 indeterminate 映射缺 fingerprint 時仍回寫入不可確認、不重新 create", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-legacy-indeterminate",
+      entryId: "",
+      status: "indeterminate",
+      errorMessage: "部署前寫入結果未確認",
+      operationFingerprint: undefined,
+    }),
+    reserved: false,
+  });
+  const createMock = t.mock.fn(async () => ({ entryId: "E-SHOULD-NOT-CREATE" }));
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-legacy-indeterminate",
+        source: "downtime",
+        operationFingerprint: "fingerprint-current-release",
+        create: createMock,
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "FORM16_WRITE_INDETERMINATE"
+  );
+  assert.equal(createMock.mock.callCount(), 0);
+});
+
+test("相同 clientRowKey 但 operation fingerprint 不同時拒絕重用 Form 16 映射", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-fingerprint-conflict",
+      entryId: "E-EXISTING",
+      operationFingerprint: "fingerprint-original",
+    }),
+    reserved: false,
+  });
+  const createMock = t.mock.fn(async () => ({ entryId: "E-SHOULD-NOT-CREATE" }));
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-fingerprint-conflict",
+        source: "downtime",
+        operationFingerprint: "fingerprint-new-payload",
+        create: createMock,
+      }),
+    (error: unknown) =>
+      error instanceof HttpError &&
+      error.statusCode === 409 &&
+      error.code === "FORM16_IDEMPOTENCY_KEY_CONFLICT"
+  );
+
+  assert.equal(createMock.mock.callCount(), 0);
+});
+
 test("reserve 成功 → create + confirm 映射", async (t) => {
   mockReservePending(t, {
     record: buildRecord({ clientRowKey: "uuid-2", entryId: "", status: "pending" }),
     reserved: true,
   });
-  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   const createMock = t.mock.fn(async () => ({ entryId: "E-NEW" }));
 
   const result = await checkOrCreateForm16Entry({
@@ -130,12 +262,34 @@ test("reserve 成功 → create + confirm 映射", async (t) => {
   });
 });
 
+test("Ragic 已建立但 confirm 不再擁有 reservation 時回不可確認", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({ clientRowKey: "uuid-lost-owner", entryId: "", status: "pending" }),
+    reserved: true,
+  });
+  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 0);
+  const createMock = t.mock.fn(async () => ({ entryId: "E-CREATED" }));
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-lost-owner",
+        source: "downtime",
+        create: createMock,
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "FORM16_WRITE_INDETERMINATE"
+  );
+
+  assert.equal(createMock.mock.callCount(), 1);
+});
+
 test("create 回 entryId=null → release pending，讓下次 retry 同 key 能重新嘗試", async (t) => {
   mockReservePending(t, {
     record: buildRecord({ clientRowKey: "uuid-3", entryId: "", status: "pending" }),
     reserved: true,
   });
-  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   const releaseMock = t.mock.method(
     form16ClientRowKeyRepository,
     "releasePending",
@@ -357,7 +511,7 @@ test("同 key 並發（TOCTOU）→ 只 create 一次，後到者共享結果且
     record: buildRecord({ clientRowKey: "uuid-race", entryId: "", status: "pending" }),
     reserved: true,
   });
-  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  const confirmMock = t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   let resolveCreate!: (value: { entryId: string }) => void;
   const createMock = t.mock.fn(
     () =>
@@ -389,6 +543,44 @@ test("同 key 並發（TOCTOU）→ 只 create 一次，後到者共享結果且
   assert.equal(confirmMock.mock.callCount(), 1);
 });
 
+test("同 key 並發但 operation fingerprint 不同時後到者不共用進行中結果", async (t) => {
+  mockReservePending(t, {
+    record: buildRecord({
+      clientRowKey: "uuid-race-fingerprint",
+      entryId: "",
+      status: "pending",
+      operationFingerprint: "fingerprint-a",
+    }),
+    reserved: true,
+  });
+  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
+  let resolveCreate!: (value: { entryId: string }) => void;
+  const first = checkOrCreateForm16Entry({
+    clientRowKey: "uuid-race-fingerprint",
+    source: "downtime",
+    operationFingerprint: "fingerprint-a",
+    create: () =>
+      new Promise<{ entryId: string }>((resolve) => {
+        resolveCreate = resolve;
+      }),
+  });
+
+  await assert.rejects(
+    () =>
+      checkOrCreateForm16Entry({
+        clientRowKey: "uuid-race-fingerprint",
+        source: "downtime",
+        operationFingerprint: "fingerprint-b",
+        create: async () => ({ entryId: "E-SHOULD-NOT-CREATE" }),
+      }),
+    (error: unknown) =>
+      error instanceof HttpError && error.code === "FORM16_IDEMPOTENCY_KEY_CONFLICT"
+  );
+
+  resolveCreate({ entryId: "E-FIRST" });
+  assert.equal((await first).entryId, "E-FIRST");
+});
+
 test("不同 key 並發 → 各自 create，互不收斂", async (t) => {
   t.mock.method(
     form16ClientRowKeyRepository,
@@ -401,7 +593,7 @@ test("不同 key 並發 → 各自 create，互不收斂", async (t) => {
     }),
     reserved: true,
   }));
-  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   const createMock = t.mock.fn(async () => ({ entryId: "E-ANY" }));
 
   const [left, right] = await Promise.all([
@@ -427,7 +619,7 @@ test("並發時先到者 create 拋一般錯誤 → 等待者收到同一錯誤�
     record: buildRecord({ clientRowKey: "uuid-race-fail", entryId: "", status: "pending" }),
     reserved: true,
   });
-  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => undefined);
+  t.mock.method(form16ClientRowKeyRepository, "confirm", async () => 1);
   t.mock.method(form16ClientRowKeyRepository, "releasePending", async () => 1);
   let createCalls = 0;
   const createMock = t.mock.fn(async () => {

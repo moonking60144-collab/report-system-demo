@@ -1,5 +1,9 @@
 import type { CreateForm16DowntimePayload } from "../../api/downtime";
 import { getOrCreateClientId } from "../../utils/clientIdentity";
+import {
+  isStoredMutationLifecycle,
+  type OptimisticMutationLifecycle,
+} from "./mutationLifecycle";
 
 const DOWNTIME_RETRYABLE_CREATE_STORE_KEY =
   "work-report:retryable-downtime-create-store:v1";
@@ -14,6 +18,7 @@ export interface RetryableDowntimeCreateRecord {
   payload: CreateForm16DowntimePayload & { clientRowKey: string };
   actorClientId: string;
   createdAt: string;
+  lifecycle?: OptimisticMutationLifecycle;
 }
 
 type RetryableDowntimeCreateStore = Record<string, RetryableDowntimeCreateRecord>;
@@ -57,6 +62,8 @@ function isRetryableDowntimeCreateRecord(
     typeof candidate.retryRootTaskId === "string" &&
     typeof candidate.actorClientId === "string" &&
     typeof candidate.createdAt === "string" &&
+    (candidate.lifecycle === undefined ||
+      isStoredMutationLifecycle(candidate.lifecycle)) &&
     Boolean(payload) &&
     typeof payload?.date === "string" &&
     typeof payload.machineId === "string" &&

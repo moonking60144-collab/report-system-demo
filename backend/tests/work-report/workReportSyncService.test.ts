@@ -2,7 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { HttpError } from "../../src/utils/httpError";
 import { WorkReportSyncService } from "../../src/services/work-report-sync/workReportSyncServiceFactory";
+import {
+  createWorkReportMutationSyncCoordinator,
+  WorkReportAutoSyncYieldRequestedError,
+} from "../../src/services/work-report-sync/workReportMutationSyncCoordinator";
 import { READ_MODEL_SCHEMA_VERSION } from "../../src/storage/sqlite/readModelSchema";
+
+function createDeferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue", async () => {
   const syncStatePatches: Array<Record<string, unknown>> = [];
@@ -12,6 +27,7 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
   const countGenerationIds: Array<string | null> = [];
   const markedSeqs: number[] = [];
   const cleanedSeqs: number[] = [];
+  const publishedEntryBatches: Array<[string, string[]]> = [];
   let snapshotGenerationId = "";
 
   let latestSeqCall = 0;
@@ -76,6 +92,9 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
         rowCount: 4,
       };
     },
+    publishWorkReportEntriesUpdated: (formId, entryIds) => {
+      publishedEntryBatches.push([formId, entryIds]);
+    },
     publishWorkReportFormUpdated: () => undefined,
   });
 
@@ -97,6 +116,7 @@ test("sync 開始時保留舊 snapshot，完成後會 replay dirty entry queue",
   assert.deepEqual(countGenerationIds, [snapshotGenerationId, snapshotGenerationId]);
   assert.deepEqual(markedSeqs, [10, 12]);
   assert.deepEqual(cleanedSeqs, [10, 12]);
+  assert.deepEqual(publishedEntryBatches, [["105", ["E-1", "E-2"]]]);
 
   const runningPatch = syncStatePatches[0];
   assert.equal(runningPatch.status, "running");
@@ -175,6 +195,7 @@ test("sync promote 前最後一刻 enqueue 的 mutation 會在 promote 後補 re
       cleanedSeqs.push(upToSeq);
     },
     getFormSnapshotCounts: async () => countResults.shift() ?? { entryCount: 1, rowCount: 2 },
+    publishWorkReportEntriesUpdated: () => undefined,
     publishWorkReportFormUpdated: () => undefined,
   });
 
@@ -201,6 +222,7 @@ test("sync promote 前最後一刻 enqueue 的 mutation 會在 promote 後補 re
 
 test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", async () => {
   let deletedEntryId = "";
+  let publishedEntryId = "";
   let snapshotGenerationId = "";
   let deleteGenerationId = "";
 
@@ -235,6 +257,9 @@ test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", asyn
       entryCount: 0,
       rowCount: 0,
     }),
+    publishWorkReportEntriesUpdated: (_formId, entryIds) => {
+      publishedEntryId = entryIds[0] ?? "";
+    },
     publishWorkReportFormUpdated: () => undefined,
   });
 
@@ -245,6 +270,7 @@ test("sync replay 遇到 REPORT_NOT_FOUND 會刪除 SQLite entry snapshot", asyn
 
   assert.equal(deletedEntryId, "E-404");
   assert.equal(deleteGenerationId, snapshotGenerationId);
+  assert.equal(publishedEntryId, "E-404");
 });
 
 test("sync 失敗時不主動覆寫 snapshotAt 與 counts", async () => {
@@ -274,6 +300,7 @@ test("sync 失敗時不主動覆寫 snapshotAt 與 counts", async () => {
       entryCount: 0,
       rowCount: 0,
     }),
+    publishWorkReportEntriesUpdated: () => undefined,
     publishWorkReportFormUpdated: () => undefined,
   });
 
@@ -288,4 +315,198 @@ test("sync 失敗時不主動覆寫 snapshotAt 與 counts", async () => {
   assert.equal("snapshotAt" in failedPatch, false);
   assert.equal("totalEntries" in failedPatch, false);
   assert.equal("totalRows" in failedPatch, false);
+});
+
+test("手動同步會等待既有寫入，並回報等待狀態", async () => {
+  const coordinator = createWorkReportMutationSyncCoordinator();
+  const releaseMutation = await coordinator.acquireMutationSlot();
+  const scanStarted = createDeferred();
+  const releaseScan = createDeferred();
+  const syncStatePatches: Array<Record<string, unknown>> = [];
+  let scanCallCount = 0;
+  const service = new WorkReportSyncService({
+    coordinator,
+    generateTaskId: () => "sync-105-batch-barrier",
+    scanFormRecords: async () => {
+      scanCallCount += 1;
+      scanStarted.resolve();
+      await releaseScan.promise;
+      return [];
+    },
+    refreshEntry: async () => {
+      throw new Error("unreachable");
+    },
+    replaceFormSnapshot: async () => ({ entryCount: 0, rowCount: 0 }),
+    upsertEntrySnapshot: async () => ({ rowCount: 0 }),
+    deleteEntrySnapshot: async () => undefined,
+    getSyncState: async () => null,
+    upsertSyncState: async (patch) => {
+      syncStatePatches.push({ ...patch });
+    },
+    getLatestProjectionSeq: async () => 0,
+    getOldestPendingProjectionSeq: async () => null,
+    listPendingProjectionEntries: async () => [],
+    markProjectionRangeProcessed: async () => undefined,
+    cleanupProcessedProjectionEvents: async () => undefined,
+    getFormSnapshotCounts: async () => ({ entryCount: 0, rowCount: 0 }),
+    publishWorkReportEntriesUpdated: () => undefined,
+    publishWorkReportFormUpdated: () => undefined,
+  });
+
+  const acceptedTask = await service.requestSync("105", {
+    triggeredBy: "toolbar-refresh",
+    waitForCompletion: false,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(acceptedTask.accepted, true);
+  assert.equal(scanCallCount, 0);
+  assert.equal(syncStatePatches.length, 0);
+  const waitingTask = await service.getStatus("105");
+  assert.equal(waitingTask?.status, "running");
+  assert.equal(waitingTask?.message, "正在等待報工寫入完成");
+
+  releaseMutation();
+  await scanStarted.promise;
+  releaseScan.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const finishedTask = await service.getStatus("105");
+  assert.equal(finishedTask?.status, "success");
+});
+
+test("sync replay 通知會在釋放同步 slot 後分批發送", async () => {
+  let syncSlotActive = false;
+  const publishedEntries: string[] = [];
+  const publishedBatchSizes: number[] = [];
+  const pendingEntries = Array.from({ length: 201 }, (_, index) => ({
+    entryId: `E-${index + 1}`,
+    latestSeq: 1,
+  }));
+  const coordinator = {
+    acquireMutationSlot: async () => () => undefined,
+    acquireSyncSlot: async () => {
+      syncSlotActive = true;
+      return () => {
+        syncSlotActive = false;
+      };
+    },
+    shouldDeferAutoSyncForMutation: () => false,
+  };
+
+  const service = new WorkReportSyncService({
+    coordinator,
+    generateTaskId: () => "sync-105-publish-after-release",
+    scanFormRecords: async () => [],
+    refreshEntry: async (_formId, entryId) => ({
+      id: entryId,
+      workOrderNo: `WO-${entryId}`,
+      customerPartNo: null,
+      erpPartNo: null,
+      status: "未結案",
+      reports: [],
+    }),
+    replaceFormSnapshot: async () => ({ entryCount: 0, rowCount: 0 }),
+    upsertEntrySnapshot: async () => ({ rowCount: 0 }),
+    deleteEntrySnapshot: async () => undefined,
+    getSyncState: async () => null,
+    upsertSyncState: async () => undefined,
+    getLatestProjectionSeq: async () => 1,
+    getOldestPendingProjectionSeq: async () => 1,
+    listPendingProjectionEntries: async (_formId, afterSeq, upToSeq) =>
+      afterSeq === 0 && upToSeq === 1
+        ? pendingEntries
+        : [],
+    markProjectionRangeProcessed: async () => undefined,
+    cleanupProcessedProjectionEvents: async () => undefined,
+    getFormSnapshotCounts: async () => ({ entryCount: 1, rowCount: 0 }),
+    publishWorkReportEntriesUpdated: (_formId, entryIds) => {
+      assert.equal(syncSlotActive, false);
+      publishedBatchSizes.push(entryIds.length);
+      publishedEntries.push(...entryIds);
+    },
+    publishWorkReportFormUpdated: () => {
+      assert.equal(syncSlotActive, false);
+    },
+  });
+
+  const task = await service.requestSync("105", {
+    triggeredBy: "test",
+    waitForCompletion: true,
+  });
+
+  assert.equal(task.status, "success");
+  assert.deepEqual(publishedBatchSizes, [200, 1]);
+  assert.equal(publishedEntries.length, 201);
+  assert.equal(publishedEntries[0], "E-1");
+  assert.equal(publishedEntries.at(-1), "E-201");
+});
+
+test("auto-sync 在使用者寫入等待時會先讓位，且重掃後才 promote snapshot", async () => {
+  const coordinator = createWorkReportMutationSyncCoordinator();
+  const firstScanStarted = createDeferred();
+  const continueFirstScan = createDeferred();
+  const syncStatePatches: Array<Record<string, unknown>> = [];
+  let scanCallCount = 0;
+  let replaceCallCount = 0;
+  const service = new WorkReportSyncService({
+    coordinator,
+    generateTaskId: () => "sync-105-auto-yield",
+    scanFormRecords: async (_formId, onProgress, options) => {
+      scanCallCount += 1;
+      onProgress(scanCallCount);
+      if (scanCallCount === 1) {
+        firstScanStarted.resolve();
+        await continueFirstScan.promise;
+        if (options?.shouldYieldToMutation?.()) {
+          throw new WorkReportAutoSyncYieldRequestedError();
+        }
+      }
+      return [];
+    },
+    refreshEntry: async () => {
+      throw new Error("unreachable");
+    },
+    replaceFormSnapshot: async () => {
+      replaceCallCount += 1;
+      return { entryCount: 0, rowCount: 0 };
+    },
+    upsertEntrySnapshot: async () => ({ rowCount: 0 }),
+    deleteEntrySnapshot: async () => undefined,
+    getSyncState: async () => null,
+    upsertSyncState: async (patch) => {
+      syncStatePatches.push({ ...patch });
+    },
+    getLatestProjectionSeq: async () => 0,
+    getOldestPendingProjectionSeq: async () => null,
+    listPendingProjectionEntries: async () => [],
+    markProjectionRangeProcessed: async () => undefined,
+    cleanupProcessedProjectionEvents: async () => undefined,
+    getFormSnapshotCounts: async () => ({ entryCount: 0, rowCount: 0 }),
+    publishWorkReportEntriesUpdated: () => undefined,
+    publishWorkReportFormUpdated: () => undefined,
+  });
+
+  const syncPromise = service.requestSync("105", {
+    triggeredBy: "auto-schedule",
+    waitForCompletion: true,
+  });
+  await firstScanStarted.promise;
+
+  const mutationSlotPromise = coordinator.acquireMutationSlot();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  continueFirstScan.resolve();
+  const releaseMutation = await mutationSlotPromise;
+  const replaceCountWhileMutationOwnsSlot = replaceCallCount;
+  const yieldedTask = await service.getStatus("105");
+  const yieldedSyncState = syncStatePatches.at(-1);
+  releaseMutation();
+
+  const completedTask = await syncPromise;
+  assert.equal(replaceCountWhileMutationOwnsSlot, 0);
+  assert.equal(yieldedTask?.status, "running");
+  assert.equal(yieldedTask?.message, "正在等待報工寫入完成");
+  assert.equal(yieldedSyncState?.status, "idle");
+  assert.equal(yieldedSyncState?.message, "已讓位給報工寫入，等待重新同步");
+  assert.equal(scanCallCount, 2);
+  assert.equal(replaceCallCount, 1);
+  assert.equal(completedTask.status, "success");
 });

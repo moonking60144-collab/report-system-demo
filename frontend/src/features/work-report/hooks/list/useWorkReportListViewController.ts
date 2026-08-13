@@ -4,6 +4,7 @@ import type { SidebarPlaceholderView, WorkReportLandingPageKey, WorkReportListLo
 const LANDING_PAGE_QUERY_KEY = "landingPage";
 const TOP_VIEW_QUERY_KEY = "topView";
 const QUICK_VIEW_QUERY_KEY = "fQuick";
+const MOBILE_VIEWPORT_MEDIA_QUERY = "(max-width: 960px)";
 
 function parseLandingPageKeyFromSearch(search: string): WorkReportLandingPageKey | null {
   const raw = new URLSearchParams(search).get(LANDING_PAGE_QUERY_KEY);
@@ -46,7 +47,7 @@ export function useWorkReportListViewController({
     if (typeof window === "undefined") {
       return false;
     }
-    return window.matchMedia("(max-width: 768px)").matches;
+    return window.matchMedia(MOBILE_VIEWPORT_MEDIA_QUERY).matches;
   });
   const [activeTopView, setActiveTopView] = useState<WorkReportTopView>(
     topViewFromSearch ?? "report"
@@ -61,7 +62,7 @@ export function useWorkReportListViewController({
     if (typeof window === "undefined") {
       return;
     }
-    const mediaQuery = window.matchMedia("(max-width: 768px)");
+    const mediaQuery = window.matchMedia(MOBILE_VIEWPORT_MEDIA_QUERY);
     const applyMatch = (matches: boolean) => {
       setIsMobileViewport(matches);
       if (!matches) {

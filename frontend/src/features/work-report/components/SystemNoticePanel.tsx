@@ -711,6 +711,14 @@ export function SystemNoticePanel({
   }, [activeState, dismissedRevision, noticeRevision]);
 
   const isNoticeContentVisible = !isDismissedByDevice || editing;
+  const hasNoticeContent = Boolean(
+    notice &&
+      [notice.message, notice.linkText, notice.linkUrl, notice.startAt, notice.endAt].some((value) =>
+        String(value ?? "").trim()
+      )
+  );
+  const isCompactIdle =
+    !loading && !error && !editing && !activeState && !hasNoticeContent;
   const inlineStatusMessage =
     statusNotice && String(statusNotice.message ?? "").trim() ? statusNotice.message : null;
   const inlineStatusType = statusNotice?.type ?? "success";
@@ -932,7 +940,12 @@ export function SystemNoticePanel({
     : "";
 
   return (
-    <section className={`system-notice-panel${isDismissedByDevice && !editing ? " is-collapsed" : ""}`} aria-live="polite">
+    <section
+      className={`system-notice-panel${isDismissedByDevice && !editing ? " is-collapsed" : ""}${
+        isCompactIdle ? " is-compact-idle" : ""
+      }`}
+      aria-live="polite"
+    >
       <SystemNoticePanelHeader
         noticeExists={Boolean(notice)}
         activeState={activeState}
@@ -955,7 +968,7 @@ export function SystemNoticePanel({
 
       <SystemNoticeLoadingState loading={loading} error={error} />
 
-      {!loading && !error && notice && isNoticeContentVisible && (
+      {!loading && !error && notice && hasNoticeContent && isNoticeContentVisible && (
         <SystemNoticeNoticeContent
           notice={notice}
           emptyTitle={emptyTitleText}

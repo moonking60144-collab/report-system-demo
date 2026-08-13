@@ -6,15 +6,26 @@ import {
   type CreateReportTaskStatus,
   type WorkReportQueueTask,
 } from "../../../../api/workReport";
+import type { MutationLifecycleState } from "../../../../api/mutationLifecycleTypes";
 import type { WorkReportFrontendEventAction } from "../../debug/workReportDeveloperContract";
 import type { CreateTaskMonitor, WorkReportFormId, WorkReportMutationTaskKind } from "../../types";
 import { deleteRetryableMutationRecord } from "../../taskRetryStore";
 import { getWorkReportTaskErrorMessage } from "../../utils";
+import { resolveTaskMutationLifecycleState } from "../../mutationLifecycle";
+import {
+  createWorkReportOptimisticMutation,
+  reconcileWorkReportOptimisticMutation,
+  type WorkReportOptimisticMutationInput,
+} from "../../workReportOptimisticMutation";
+import { WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED } from "../../optimisticMutationFeatureFlags";
 
 interface AcceptedMutationTask {
   taskId: string;
   status: CreateReportTaskStatus;
   createdAt: string;
+  lifecycleState?: MutationLifecycleState;
+  acceptedAt?: string | null;
+  confirmedAt?: string | null;
   rowId?: string;
 }
 
@@ -44,8 +55,19 @@ function isMutationTaskActive(task: Pick<CreateTaskMonitor, "status" | "stale">)
   return task.stale !== true && (task.status === "pending" || task.status === "running");
 }
 
+export function isMutationTaskVerificationPending(
+  task: Pick<CreateTaskMonitor, "lifecycleState" | "stale" | "optimisticMutation">
+): boolean {
+  return (
+    task.stale === true ||
+    task.lifecycleState === "indeterminate" ||
+    task.lifecycleState === "unknown" ||
+    task.optimisticMutation?.lifecycle.optimisticState === "frozen"
+  );
+}
+
 function isQueueTask(kind: WorkReportMutationTaskKind): boolean {
-  return kind === "delete" || kind === "delete-batch";
+  return kind === "create-batch" || kind === "delete" || kind === "delete-batch";
 }
 
 function isWorkReportQueueTaskResult(task: AcceptedMutationTaskResult): task is WorkReportQueueTask {
@@ -78,12 +100,62 @@ function getTerminalTaskErrorMessage(task: AcceptedMutationTaskResult): string {
   return getWorkReportTaskErrorMessage(task);
 }
 
+function getDeleteTaskOutcome(
+  task: AcceptedMutationTaskResult
+): Pick<
+  CreateTaskMonitor,
+  "deletedCount" | "deleteFinalizeFailed" | "batchCreatedRowIds"
+> {
+  if (!isWorkReportQueueTaskResult(task)) {
+    return {};
+  }
+  return {
+    ...(typeof task.deletedCount === "number"
+      ? { deletedCount: task.deletedCount }
+      : {}),
+    ...(typeof task.deleteFinalizeFailed === "boolean"
+      ? { deleteFinalizeFailed: task.deleteFinalizeFailed }
+      : {}),
+    ...(Array.isArray(task.batchCreatedRowIds)
+      ? { batchCreatedRowIds: task.batchCreatedRowIds }
+      : {}),
+  };
+}
+
+function getTerminalTaskFailureMessage(
+  kind: WorkReportMutationTaskKind,
+  task: AcceptedMutationTaskResult,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  if (
+    (kind === "delete" || kind === "delete-batch") &&
+    isWorkReportQueueTaskResult(task) &&
+    (task.deletedCount ?? 0) > 0
+  ) {
+    return (
+      task.message ||
+      t("workReport:messages.deletePartiallyCompleted", {
+        count: task.deletedCount,
+      })
+    );
+  }
+
+  return t("workReport:messages.backgroundProcessingFailedWithError", {
+    error:
+      getTerminalTaskErrorMessage(task) ||
+      t("workReport:messages.backgroundProcessingFailedDefault"),
+  });
+}
+
 function getTerminalTaskSuccessMessage(
   kind: WorkReportMutationTaskKind,
   task: AcceptedMutationTaskResult,
   rowId: string | undefined,
   t: (key: string, options?: Record<string, unknown>) => string
 ): string {
+  if (kind === "create-batch" && isWorkReportQueueTaskResult(task) && task.message) {
+    return task.message;
+  }
   if ((kind === "delete" || kind === "delete-batch") && isWorkReportQueueTaskResult(task) && task.message) {
     return task.message;
   }
@@ -135,7 +207,10 @@ export function useWorkReportDetailTaskController({
   const activeMutationTask = activeMutationTasks[0] ?? null;
   const activeMutationTaskCount = activeMutationTasks.length;
   const hasActiveMutationTask = activeMutationTaskCount > 0;
-  const hasBlockingMutationTask = activeMutationTasks.some((task) => task.kind !== "create");
+  const hasBlockingMutationTask =
+    activeMutationTasks.some(
+      (task) => task.kind !== "create" && task.kind !== "create-batch"
+    ) || currentEntryTaskMonitors.some(isMutationTaskVerificationPending);
 
   const buildTaskMonitor = useCallback(
     (
@@ -143,18 +218,48 @@ export function useWorkReportDetailTaskController({
       taskId: string,
       status: CreateReportTaskStatus,
       message: string,
-      rowId?: string
-    ): CreateTaskMonitor => ({
-      taskId,
-      kind,
-      formId: formId ?? "",
-      entryId: safeEntryId ?? "",
-      workOrderNo: String(workOrderNo ?? safeEntryId ?? ""),
-      status,
-      message,
-      updatedAt: new Date().toISOString(),
-      rowId,
-    }),
+      rowId?: string,
+      deleteOutcome: Pick<
+        CreateTaskMonitor,
+        "deletedCount" | "deleteFinalizeFailed" | "batchCreatedRowIds"
+      > = {},
+      lifecycle: Pick<
+        CreateTaskMonitor,
+        "lifecycleState" | "acceptedAt" | "confirmedAt"
+      > = {},
+      optimisticInput?: WorkReportOptimisticMutationInput
+    ): CreateTaskMonitor => {
+      const acceptedAt = lifecycle.acceptedAt ?? new Date().toISOString();
+      const acceptedMutation = optimisticInput && WORK_REPORT_OPTIMISTIC_MUTATIONS_ENABLED
+        ? createWorkReportOptimisticMutation({
+            ...optimisticInput,
+            taskId,
+            acceptedAt,
+          })
+        : undefined;
+      const optimisticMutation = acceptedMutation
+        ? reconcileWorkReportOptimisticMutation(acceptedMutation, {
+            lifecycleState:
+              lifecycle.lifecycleState ??
+              resolveTaskMutationLifecycleState({ status }),
+            confirmedAt: lifecycle.confirmedAt,
+          })
+        : undefined;
+      return {
+        taskId,
+        kind,
+        formId: formId ?? "",
+        entryId: safeEntryId ?? "",
+        workOrderNo: String(workOrderNo ?? safeEntryId ?? ""),
+        status,
+        message,
+        updatedAt: new Date().toISOString(),
+        rowId,
+        ...lifecycle,
+        ...deleteOutcome,
+        ...(optimisticMutation ? { optimisticMutation } : {}),
+      };
+    },
     [formId, safeEntryId, workOrderNo]
   );
 
@@ -162,7 +267,8 @@ export function useWorkReportDetailTaskController({
     async (
       kind: WorkReportMutationTaskKind,
       accepted: AcceptedMutationTask,
-      rowId?: string
+      rowId?: string,
+      optimisticInput?: WorkReportOptimisticMutationInput
     ): Promise<void> => {
       if (!formId) {
         return;
@@ -192,12 +298,15 @@ export function useWorkReportDetailTaskController({
             task.status,
             task.status === "success"
               ? getTerminalTaskSuccessMessage(kind, task, terminalRowId, t)
-              : t("workReport:messages.backgroundProcessingFailedWithError", {
-                  error:
-                    getTerminalTaskErrorMessage(task) ||
-                    t("workReport:messages.backgroundProcessingFailedDefault"),
-                }),
-            terminalRowId
+              : getTerminalTaskFailureMessage(kind, task, t),
+            terminalRowId,
+            getDeleteTaskOutcome(task),
+            {
+              lifecycleState: task.lifecycleState,
+              acceptedAt: task.acceptedAt ?? accepted.acceptedAt ?? accepted.createdAt,
+              confirmedAt: task.confirmedAt ?? accepted.confirmedAt ?? null,
+            },
+            optimisticInput
           )
         );
         if (task.status === "success") {
@@ -219,7 +328,7 @@ export function useWorkReportDetailTaskController({
           kind,
           accepted.taskId,
           accepted.status,
-          kind === "create"
+          kind === "create" || kind === "create-batch"
             ? accepted.status === "pending"
               ? t("workReport:messages.createTaskQueuedContinue")
               : t("workReport:messages.createTaskBackgroundRunning")
@@ -230,7 +339,15 @@ export function useWorkReportDetailTaskController({
             : accepted.status === "pending"
               ? t("workReport:messages.taskQueuedWaitingPrevious")
               : t("workReport:messages.taskBackgroundRecalcRunning"),
-          rowId
+          rowId,
+          {},
+          {
+            lifecycleState: accepted.lifecycleState ??
+              (accepted.status === "pending" ? "accepted" : accepted.status),
+            acceptedAt: accepted.acceptedAt ?? accepted.createdAt,
+            confirmedAt: accepted.confirmedAt ?? null,
+          },
+          optimisticInput
         )
       );
     },

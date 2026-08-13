@@ -4,6 +4,7 @@ import { workReportSyncService } from "../services/work-report-sync/workReportSy
 
 let autoSyncIntervalTimer: NodeJS.Timeout | null = null;
 let autoSyncStartupTimer: NodeJS.Timeout | null = null;
+let autoSyncCyclePromise: Promise<void> | null = null;
 
 function shouldAutoSyncForm16(): boolean {
   return env.SQLITE_ENABLED && env.FORM16_SQLITE_AUTO_SYNC_ENABLED;
@@ -28,10 +29,17 @@ function resolveAutoSyncForms(): string[] {
 
 async function runAutoSyncCycle(forms: string[]): Promise<void> {
   for (const formId of forms) {
+    if (workReportSyncService.shouldDeferAutoSyncForMutation()) {
+      console.info("[sqlite-auto-sync-skipped]", {
+        formId,
+        reason: "work-report-mutation-pending",
+      });
+      continue;
+    }
     try {
       const task = await workReportSyncService.requestSync(formId, {
         triggeredBy: "auto-schedule",
-        waitForCompletion: false,
+        waitForCompletion: true,
       });
       console.info("[sqlite-auto-sync-triggered]", {
         formId,
@@ -47,24 +55,32 @@ async function runAutoSyncCycle(forms: string[]): Promise<void> {
     }
   }
 
-  if (shouldAutoSyncForm16()) {
+  if (
+    shouldAutoSyncForm16() &&
+    workReportSyncService.shouldDeferAutoSyncForMutation()
+  ) {
+    console.info("[sqlite-auto-sync-skipped]", {
+      formId: "16",
+      reason: "work-report-mutation-pending",
+    });
+  } else if (shouldAutoSyncForm16()) {
     const snapshotState = await form16DowntimeService.checkSnapshotStaleness();
     if (snapshotState.isStale) {
-      // 跟 104/105 一樣 fire-and-forget，不阻塞 auto-sync cycle
-      void form16DowntimeService.refreshSqliteSnapshotFromRagic()
-        .then((records) => {
-          console.info("[sqlite-auto-sync-triggered]", {
-            formId: "16",
-            count: records.length,
-            source: "form16-downtime",
-          });
-        })
-        .catch((error) => {
-          console.warn("[sqlite-auto-sync-failed]", {
-            formId: "16",
-            error: error instanceof Error ? error.message : String(error),
-          });
+      try {
+        const records = await form16DowntimeService.refreshSqliteSnapshotFromRagic({
+          yieldToMutation: true,
         });
+        console.info("[sqlite-auto-sync-triggered]", {
+          formId: "16",
+          count: records.length,
+          source: "form16-downtime",
+        });
+      } catch (error) {
+        console.warn("[sqlite-auto-sync-failed]", {
+          formId: "16",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     } else {
       console.info("[sqlite-auto-sync-skipped]", {
         formId: "16",
@@ -92,13 +108,24 @@ export function startSqliteAutoSync(): void {
   }
 
   const scheduleCycle = () => {
-    void runAutoSyncCycle(forms).catch((error) => {
-      // runAutoSyncCycle 內已逐 form try/catch，但 form16 staleness 檢查等
-      // 仍可能 reject 整個 cycle；補一層保險避免變成 unhandledRejection
-      console.warn("[sqlite-auto-sync-cycle-failed]", {
-        error: error instanceof Error ? error.message : String(error),
+    if (autoSyncCyclePromise) {
+      console.info("[sqlite-auto-sync-skipped]", {
+        reason: "previous-cycle-running",
       });
-    });
+      return;
+    }
+
+    autoSyncCyclePromise = runAutoSyncCycle(forms)
+      .catch((error) => {
+        // runAutoSyncCycle 內已逐 form try/catch，但 form16 staleness 檢查等
+        // 仍可能 reject 整個 cycle；補一層保險避免變成 unhandledRejection
+        console.warn("[sqlite-auto-sync-cycle-failed]", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        autoSyncCyclePromise = null;
+      });
   };
 
   autoSyncStartupTimer = setTimeout(() => {

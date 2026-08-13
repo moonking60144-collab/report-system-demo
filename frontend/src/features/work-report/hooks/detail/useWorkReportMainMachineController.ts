@@ -1,16 +1,30 @@
 import { startTransition, useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { updateWorkOrderMainMachine, type WorkReportRecord } from "../../../../api/workReport";
+import {
+  updateWorkOrderMainMachineAccepted,
+  type CreateReportTaskAcceptedResult,
+  type WorkReportRecord,
+} from "../../../../api/workReport";
 import type {
   WorkReportFrontendEventAction,
   WorkReportFrontendEventCategory,
 } from "../../debug/workReportDeveloperContract";
 import { calculateDurationMs, createFrontendOperationId } from "../../logging/frontendEventLog";
 import { getErrorMessage } from "../../utils";
-import type { LoadEntryOptions } from "./types";
+import { createRetryClientMutationId } from "../../taskRetryStore";
+import type { WorkReportOptimisticMutationInput } from "../../workReportOptimisticMutation";
+import type { WorkReportFormId } from "../../types";
 
 interface DetailNoticeState {
   type: "success" | "error" | "info";
   message: string;
+}
+
+export function resolveEditableMainMachineCode(
+  formId: string | null,
+  record: WorkReportRecord | null
+): string {
+  const value = formId === "105" ? record?.filterMachineCode : record?.machineCode;
+  return String(value ?? "").trim();
 }
 
 function resolveExpectedEntryLastUpdatedAt(
@@ -21,7 +35,7 @@ function resolveExpectedEntryLastUpdatedAt(
 }
 
 interface UseWorkReportMainMachineControllerArgs {
-  formId: string | null;
+  formId: WorkReportFormId | null;
   safeEntryId: string | null;
   record: WorkReportRecord | null;
   editingRowId: string | null;
@@ -31,7 +45,12 @@ interface UseWorkReportMainMachineControllerArgs {
   refreshing: boolean;
   submitting: boolean;
   ensureOptionsLoaded: (options?: { silent?: boolean }) => Promise<unknown>;
-  loadEntry: (options?: LoadEntryOptions) => Promise<void>;
+  registerAcceptedMutationTask: (
+    kind: "update",
+    accepted: CreateReportTaskAcceptedResult,
+    rowId?: string,
+    optimisticInput?: WorkReportOptimisticMutationInput
+  ) => Promise<void>;
   setNotice: Dispatch<SetStateAction<DetailNoticeState | null>>;
   logDetailEvent: (
     category: WorkReportFrontendEventCategory,
@@ -62,7 +81,7 @@ export function useWorkReportMainMachineController({
   refreshing,
   submitting,
   ensureOptionsLoaded,
-  loadEntry,
+  registerAcceptedMutationTask,
   setNotice,
   logDetailEvent,
   t,
@@ -119,13 +138,14 @@ export function useWorkReportMainMachineController({
       }
 
       await ensureOptionsLoaded();
-      setMainMachineDraft(String(record.machineCode ?? "").trim());
+      const currentMachineCode = resolveEditableMainMachineCode(formId, record);
+      setMainMachineDraft(currentMachineCode);
       setMainMachinePickerSearch("");
       setMainMachinePickerOpen(false);
       setMainMachineModalOpen(true);
       logDetailEvent("ui", "main-machine-dialog-opened", "開啟更改工令機台", {
         meta: {
-          currentMachineCode: String(record.machineCode ?? "").trim(),
+          currentMachineCode,
         },
       });
     };
@@ -134,6 +154,7 @@ export function useWorkReportMainMachineController({
   }, [
     editingRowId,
     ensureOptionsLoaded,
+    formId,
     hasActiveMutationTask,
     loading,
     logDetailEvent,
@@ -178,7 +199,7 @@ export function useWorkReportMainMachineController({
       return;
     }
 
-    if (nextMachineCode === String(record.machineCode ?? "").trim()) {
+    if (nextMachineCode === resolveEditableMainMachineCode(formId, record)) {
       setMainMachineModalOpen(false);
       setMainMachineDraft("");
       return;
@@ -207,8 +228,38 @@ export function useWorkReportMainMachineController({
           nextMachineCode,
         },
       });
-      await updateWorkOrderMainMachine(formId, safeEntryId, nextMachineCode, {
-        expectedEntryLastUpdatedAt: resolveExpectedEntryLastUpdatedAt(record),
+      const clientMutationId = createRetryClientMutationId();
+      const accepted = await updateWorkOrderMainMachineAccepted(
+        formId,
+        safeEntryId,
+        nextMachineCode,
+        {
+          clientMutationId,
+          workOrderNo: record.workOrderNo,
+          expectedEntryLastUpdatedAt: resolveExpectedEntryLastUpdatedAt(record),
+        }
+      );
+      await registerAcceptedMutationTask("update", accepted, undefined, {
+        mutationId: clientMutationId,
+        operation: "work-report-main-machine",
+        target: {
+          domain: "work-report",
+          formId,
+          entryId: safeEntryId,
+        },
+        patch: {
+          kind: "update-entry",
+          patch:
+            formId === "105"
+              ? { filterMachineCode: nextMachineCode }
+              : { machineCode: nextMachineCode },
+        },
+        previousSnapshot:
+          formId === "105"
+            ? { filterMachineCode: record.filterMachineCode ?? null }
+            : { machineCode: record.machineCode ?? null },
+        reconcilePolicy: "refresh-entry",
+        failurePolicy: "rollback",
       });
       logDetailEvent("api", "main-machine-update-succeeded", "更改工令機台成功", {
         operationId,
@@ -222,17 +273,16 @@ export function useWorkReportMainMachineController({
       setMainMachineSaveProgress(100);
       setMainMachineModalOpen(false);
       setMainMachineDraft("");
-      setNotice({ type: "success", message: t("workReport:messages.mainMachineUpdated") });
-      await loadEntry({ mode: "background", forceRefresh: true });
+      setNotice({ type: "success", message: t("workReport:messages.updateAcceptedTaskProcessing") });
       const endedAt = new Date().toISOString();
       logDetailEvent(
-        "realtime",
-        "main-machine-update-refresh-completed",
-        "更改工令機台後已完成刷新",
+        "task",
+        "main-machine-update-succeeded",
+        "更改工令機台已受理",
         {
           operationId,
           operationType: "main-machine-update",
-          phase: "refresh-completed",
+          phase: "accepted",
           startedAt,
           endedAt,
           durationMs: calculateDurationMs(startedAt, endedAt),
@@ -262,10 +312,10 @@ export function useWorkReportMainMachineController({
     }
   }, [
     formId,
-    loadEntry,
     logDetailEvent,
     mainMachineDraft,
     record,
+    registerAcceptedMutationTask,
     safeEntryId,
     setNotice,
     t,

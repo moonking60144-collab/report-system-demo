@@ -15,6 +15,7 @@ import { saveRetryableMutationRecord } from "../../taskRetryStore";
 import type { WorkReportFormId } from "../../types";
 import { getErrorMessage } from "../../utils";
 import type { DetailModalState } from "./types";
+import type { WorkReportOptimisticMutationInput } from "../../workReportOptimisticMutation";
 
 interface DetailNoticeState {
   type: "success" | "error" | "info";
@@ -39,7 +40,8 @@ interface UseWorkReportDetailModalControllerArgs {
   registerAcceptedMutationTask: (
     kind: "create" | "update",
     accepted: CreateReportTaskAcceptedResult,
-    rowId?: string
+    rowId?: string,
+    optimisticInput?: WorkReportOptimisticMutationInput
   ) => Promise<void>;
   createClientMutationId: () => string;
   writePendingMutationReplay: (pending: {
@@ -49,6 +51,7 @@ interface UseWorkReportDetailModalControllerArgs {
     rowId?: string;
     payload: ReportMutationPayload;
     clientMutationId: string;
+    createIdempotencyKey?: string;
     attempts: number;
     createdAt: string;
     editSessionId?: string;
@@ -126,7 +129,7 @@ export function useWorkReportDetailModalController({
   const openEditModal = useCallback(
     (row: WorkReportItem) => {
       const run = async () => {
-        if (hasActiveMutationTask) {
+        if (hasActiveMutationTask || hasBlockingMutationTask) {
           return;
         }
         await ensureOptionsLoaded();
@@ -137,7 +140,7 @@ export function useWorkReportDetailModalController({
       };
       void run();
     },
-    [acquireRowEditLock, ensureOptionsLoaded, hasActiveMutationTask]
+    [acquireRowEditLock, ensureOptionsLoaded, hasActiveMutationTask, hasBlockingMutationTask]
   );
 
   const closeModal = useCallback(() => {
@@ -198,12 +201,14 @@ export function useWorkReportDetailModalController({
             entryId: safeEntryId,
             payload,
             clientMutationId,
+            createIdempotencyKey: clientMutationId,
             expectedEntryLastUpdatedAt,
             attempts: 0,
             createdAt: new Date().toISOString(),
           });
           const accepted = await createReportAccepted(formId, safeEntryId, payload, {
             clientMutationId,
+            createIdempotencyKey: clientMutationId,
             workOrderNo,
             expectedEntryLastUpdatedAt,
           });
@@ -216,11 +221,28 @@ export function useWorkReportDetailModalController({
             workOrderNo,
             payload,
             clientMutationId,
+            createIdempotencyKey: clientMutationId,
             expectedEntryLastUpdatedAt,
             createdAt: new Date().toISOString(),
           });
           clearPendingMutationReplay();
-          await registerAcceptedMutationTask("create", accepted);
+          await registerAcceptedMutationTask("create", accepted, undefined, {
+            mutationId: clientMutationId,
+            operation: "work-report-create",
+            target: {
+              domain: "work-report",
+              formId,
+              entryId: safeEntryId,
+              clientRowKey: clientMutationId,
+            },
+            patch: {
+              kind: "create-rows",
+              rows: [{ clientRowKey: clientMutationId, payload }],
+            },
+            previousSnapshot: null,
+            reconcilePolicy: "replace-target",
+            failurePolicy: "rollback",
+          });
           const endedAt = new Date().toISOString();
           logDetailEvent("task", "modal-create-accepted", "新增報工 modal 已 accepted", {
             taskId: accepted.taskId,
@@ -323,7 +345,24 @@ export function useWorkReportDetailModalController({
           createdAt: new Date().toISOString(),
         });
         clearPendingMutationReplay();
-        await registerAcceptedMutationTask("update", accepted, modalState.row.rowId);
+        await registerAcceptedMutationTask("update", accepted, modalState.row.rowId, {
+          mutationId: clientMutationId,
+          operation: "work-report-update",
+          target: {
+            domain: "work-report",
+            formId,
+            entryId: safeEntryId,
+            rowId: modalState.row.rowId,
+          },
+          patch: {
+            kind: "update-row",
+            rowId: modalState.row.rowId,
+            payload,
+          },
+          previousSnapshot: modalState.row,
+          reconcilePolicy: "replace-target",
+          failurePolicy: "rollback",
+        });
         const endedAt = new Date().toISOString();
         logDetailEvent("task", "modal-update-accepted", "編輯報工 modal 已 accepted", {
           rowId: modalState.row.rowId,

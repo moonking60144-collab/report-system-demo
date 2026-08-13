@@ -13,8 +13,10 @@ import {
 } from "./form16DowntimeService";
 import { pruneTerminalTaskHistory } from "../work-report/localTaskHistory";
 import type { KeyedSerialQueue } from "../../utils/keyedSerialQueue";
+import { FORM16_DOWNTIME_MUTATION_QUEUE_KEY } from "./form16DowntimeMutationQueue";
+import { isForm16CreateWriteIndeterminateError } from "./form16IdempotencyService";
 
-export const FORM16_DOWNTIME_CREATE_QUEUE_KEY = "16:downtime:create";
+export const FORM16_DOWNTIME_CREATE_QUEUE_KEY = FORM16_DOWNTIME_MUTATION_QUEUE_KEY;
 
 type DowntimeCreateTaskType = Extract<WorkReportQueueTaskType, "create-downtime">;
 
@@ -41,6 +43,7 @@ export interface Form16DowntimeCreateTask {
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  writeIndeterminate?: boolean;
   error?: {
     code: string;
     message: string;
@@ -71,6 +74,7 @@ interface RegistryUpsertTaskInput {
   message?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  writeIndeterminate?: boolean | null;
   actorClientId?: string | null;
   actorTabId?: string | null;
   actorIp?: string | null;
@@ -150,7 +154,8 @@ export class Form16DowntimeCreateTaskService {
     this.registry = deps.registry ?? workReportTaskRegistryService;
     this.queue = deps.queue ?? workReportEntryMutationQueue;
     this.createRecord =
-      deps.createRecord ?? ((input) => form16DowntimeService.createRecord(input));
+      deps.createRecord ??
+      ((input) => form16DowntimeService.createRecord(input, { deferProjection: true }));
     this.createTaskId = deps.createTaskId ?? randomUUID;
     this.now = deps.now ?? (() => new Date().toISOString());
   }
@@ -194,6 +199,8 @@ export class Form16DowntimeCreateTaskService {
       }
       this.taskIdByClientRowKey.delete(clientRowKey);
     }
+
+    this.queue.assertAccepting(FORM16_DOWNTIME_CREATE_QUEUE_KEY);
 
     const createdAt = this.now();
     const task: Form16DowntimeCreateTask = {
@@ -260,6 +267,7 @@ export class Form16DowntimeCreateTaskService {
         finishedAt,
         updatedAt: finishedAt,
         error: normalizedError,
+        writeIndeterminate: isForm16CreateWriteIndeterminateError(error),
       });
     }
   }
@@ -312,6 +320,10 @@ export class Form16DowntimeCreateTaskService {
     ];
     const recoveredAt = this.now();
     for (const task of interruptedTasks) {
+      const writeIndeterminate = task.status === "running";
+      const recoveryMessage = writeIndeterminate
+        ? "服務重啟時停機紀錄建立正在執行，寫入結果尚未確認；請先確認是否已建立，不可直接重送。"
+        : "服務重啟，停機紀錄建立任務尚未開始，已標記為失敗，請重送。";
       this.registry.upsertTask({
         taskId: task.taskId,
         taskType: "create-downtime",
@@ -324,9 +336,10 @@ export class Form16DowntimeCreateTaskService {
         startedAt: task.startedAt,
         finishedAt: recoveredAt,
         updatedAt: recoveredAt,
-        message: "服務重啟，停機紀錄建立任務已標記為失敗，請重送。",
+        message: recoveryMessage,
         errorCode: "TASK_RECOVERED_AFTER_RESTART",
-        errorMessage: "服務重啟，停機紀錄建立任務已標記為失敗，請重送。",
+        errorMessage: recoveryMessage,
+        writeIndeterminate,
         actorClientId: task.actorClientId,
         actorTabId: task.actorTabId,
         actorIp: task.actorIp,
@@ -351,6 +364,7 @@ export class Form16DowntimeCreateTaskService {
       message: this.getTaskMessage(task),
       errorCode: task.error?.code ?? null,
       errorMessage: task.error?.message ?? null,
+      writeIndeterminate: task.writeIndeterminate ?? null,
       actorClientId: task.actorClientId ?? null,
       actorTabId: task.actorTabId ?? null,
       actorIp: task.actorIp ?? null,

@@ -25,6 +25,7 @@ import {
   getFixedFilterPresetFilters,
   getInitialGlobalFilters,
   hasExplicitGlobalFilterParamsInUrl,
+  isValidUpdatedDateRange,
   normalizeFilters,
   writeWorkReportLocalPreferences,
 } from "../../utils";
@@ -40,8 +41,6 @@ interface UseWorkReportListInteractionControllerArgs {
   currentFormId: "104" | "105";
   activeLandingPageKey: WorkReportLandingPageKey;
   activePlaceholderViewId: SidebarPlaceholderView["id"] | null;
-  activeFixedFilterPresetId: FixedFilterPresetId | null;
-  activeUnfinishedMachineShortcut: SidebarMachinePreset | null;
   globalFilters: GlobalFilters;
   globalFilterDraft: GlobalFilters;
   columnSortRules: ColumnSortRule[];
@@ -92,8 +91,6 @@ export function useWorkReportListInteractionController({
   currentFormId,
   activeLandingPageKey,
   activePlaceholderViewId,
-  activeFixedFilterPresetId,
-  activeUnfinishedMachineShortcut,
   globalFilters,
   globalFilterDraft,
   columnSortRules,
@@ -117,34 +114,6 @@ export function useWorkReportListInteractionController({
   logListEvent,
   t,
 }: UseWorkReportListInteractionControllerArgs) {
-  const activeFilterSummaryLabel = useMemo(() => {
-    if (activeUnfinishedMachineShortcut) {
-      return t("workReport:sidebar.machineOpenLabel", {
-        machineCode: activeUnfinishedMachineShortcut.machineCode,
-      });
-    }
-
-    if (activePlaceholderViewId === "starred") {
-      return t("workReport:sidebar.placeholders.starred.label");
-    }
-
-    if (activePlaceholderViewId === "last-updated") {
-      return t("workReport:sidebar.placeholders.lastUpdated.label");
-    }
-
-    switch (activeFixedFilterPresetId) {
-      case "unfinished-runnable":
-        return t("workReport:sidebar.presets.unfinishedRunnable.label");
-      case "unfinished-orders":
-        return t("workReport:sidebar.presets.unfinishedOrders.label");
-      case "finished-orders":
-        return t("workReport:sidebar.presets.finishedOrders.label");
-      case "all-data":
-      default:
-        return t("workReport:sidebar.presets.allData.label");
-    }
-  }, [activeFixedFilterPresetId, activePlaceholderViewId, activeUnfinishedMachineShortcut, t]);
-
   const applyFiltersAndResetView = useCallback(
     (nextFilters: GlobalFilters, options: { sortRules?: ColumnSortRule[] } = {}): void => {
       const normalizedFilters = cloneGlobalFilters(nextFilters);
@@ -223,10 +192,21 @@ export function useWorkReportListInteractionController({
   const applyImmediateFilterState = useCallback(
     (
       nextFilters: GlobalFilters,
-      options: { sortRules?: ColumnSortRule[]; clearPlaceholderView?: boolean } = {}
+      options: {
+        sortRules?: ColumnSortRule[];
+        clearPlaceholderView?: boolean;
+        draftPatch?: Partial<GlobalFilters>;
+        preserveDraft?: boolean;
+      } = {}
     ): void => {
       const normalized = cloneGlobalFilters(nextFilters);
-      setGlobalFilterDraft(normalized);
+      if (options.draftPatch || options.preserveDraft) {
+        setGlobalFilterDraft((previous) =>
+          cloneGlobalFilters({ ...previous, ...options.draftPatch })
+        );
+      } else {
+        setGlobalFilterDraft(normalized);
+      }
       setGlobalFilters(normalized);
       setPage(1);
       if (options.sortRules) {
@@ -247,11 +227,13 @@ export function useWorkReportListInteractionController({
     ]
   );
 
-  const applyQuickViewCommonReset = useCallback((): void => {
+  const applyQuickViewCommonReset = useCallback((preserveDraft = false): void => {
     setActivePlaceholderViewId(null);
     syncQuickViewQuery(null);
     const clearedGlobalFilters = cloneGlobalFilters(DEFAULT_GLOBAL_FILTERS);
-    setGlobalFilterDraft(clearedGlobalFilters);
+    if (!preserveDraft) {
+      setGlobalFilterDraft(clearedGlobalFilters);
+    }
     setGlobalFilters(clearedGlobalFilters);
     resetColumnFilters();
     setColumnSortRules([]);
@@ -351,7 +333,7 @@ export function useWorkReportListInteractionController({
         actionKey === "active-placeholder-last-updated" ||
         actionKey === "active-fixed-preset"
       ) {
-        applyQuickViewCommonReset();
+        applyQuickViewCommonReset(true);
         return;
       }
 
@@ -359,49 +341,70 @@ export function useWorkReportListInteractionController({
         case "filter-status":
           applyImmediateFilterState(
             { ...globalFilters, status: ALL_FILTER_VALUE },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { status: ALL_FILTER_VALUE } }
+          );
+          return;
+        case "filter-ragic-unfinished-status":
+          applyImmediateFilterState(
+            { ...globalFilters, ragicUnfinishedStatus: ALL_FILTER_VALUE },
+            {
+              clearPlaceholderView: true,
+              draftPatch: { ragicUnfinishedStatus: ALL_FILTER_VALUE },
+            }
           );
           return;
         case "filter-machine-code":
           applyImmediateFilterState(
             { ...globalFilters, filterMachineCode: ALL_FILTER_VALUE },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { filterMachineCode: ALL_FILTER_VALUE } }
           );
           return;
         case "filter-main-machine-code":
           applyImmediateFilterState(
             { ...globalFilters, machineCode: ALL_FILTER_VALUE },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { machineCode: ALL_FILTER_VALUE } }
           );
           return;
         case "filter-site-running":
           applyImmediateFilterState(
             { ...globalFilters, siteRunning: "all" },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { siteRunning: "all" } }
           );
           return;
         case "filter-start-schedule":
           applyImmediateFilterState(
             { ...globalFilters, startSchedule: "all" },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { startSchedule: "all" } }
           );
           return;
         case "filter-work-order-keyword":
           applyImmediateFilterState(
             { ...globalFilters, workOrderKeyword: "" },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { workOrderKeyword: "" } }
           );
           return;
         case "filter-customer-part-keyword":
           applyImmediateFilterState(
             { ...globalFilters, customerPartKeyword: "" },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { customerPartKeyword: "" } }
           );
           return;
         case "filter-global-keyword":
           applyImmediateFilterState(
             { ...globalFilters, globalKeyword: "" },
-            { clearPlaceholderView: true }
+            { clearPlaceholderView: true, draftPatch: { globalKeyword: "" } }
+          );
+          return;
+        case "filter-updated-date-from":
+          applyImmediateFilterState(
+            { ...globalFilters, updatedDateFrom: "" },
+            { clearPlaceholderView: true, draftPatch: { updatedDateFrom: "" } }
+          );
+          return;
+        case "filter-updated-date-to":
+          applyImmediateFilterState(
+            { ...globalFilters, updatedDateTo: "" },
+            { clearPlaceholderView: true, draftPatch: { updatedDateTo: "" } }
           );
           return;
         default:
@@ -425,6 +428,7 @@ export function useWorkReportListInteractionController({
         applyImmediateFilterState(globalFilters, {
           sortRules: nextSortRules,
           clearPlaceholderView: true,
+          preserveDraft: true,
         });
       }
     },
@@ -443,51 +447,41 @@ export function useWorkReportListInteractionController({
   const activeFilterChips = useMemo<ActiveFilterChip[]>(() => {
     const chips: ActiveFilterChip[] = [];
 
-    if (activeUnfinishedMachineShortcut) {
-      chips.push({
-        key: "active-machine-shortcut",
-        label: `快捷｜${t("workReport:sidebar.machineOpenLabel", {
-          machineCode: activeUnfinishedMachineShortcut.machineCode,
-        })}`,
-        removable: true,
-        removeActionKey: "active-machine-shortcut",
-      });
-    } else if (activePlaceholderViewId === "starred") {
+    if (activePlaceholderViewId === "starred") {
       chips.push({
         key: "active-placeholder-starred",
-        label: `快捷｜${t("workReport:sidebar.placeholders.starred.label")}`,
+        label: `${t("workReport:filters.updatedDateRange")}｜${t(
+          "workReport:sidebar.placeholders.starred.shortLabel"
+        )}`,
         removable: true,
         removeActionKey: "active-placeholder-starred",
-      });
-    } else if (activePlaceholderViewId === "last-updated") {
-      chips.push({
-        key: "active-placeholder-last-updated",
-        label: `快捷｜${t("workReport:sidebar.placeholders.lastUpdated.label")}`,
-        removable: true,
-        removeActionKey: "active-placeholder-last-updated",
-      });
-    } else if (activeFixedFilterPresetId) {
-      chips.push({
-        key: "active-fixed-preset",
-        label: `固定｜${activeFilterSummaryLabel || t("workReport:sidebar.presets.allData.label")}`,
-        removable: true,
-        removeActionKey: "active-fixed-preset",
       });
     }
 
     if (globalFilters.status !== ALL_FILTER_VALUE) {
       chips.push({
         key: "filter-status",
-        label: `工令狀態｜${translateStatusDisplay(globalFilters.status)}`,
+        label: `${t("workReport:filters.workOrderStatus")}｜${translateStatusDisplay(
+          globalFilters.status
+        )}`,
         removable: true,
         removeActionKey: "filter-status",
+      });
+    }
+
+    if (globalFilters.ragicUnfinishedStatus !== ALL_FILTER_VALUE) {
+      chips.push({
+        key: "filter-ragic-unfinished-status",
+        label: `${t("workReport:filters.unfinishedJudgment")}｜${globalFilters.ragicUnfinishedStatus}`,
+        removable: true,
+        removeActionKey: "filter-ragic-unfinished-status",
       });
     }
 
     if (globalFilters.filterMachineCode !== ALL_FILTER_VALUE) {
       chips.push({
         key: "filter-machine-code",
-        label: `機台｜${globalFilters.filterMachineCode}`,
+        label: `${t("workReport:filters.machine")}｜${globalFilters.filterMachineCode}`,
         removable: true,
         removeActionKey: "filter-machine-code",
       });
@@ -496,7 +490,7 @@ export function useWorkReportListInteractionController({
     if (globalFilters.machineCode !== ALL_FILTER_VALUE) {
       chips.push({
         key: "filter-main-machine-code",
-        label: `主機台｜${globalFilters.machineCode}`,
+        label: `${t("workReport:filters.machine")}｜${globalFilters.machineCode}`,
         removable: true,
         removeActionKey: "filter-main-machine-code",
       });
@@ -505,7 +499,9 @@ export function useWorkReportListInteractionController({
     if (globalFilters.siteRunning !== "all") {
       chips.push({
         key: "filter-site-running",
-        label: `本站｜${globalFilters.siteRunning === "yes" ? t("common:yesNo.yes") : t("common:yesNo.no")}`,
+        label: `${t("workReport:filters.siteRunning")}｜${
+          globalFilters.siteRunning === "yes" ? t("common:yesNo.yes") : t("common:yesNo.no")
+        }`,
         removable: true,
         removeActionKey: "filter-site-running",
       });
@@ -514,7 +510,9 @@ export function useWorkReportListInteractionController({
     if (globalFilters.startSchedule !== "all") {
       chips.push({
         key: "filter-start-schedule",
-        label: `開始排程｜${globalFilters.startSchedule === "yes" ? t("common:yesNo.yes") : t("common:yesNo.no")}`,
+        label: `${t("workReport:filters.startSchedule")}｜${
+          globalFilters.startSchedule === "yes" ? t("common:yesNo.yes") : t("common:yesNo.no")
+        }`,
         removable: true,
         removeActionKey: "filter-start-schedule",
       });
@@ -523,7 +521,7 @@ export function useWorkReportListInteractionController({
     if (globalFilters.workOrderKeyword.trim()) {
       chips.push({
         key: "filter-work-order-keyword",
-        label: `工令單號｜${globalFilters.workOrderKeyword.trim()}`,
+        label: `${t("workReport:filters.workOrderNo")}｜${globalFilters.workOrderKeyword.trim()}`,
         removable: true,
         removeActionKey: "filter-work-order-keyword",
       });
@@ -532,7 +530,7 @@ export function useWorkReportListInteractionController({
     if (globalFilters.customerPartKeyword.trim()) {
       chips.push({
         key: "filter-customer-part-keyword",
-        label: `客戶料號｜${globalFilters.customerPartKeyword.trim()}`,
+        label: `${t("workReport:filters.customerPartNo")}｜${globalFilters.customerPartKeyword.trim()}`,
         removable: true,
         removeActionKey: "filter-customer-part-keyword",
       });
@@ -541,43 +539,33 @@ export function useWorkReportListInteractionController({
     if (globalFilters.globalKeyword.trim()) {
       chips.push({
         key: "filter-global-keyword",
-        label: `全域搜尋｜${globalFilters.globalKeyword.trim()}`,
+        label: `${t("workReport:filters.globalSearch")}｜${globalFilters.globalKeyword.trim()}`,
         removable: true,
         removeActionKey: "filter-global-keyword",
       });
     }
 
-    const sortKeyLabelMap: Record<string, string> = {
-      machineCode: "機台",
-      sortOrder: "排序",
-      lastUpdatedAt: "最後修改",
-      plannedStartDate: "指定開始日",
-    };
-    columnSortRules.forEach((rule, index) => {
+    if (globalFilters.updatedDateFrom) {
       chips.push({
-        key: `sort-${rule.key}-${index}`,
-        label: `排序｜${sortKeyLabelMap[rule.key] ?? rule.key} 第${index + 1}順位 ${
-          rule.direction === "asc" ? "↑" : "↓"
-        }`,
+        key: "filter-updated-date-from",
+        label: `${t("workReport:filters.updatedDateFrom")}｜${globalFilters.updatedDateFrom}`,
         removable: true,
-        removeActionKey: `sort:${index}`,
+        removeActionKey: "filter-updated-date-from",
       });
-    });
+    }
 
-    if (chips.length === 0) {
+    if (globalFilters.updatedDateTo) {
       chips.push({
-        key: "filter-all-data",
-        label: `固定｜${t("workReport:sidebar.presets.allData.label")}`,
+        key: "filter-updated-date-to",
+        label: `${t("workReport:filters.updatedDateTo")}｜${globalFilters.updatedDateTo}`,
+        removable: true,
+        removeActionKey: "filter-updated-date-to",
       });
     }
 
     return chips;
   }, [
-    activeFilterSummaryLabel,
-    activeFixedFilterPresetId,
     activePlaceholderViewId,
-    activeUnfinishedMachineShortcut,
-    columnSortRules,
     globalFilters,
     t,
     translateStatusDisplay,
@@ -585,6 +573,13 @@ export function useWorkReportListInteractionController({
 
   const handleApplyFilters = useCallback((): void => {
     const normalized = normalizeFilters(globalFilterDraft);
+    if (!isValidUpdatedDateRange(normalized)) {
+      setNotice({
+        type: "error",
+        message: t("workReport:filters.invalidUpdatedDateRange"),
+      });
+      return;
+    }
     setActivePlaceholderViewId(null);
     syncQuickViewQuery(null);
     setGlobalFilterDraft(normalized);
@@ -603,8 +598,10 @@ export function useWorkReportListInteractionController({
     setActivePlaceholderViewId,
     setGlobalFilterDraft,
     setGlobalFilters,
+    setNotice,
     setPage,
     syncQuickViewQuery,
+    t,
   ]);
 
   const handleClearFilters = useCallback((): void => {
