@@ -9,6 +9,15 @@
 
 set -euo pipefail
 
+BACKEND_NPM_SCRIPT="${1:-dev}"
+case "$BACKEND_NPM_SCRIPT" in
+  dev|demo) ;;
+  *)
+    echo "[ERROR] Unsupported backend mode: $BACKEND_NPM_SCRIPT (expected dev or demo)" >&2
+    exit 1
+    ;;
+esac
+
 # 切到 backend/ 目錄（script 在 專案根/scripts/ 下，往上一層是專案根，再進 backend）
 cd "$(dirname "$0")/../backend"
 
@@ -45,6 +54,6 @@ fi
 echo "[INFO] Backend dir: $(pwd)"
 echo "[INFO] PORT=$PORT"
 echo "[INFO] CORS_ORIGIN=$CORS_ORIGIN"
-echo "[INFO] Starting backend in DEV mode..."
+echo "[INFO] Starting backend with npm run $BACKEND_NPM_SCRIPT..."
 
-npm run dev
+npm run "$BACKEND_NPM_SCRIPT"

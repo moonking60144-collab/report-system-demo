@@ -4,7 +4,9 @@
   "scripts": {
     "dev:frontend": "bash ./scripts/run-frontend-local.sh",
     "dev:backend": "bash ./scripts/run-backend-local.sh",
-    "dev": "concurrently -k -n FRONTEND,BACKEND -c cyan,magenta \"npm run dev:frontend\" \"npm run dev:backend\""
+    "dev": "concurrently -k -n FRONTEND,BACKEND -c cyan,magenta \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "demo:backend": "bash ./scripts/run-backend-local.sh demo",
+    "demo": "concurrently -k -n FRONTEND,BACKEND -c cyan,magenta \"npm run dev:frontend\" \"npm run demo:backend\""
   },
   "devDependencies": {
     "concurrently": "^10.0.4"

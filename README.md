@@ -46,24 +46,22 @@ Definitions、欄位、公式與 AI context 都來自公開合成 fixture。Demo
 需要 Node 20+。
 
 ```bash
-# 後端
-cd backend
+# 專案根目錄；首次 clone 安裝一鍵啟動器
 npm install
-npm run demo
 
-# 另開 terminal
-cd frontend
-npm install
-npm run dev
+# 同時啟動 Backend 與 Frontend
+npm run demo
 ```
 
-打開 [http://localhost:5173](http://localhost:5173)，右上角會看到「DEMO MODE」徽章，列表已預載 80 筆假工令、約 400 筆報工列與合成停機紀錄。左上子系統選單可切換報工、Meeting 與 Developer Mode。
+`npm run demo` 會在同一個 terminal 啟動 Backend `3300` 與 Frontend `5174`；子專案缺少 `node_modules` 時會自動執行 `npm ci`，按一次 `Ctrl + C` 即可一起停止。
+
+打開 [http://localhost:5174](http://localhost:5174)，右上角會看到「DEMO MODE」徽章，列表已預載 80 筆假工令、約 400 筆報工列與合成停機紀錄。左上子系統選單可切換報工、Meeting 與 Developer Mode。
 
 > 啟動時 80 筆工令與 6 條 linked source 表（機台 / 操作員 / 工序）會 deterministic 生成。重啟服務會回到初始 fixture。
 
-開發者展示入口在 [http://localhost:5173/dev](http://localhost:5173/dev)。Demo 預設帳密為 `demo` / `demo`，可查看公開合成 Definitions、欄位檢索、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
+開發者展示入口在 [http://localhost:5174/dev](http://localhost:5174/dev)。Demo 預設帳密為 `demo` / `demo`，可查看公開合成 Definitions、欄位檢索、SQLite generation swap 資料流與 mock 上游替換點；此入口不連正式 `.nui` 或真實 Ragic 資料。
 
-Meeting 錄音入口在 [http://localhost:5173/meetings/audio-check](http://localhost:5173/meetings/audio-check)。Zero-config 模式保留錄音、chunk upload、processing job、library 與權限流程，但預設關閉 AI/STT provider，因此不需要第三方 API key。若要展示真實逐字稿，可依 [Meeting STT 說明](services/meeting-stt/README.md) 啟動隔離的 Python service，再於 backend env 啟用 provider。
+Meeting 錄音入口在 [http://localhost:5174/meetings/audio-check](http://localhost:5174/meetings/audio-check)。Zero-config 模式保留錄音、chunk upload、processing job、library 與權限流程，但預設關閉 AI/STT provider，因此不需要第三方 API key。若要展示真實逐字稿，可依 [Meeting STT 說明](services/meeting-stt/README.md) 啟動隔離的 Python service，再於 backend env 啟用 provider。
 
 本版已同步主系統近期資料流調整：報工與 Form 16 寫入在 accepted 後先以 optimistic overlay 更新畫面，再由背景 worker、registry 與 read-model projection 確認結果；新增 / 單筆刪除 / 批次新增 / 批次刪除都能在任務中心追蹤與重送。列表也加入精確篩選、欄位設定與 A4 PDF 排程下載，PDF 可調字級並以機台區隔連續排列。
 
@@ -281,7 +279,7 @@ GET    /api/health                             健康 + demoMode flag
 
 Demo 下可直接 curl 試：
 ```bash
-curl http://localhost:3000/api/forms/104/reports?limit=5
+curl http://localhost:3300/api/forms/104/reports?limit=5
 ```
 
 ---
