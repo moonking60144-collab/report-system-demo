@@ -231,6 +231,17 @@ test("stop 會 abort 目前 processor，等待 job 重新排隊後再關閉 repo
 test("heartbeat 確認 lease 已遺失時會中止舊 processor", async () => {
   let observedSignal: AbortSignal | undefined;
   let heartbeatCount = 0;
+  let notifyHeartbeat!: () => void;
+  const heartbeatObserved = new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("heartbeat 未在 1 秒內執行")),
+      1_000
+    );
+    notifyHeartbeat = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+  });
   const runtime = new MeetingWorkerRuntime({
     repository: {
       claimNext: async () => job,
@@ -238,6 +249,7 @@ test("heartbeat 確認 lease 已遺失時會中止舊 processor", async () => {
     processingService: {
       heartbeat: async () => {
         heartbeatCount += 1;
+        notifyHeartbeat();
         return false;
       },
       processClaimedJob: async (
@@ -257,7 +269,9 @@ test("heartbeat 確認 lease 已遺失時會中止舊 processor", async () => {
     heartbeatIntervalMs: 5,
   });
 
-  assert.equal(await runtime.runOnce(), true);
+  const running = runtime.runOnce();
+  await heartbeatObserved;
+  assert.equal(await running, true);
   assert.equal(heartbeatCount, 1);
   assert.equal(observedSignal?.aborted, true);
 });
