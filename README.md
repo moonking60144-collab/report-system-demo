@@ -2,7 +2,9 @@
 
 > 這是從實際內網產品架構整理出的公開技術展示版。它不是單頁 UI mock，而是保留正式資料流、背景任務、SQLite read model、即時事件與錯誤治理的可執行系統；所有上游資料、Definitions、會議內容與公司環境值都改成 deterministic 合成 fixture。
 
-![Demo screenshot](docs/demo-screenshot.png)
+![報工主畫面：精確篩選、任務中心、子系統切換與 Demo Mode 故障模擬](docs/demo-overview.jpg)
+
+_報工主畫面以 deterministic 合成工令運作；可從左上子系統選單切換 Meeting 與 Developer Mode，右下故障模擬則用來現場展示上游治理與回復流程。_
 
 技術棧：**React 19 + Vite 7 + AntD 6** 前端／**Express 4 + TypeScript 5.9 + Node 20 + SQLite** 後端／可選的 **FastAPI + faster-whisper** 本機 STT service。
 
@@ -16,6 +18,26 @@
 | Developer | 合成 Ragic Definitions、欄位檢索、provider-based Dev AI、snapshot source API |
 
 右下「故障模擬」panel 是 demo 專屬控制台，可即時注入 **上游失敗率 / 上游延遲 / 寫入時掉欄位** — 對應展示 circuit breaker / token bucket 排隊 / Form 16 write verifier 自動 rollback 三條防線。
+
+### 介面導覽
+
+#### 效率報表：可重現、可封存的輸出
+
+![效率統計：期間 CSV、機台運轉分析 XLSX 與歷史報表](docs/efficiency-reports.jpg)
+
+期間統計、機台分析與歷史版本共用同一個 archive service；下載不是 UI 臨時拼檔，而是產生可追溯的 metadata 與 immutable artifact。
+
+#### Meeting：不裝 AI key 也能展示完整工作流
+
+![Meeting 錄音檢查：瀏覽器錄音能力、會議記錄與錄音庫](docs/meeting-audio-check.jpg)
+
+Zero-config 模式仍保留錄音、chunk upload、durable processing job、錄音庫與權限流程；要展示真實逐字稿時，再 opt-in 啟動隔離的 STT provider。
+
+#### Developer：公開 Definitions 與 provider-based Dev AI
+
+![Developer Definitions：合成欄位公式、版本狀態與 Dev AI 情境面板](docs/dev-ai-definitions.jpg)
+
+Definitions、欄位、公式與 AI context 都來自公開合成 fixture。Demo 的 write action 固定為 dry-run，不會連到正式 Builder 或公司資料。
 
 ---
 
@@ -49,7 +71,9 @@ Meeting 錄音入口在 [http://localhost:5173/meetings/audio-check](http://loca
 
 ## 系統架構
 
-![系統架構圖](docs/architecture.png)
+![四子系統完整架構：React 體驗層、Express 應用層，以及各自獨立的資料與 provider 邊界](docs/architecture.png)
+
+四條水平資料流分別對齊報工、效率報表、Meeting 與 Dev AI；每個子系統維持自己的 storage / provider contract，共用的只有 API、SSE 與 runtime 防線。
 
 讀寫分離（CQRS）：報工寫入先經 Backend 處理業務邏輯，再同步回上游（唯一真實來源），同時投影到 SQLite 讀模型；前端熱查詢優先讀 SQLite active generation，缺 snapshot 或過舊時才 fallback 到上游。Demo mode 仍保留這條資料流，只把外部 SaaS 換成記憶體 mock fixture，不同步任何真實資料。
 
