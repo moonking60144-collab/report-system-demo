@@ -1,0 +1,18 @@
+[
+  {
+    "fieldId": "2001",
+    "fieldName": "Machine Code",
+    "kind": "D",
+    "position": "A2",
+    "sourceLine": 10,
+    "attrs": {}
+  },
+  {
+    "fieldId": "2002",
+    "fieldName": "Machine Name",
+    "kind": "D",
+    "position": "B2",
+    "sourceLine": 11,
+    "attrs": {}
+  }
+]

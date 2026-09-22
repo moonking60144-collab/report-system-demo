@@ -1,0 +1,71 @@
+.dev-ai-message-content {
+  min-width: 0;
+  font-size: 15px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.dev-ai-message-content > :not(:last-child) {
+  margin-bottom: 12px;
+}
+
+.dev-ai-message-content p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.ragic-defs-ai-bot__message .dev-ai-message-content p,
+.dev-ai-workspace__message .dev-ai-message-content p {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.dev-ai-message-content :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0;
+  font-size: 1em;
+  line-height: inherit;
+}
+
+.dev-ai-message-content :is(ul, ol) {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-left: 24px;
+}
+
+.dev-ai-message-content li + li {
+  margin-top: 4px;
+}
+
+.dev-ai-message-content a {
+  color: #79c0ff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dev-ai-message-content code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.9em;
+}
+
+.dev-ai-message-content :not(pre) > code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(139, 148, 158, 0.14);
+}
+
+.dev-ai-message-content pre {
+  max-width: 100%;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(139, 148, 158, 0.2);
+  border-radius: 8px;
+  background: rgba(3, 7, 18, 0.36);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.dev-ai-message-content blockquote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid rgba(139, 148, 158, 0.4);
+}

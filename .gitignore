@@ -1,0 +1,47 @@
+# 依賴
+node_modules/
+dist/
+build/
+
+# 環境變數
+.env
+.env.local
+.env.production
+.env.bak
+*.env.bak
+backend/.env.server
+
+# 日誌
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Probe / 反向工程實驗 script（本機 only，dead-end 紀錄已寫進 memory）
+backend/scripts/probe-*.ts
+
+# 其他
+coverage/
+test-results/
+.cache/
+.deploy/
+backend/.data/
+backend/.tmp-test-dist/
+docs/handoff-current-state.md
+.claude/
+.serena/
+.data/
+ragic-definitions/.snapshots/
+frontend/test-results/
+frontend/playwright-report/
+.playwright-mcp/
+project_context.md
+report-project-context.md
+.codex

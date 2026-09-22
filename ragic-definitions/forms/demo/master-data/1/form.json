@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "formPath": "demo/master-data/1",
+  "formName": "Demo Machines",
+  "nuiFile": "1_Demo_Machines.nui",
+  "sourceEncoding": "utf-8",
+  "sourceRelativePath": "demo/master-data/1_Demo_Machines.nui",
+  "counts": {
+    "fields": 2,
+    "formulas": 0,
+    "workflows": 0
+  }
+}

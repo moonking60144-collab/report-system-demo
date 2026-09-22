@@ -1,0 +1,5 @@
+@import "./features/work-report/styles/work-report-list.css";
+body:has(.work-report-viewport) .demo-fault-injection-trigger,
+body:has(.work-report-viewport) .demo-fault-injection-panel {
+  bottom: 4.25rem !important;
+}

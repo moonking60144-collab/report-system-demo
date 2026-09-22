@@ -1,0 +1,39 @@
+# Dependencies — re-installed inside the image
+**/node_modules
+
+# Build artifacts — produced fresh in builder stages
+**/dist
+frontend/dist
+backend/dist
+
+# Runtime / dev state — would shadow the /data volume mount on Fly
+**/.cache
+**/.data
+.tmp-*
+.tmp-test-dist
+
+# Local deployment bundles
+.deploy
+
+# VCS / editor / OS
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Logs / env / test scratch
+*.log
+.env
+.env.*
+!.env.demo
+coverage
+playwright-report
+test-results
+
+# Fly / Docker meta — never needed inside the image
+Dockerfile
+.dockerignore
+fly.toml
