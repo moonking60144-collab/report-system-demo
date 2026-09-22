@@ -1,0 +1,731 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { open, type Database } from "sqlite";
+import sqlite3 from "sqlite3";
+import { initializeReadModelSchema } from "../../src/storage/sqlite/readModelSchema";
+import { cleanupOldFormGenerationsBatchWithDb } from "../../src/storage/sqlite/workReportSqliteRepository";
+
+async function openMemoryDb(): Promise<Database> {
+  const db = await open({ filename: ":memory:", driver: sqlite3.Database });
+  await db.exec("PRAGMA foreign_keys=ON;");
+  return db;
+}
+
+test("initializeReadModelSchema 會把舊 work_report snapshot 遷移成 active generation", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE work_report_entries (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      work_order_no TEXT,
+      customer_part_no TEXT,
+      machine_code TEXT,
+      filter_machine_code TEXT,
+      status TEXT,
+      ragic_unfinished_status TEXT,
+      site_running INTEGER,
+      start_schedule INTEGER,
+      sort_order REAL,
+      planned_start_date TEXT,
+      last_updated_at TEXT,
+      search_text TEXT,
+      summary_json TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id)
+    );
+
+    CREATE TABLE work_report_rows (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      row_id TEXT NOT NULL,
+      date_value TEXT,
+      operator_id TEXT,
+      process_code TEXT,
+      machine_id TEXT,
+      payload_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id, row_id)
+    );
+
+    CREATE TABLE sync_state (
+      form_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      task_id TEXT,
+      started_at TEXT,
+      finished_at TEXT,
+      snapshot_at TEXT,
+      read_model_version INTEGER,
+      total_entries INTEGER NOT NULL DEFAULT 0,
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  await db.run(
+    `
+    INSERT INTO sync_state (
+      form_id,
+      status,
+      snapshot_at,
+      read_model_version,
+      total_entries,
+      total_rows,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    "902",
+    "success",
+    "2026-06-16T01:02:03.000Z",
+    5,
+    1,
+    1,
+    "2026-06-16T01:02:04.000Z"
+  );
+  await db.run(
+    `
+    INSERT INTO work_report_entries (
+      form_id,
+      entry_id,
+      summary_json,
+      detail_json,
+      synced_at
+    ) VALUES (?, ?, ?, ?, ?)
+    `,
+    "902",
+    "E-1",
+    JSON.stringify({ id: "E-1", reports: [] }),
+    JSON.stringify({ id: "E-1", reports: [{ rowId: "R-1" }] }),
+    "2026-06-16T01:02:03.000Z"
+  );
+  await db.run(
+    `
+    INSERT INTO work_report_rows (
+      form_id,
+      entry_id,
+      row_id,
+      payload_json,
+      synced_at
+    ) VALUES (?, ?, ?, ?, ?)
+    `,
+    "902",
+    "E-1",
+    "R-1",
+    JSON.stringify({ rowId: "R-1" }),
+    "2026-06-16T01:02:03.000Z"
+  );
+
+  await initializeReadModelSchema(db);
+
+  const entryColumns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(work_report_entries)"
+  );
+  assert.equal(entryColumns.some((column) => column.name === "generation_id"), true);
+  assert.equal(
+    entryColumns.some((column) => column.name === "sort_order_99_auto_visible"),
+    true
+  );
+
+  const row = await db.get<{ generation_id: string; detail_json: string }>(
+    `
+    SELECT generation_id, detail_json
+    FROM work_report_entries
+    WHERE form_id = ? AND entry_id = ?
+    `,
+    "902",
+    "E-1"
+  );
+  assert.equal(row?.generation_id, "2026-06-16T01:02:03.000Z");
+  assert.match(row?.detail_json ?? "", /R-1/);
+
+  const rowSnapshot = await db.get<{ generation_id: string; payload_json: string }>(
+    `
+    SELECT generation_id, payload_json
+    FROM work_report_rows
+    WHERE form_id = ? AND entry_id = ? AND row_id = ?
+    `,
+    "902",
+    "E-1",
+    "R-1"
+  );
+  assert.equal(rowSnapshot?.generation_id, "2026-06-16T01:02:03.000Z");
+
+  const state = await db.get<{ active_generation_id: string | null }>(
+    "SELECT active_generation_id FROM sync_state WHERE form_id = ?",
+    "902"
+  );
+  assert.equal(state?.active_generation_id, "2026-06-16T01:02:03.000Z");
+
+  await db.close();
+});
+
+test("initializeReadModelSchema 會補齊既有 generation work_report_entries 的 status 欄位", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE work_report_entries (
+      form_id TEXT NOT NULL,
+      generation_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      work_order_no TEXT,
+      customer_part_no TEXT,
+      machine_code TEXT,
+      filter_machine_code TEXT,
+      ragic_unfinished_status TEXT,
+      site_running INTEGER,
+      start_schedule INTEGER,
+      sort_order REAL,
+      planned_start_date TEXT,
+      last_updated_at TEXT,
+      search_text TEXT,
+      summary_json TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, generation_id, entry_id)
+    );
+
+    CREATE TABLE work_report_rows (
+      form_id TEXT NOT NULL,
+      generation_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      row_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, generation_id, entry_id, row_id)
+    );
+
+    CREATE TABLE sync_state (
+      form_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      snapshot_at TEXT,
+      active_generation_id TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  await initializeReadModelSchema(db);
+
+  const entryColumns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(work_report_entries)"
+  );
+  assert.equal(entryColumns.some((column) => column.name === "status"), true);
+  assert.equal(
+    entryColumns.some((column) => column.name === "sort_order_99_auto_visible"),
+    true
+  );
+
+  const indexes = await db.all<Array<{ name: string }>>("PRAGMA index_list(work_report_entries)");
+  assert.equal(indexes.some((index) => index.name === "idx_work_report_entries_form_status"), true);
+
+  await db.close();
+});
+
+test("initializeReadModelSchema 遷移舊 snapshot 前會先補 status 欄位", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE work_report_entries (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      work_order_no TEXT,
+      customer_part_no TEXT,
+      machine_code TEXT,
+      filter_machine_code TEXT,
+      ragic_unfinished_status TEXT,
+      site_running INTEGER,
+      start_schedule INTEGER,
+      sort_order REAL,
+      planned_start_date TEXT,
+      last_updated_at TEXT,
+      search_text TEXT,
+      summary_json TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id)
+    );
+
+    CREATE TABLE work_report_rows (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      row_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id, row_id)
+    );
+
+    CREATE TABLE sync_state (
+      form_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      snapshot_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  await db.run(
+    `
+    INSERT INTO sync_state (
+      form_id,
+      status,
+      snapshot_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?)
+    `,
+    "902",
+    "success",
+    "2026-06-16T01:02:03.000Z",
+    "2026-06-16T01:02:04.000Z"
+  );
+  await db.run(
+    `
+    INSERT INTO work_report_entries (
+      form_id,
+      entry_id,
+      summary_json,
+      detail_json,
+      synced_at
+    ) VALUES (?, ?, ?, ?, ?)
+    `,
+    "902",
+    "E-legacy-no-status",
+    JSON.stringify({ id: "E-legacy-no-status", reports: [] }),
+    JSON.stringify({ id: "E-legacy-no-status", reports: [] }),
+    "2026-06-16T01:02:03.000Z"
+  );
+
+  await initializeReadModelSchema(db);
+
+  const entryColumns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(work_report_entries)"
+  );
+  assert.equal(entryColumns.some((column) => column.name === "generation_id"), true);
+  assert.equal(entryColumns.some((column) => column.name === "status"), true);
+
+  const row = await db.get<{ generation_id: string; status: string | null }>(
+    `
+    SELECT generation_id, status
+    FROM work_report_entries
+    WHERE form_id = ? AND entry_id = ?
+    `,
+    "902",
+    "E-legacy-no-status"
+  );
+  assert.equal(row?.generation_id, "2026-06-16T01:02:03.000Z");
+  assert.equal(row?.status, null);
+
+  await db.close();
+});
+
+test("cleanupOldFormGenerations 會保留目前與上一代 generation", async () => {
+  const db = await openMemoryDb();
+  await initializeReadModelSchema(db);
+
+  const generations = [
+    "2026-06-16T01:00:00.000Z",
+    "2026-06-16T02:00:00.000Z",
+    "2026-06-16T03:00:00.000Z",
+  ];
+  for (const [index, generationId] of generations.entries()) {
+    const entryId = `E-${index + 1}`;
+    await db.run(
+      `
+      INSERT INTO work_report_entries (
+        form_id,
+        generation_id,
+        entry_id,
+        summary_json,
+        detail_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      entryId,
+      JSON.stringify({ id: entryId, reports: [] }),
+      JSON.stringify({ id: entryId, reports: [{ rowId: `R-${index + 1}` }] }),
+      generationId
+    );
+    await db.run(
+      `
+      INSERT INTO work_report_rows (
+        form_id,
+        generation_id,
+        entry_id,
+        row_id,
+        payload_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      entryId,
+      `R-${index + 1}`,
+      JSON.stringify({ rowId: `R-${index + 1}` }),
+      generationId
+    );
+  }
+
+  const deletedEntries = await cleanupOldFormGenerationsBatchWithDb(
+    db,
+    "902",
+    generations[2],
+    { batchSize: 10 }
+  );
+
+  assert.equal(deletedEntries, 1);
+  const remainingEntries = await db.all<Array<{ generation_id: string }>>(
+    `
+    SELECT generation_id
+    FROM work_report_entries
+    WHERE form_id = ?
+    ORDER BY generation_id ASC
+    `,
+    "902"
+  );
+  assert.deepEqual(
+    remainingEntries.map((row) => row.generation_id),
+    [generations[1], generations[2]]
+  );
+  const deletedRowCount = await db.get<{ count: number }>(
+    `
+    SELECT COUNT(*) AS count
+    FROM work_report_rows
+    WHERE form_id = ? AND generation_id = ?
+    `,
+    "902",
+    generations[0]
+  );
+  assert.equal(Number(deletedRowCount?.count ?? 0), 0);
+
+  await db.close();
+});
+
+test("cleanupOldFormGenerations 不會清掉 active 之後的 in-flight generation", async () => {
+  const db = await openMemoryDb();
+  await initializeReadModelSchema(db);
+
+  const generations = [
+    "2026-06-16T00:00:00.000Z",
+    "2026-06-16T01:00:00.000Z",
+    "2026-06-16T02:00:00.000Z",
+    "2026-06-16T03:00:00.000Z",
+  ];
+  for (const [index, generationId] of generations.entries()) {
+    const entryId = `E-${index + 1}`;
+    await db.run(
+      `
+      INSERT INTO work_report_entries (
+        form_id,
+        generation_id,
+        entry_id,
+        summary_json,
+        detail_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      entryId,
+      JSON.stringify({ id: entryId, reports: [] }),
+      JSON.stringify({ id: entryId, reports: [{ rowId: `R-${index + 1}` }] }),
+      generationId
+    );
+    await db.run(
+      `
+      INSERT INTO work_report_rows (
+        form_id,
+        generation_id,
+        entry_id,
+        row_id,
+        payload_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      entryId,
+      `R-${index + 1}`,
+      JSON.stringify({ rowId: `R-${index + 1}` }),
+      generationId
+    );
+  }
+
+  const deletedEntries = await cleanupOldFormGenerationsBatchWithDb(
+    db,
+    "902",
+    generations[2],
+    { batchSize: 10, keepRecentGenerations: 2 }
+  );
+
+  assert.equal(deletedEntries, 1);
+  const remainingEntries = await db.all<Array<{ generation_id: string }>>(
+    `
+    SELECT generation_id
+    FROM work_report_entries
+    WHERE form_id = ?
+    ORDER BY generation_id ASC
+    `,
+    "902"
+  );
+  assert.deepEqual(
+    remainingEntries.map((row) => row.generation_id),
+    [generations[1], generations[2], generations[3]]
+  );
+  const futureRows = await db.get<{ count: number }>(
+    `
+    SELECT COUNT(*) AS count
+    FROM work_report_rows
+    WHERE form_id = ? AND generation_id = ?
+    `,
+    "902",
+    generations[3]
+  );
+  assert.equal(Number(futureRows?.count ?? 0), 1);
+
+  await db.close();
+});
+
+test("initializeReadModelSchema 會先補 batch_create_row_keys status 再建立索引", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE batch_create_row_keys (
+      client_row_key TEXT PRIMARY KEY,
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      ragic_row_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  await db.run(
+    `
+    INSERT INTO batch_create_row_keys (
+      client_row_key,
+      form_id,
+      entry_id,
+      ragic_row_id,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?)
+    `,
+    "legacy-key",
+    "901",
+    "E-1",
+    "R-1",
+    "2026-06-16T01:02:03.000Z"
+  );
+
+  await initializeReadModelSchema(db);
+
+  const columns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(batch_create_row_keys)"
+  );
+  assert.equal(columns.some((column) => column.name === "status"), true);
+  assert.equal(columns.some((column) => column.name === "error_message"), true);
+  assert.equal(columns.some((column) => column.name === "updated_at"), true);
+
+  const row = await db.get<{ status: string; updated_at: string }>(
+    `
+    SELECT status, updated_at
+    FROM batch_create_row_keys
+    WHERE client_row_key = ?
+    `,
+    "legacy-key"
+  );
+  assert.equal(row?.status, "confirmed");
+  assert.equal(row?.updated_at, "2026-06-16T01:02:03.000Z");
+
+  const indexes = await db.all<Array<{ name: string }>>(
+    "PRAGMA index_list(batch_create_row_keys)"
+  );
+  assert.equal(indexes.some((index) => index.name === "idx_batch_create_row_keys_status"), true);
+
+  await db.close();
+});
+
+test("initializeReadModelSchema 會先補 activityLog_client_row_keys status 再建立索引", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE activityLog_client_row_keys (
+      client_row_key TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  await db.run(
+    `
+    INSERT INTO activityLog_client_row_keys (
+      client_row_key,
+      entry_id,
+      source,
+      created_at
+    ) VALUES (?, ?, ?, ?)
+    `,
+    "legacy-key",
+    "E-1",
+    "downtime",
+    "2026-06-16T01:02:03.000Z"
+  );
+
+  await initializeReadModelSchema(db);
+
+  const columns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(activityLog_client_row_keys)"
+  );
+  assert.equal(columns.some((column) => column.name === "status"), true);
+  assert.equal(columns.some((column) => column.name === "error_message"), true);
+  assert.equal(columns.some((column) => column.name === "updated_at"), true);
+
+  const row = await db.get<{ status: string; updated_at: string }>(
+    `
+    SELECT status, updated_at
+    FROM activityLog_client_row_keys
+    WHERE client_row_key = ?
+    `,
+    "legacy-key"
+  );
+  assert.equal(row?.status, "confirmed");
+  assert.equal(row?.updated_at, "2026-06-16T01:02:03.000Z");
+
+  const indexes = await db.all<Array<{ name: string }>>(
+    "PRAGMA index_list(activityLog_client_row_keys)"
+  );
+  assert.equal(
+    indexes.some((index) => index.name === "idx_activityLog_client_row_keys_status"),
+    true
+  );
+
+  await db.close();
+});
+
+test("cleanupOldFormGenerations 即使 foreign key cascade 未啟用也會清掉 rows", async () => {
+  const db = await openMemoryDb();
+  await initializeReadModelSchema(db);
+
+  const oldGeneration = "2026-06-16T01:00:00.000Z";
+  const currentGeneration = "2026-06-16T02:00:00.000Z";
+  for (const generationId of [oldGeneration, currentGeneration]) {
+    await db.run(
+      `
+      INSERT INTO work_report_entries (
+        form_id,
+        generation_id,
+        entry_id,
+        summary_json,
+        detail_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      `E-${generationId}`,
+      JSON.stringify({ id: `E-${generationId}`, reports: [] }),
+      JSON.stringify({ id: `E-${generationId}`, reports: [{ rowId: `R-${generationId}` }] }),
+      generationId
+    );
+    await db.run(
+      `
+      INSERT INTO work_report_rows (
+        form_id,
+        generation_id,
+        entry_id,
+        row_id,
+        payload_json,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      `,
+      "902",
+      generationId,
+      `E-${generationId}`,
+      `R-${generationId}`,
+      JSON.stringify({ rowId: `R-${generationId}` }),
+      generationId
+    );
+  }
+
+  await db.exec("PRAGMA foreign_keys=OFF;");
+  const deletedEntries = await cleanupOldFormGenerationsBatchWithDb(
+    db,
+    "902",
+    currentGeneration,
+    { batchSize: 10, keepRecentGenerations: 1 }
+  );
+
+  assert.equal(deletedEntries, 1);
+  const oldRows = await db.get<{ count: number }>(
+    `
+    SELECT COUNT(*) AS count
+    FROM work_report_rows
+    WHERE form_id = ? AND generation_id = ?
+    `,
+    "902",
+    oldGeneration
+  );
+  assert.equal(Number(oldRows?.count ?? 0), 0);
+
+  await db.close();
+});
+
+test("generation migration 失敗時會 rollback，不留下 renamed legacy table", async () => {
+  const db = await openMemoryDb();
+  await db.exec(`
+    CREATE TABLE work_report_entries (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id)
+    );
+
+    CREATE TABLE work_report_rows (
+      form_id TEXT NOT NULL,
+      entry_id TEXT NOT NULL,
+      row_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (form_id, entry_id, row_id)
+    );
+
+    CREATE TABLE sync_state (
+      form_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      snapshot_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE work_report_rows_legacy_generation_migration (
+      id TEXT PRIMARY KEY
+    );
+  `);
+  await db.run(
+    `
+    INSERT INTO work_report_entries (
+      form_id,
+      entry_id,
+      summary_json,
+      detail_json,
+      synced_at
+    ) VALUES (?, ?, ?, ?, ?)
+    `,
+    "902",
+    "E-rollback",
+    JSON.stringify({ id: "E-rollback", reports: [] }),
+    JSON.stringify({ id: "E-rollback", reports: [] }),
+    "2026-06-16T01:02:03.000Z"
+  );
+
+  await assert.rejects(() => initializeReadModelSchema(db));
+
+  const entryColumns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(work_report_entries)"
+  );
+  assert.equal(entryColumns.some((column) => column.name === "generation_id"), false);
+  const rowColumns = await db.all<Array<{ name: string }>>(
+    "PRAGMA table_info(work_report_rows)"
+  );
+  assert.equal(rowColumns.some((column) => column.name === "generation_id"), false);
+
+  const entry = await db.get<{ entry_id: string }>(
+    "SELECT entry_id FROM work_report_entries WHERE form_id = ?",
+    "902"
+  );
+  assert.equal(entry?.entry_id, "E-rollback");
+
+  await db.close();
+});

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "namespaceFilter": {
+    "mode": "include",
+    "namespaces": ["demo"]
+  },
+  "counts": {
+    "forms": 2,
+    "fields": 7,
+    "formulas": 1,
+    "workflows": 1
+  }
+}

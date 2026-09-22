@@ -1,0 +1,11 @@
+[
+  {
+    "fieldId": "1005",
+    "fieldName": "Remaining Quantity",
+    "position": "E2",
+    "formulaKind": "formula",
+    "nuiFormula": "MAX(0`A2-B2)",
+    "displayFormula": "MAX(0,A2-B2)",
+    "sourceLine": 30
+  }
+]

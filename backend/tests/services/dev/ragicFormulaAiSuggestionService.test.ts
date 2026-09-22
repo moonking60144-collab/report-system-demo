@@ -1,0 +1,438 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { HttpError } from "../../../src/utils/httpError";
+import {
+  createGoogleGeminiClient,
+} from "../../../src/services/dev/ai/googleGeminiClient";
+import type { DevAiJsonProvider } from "../../../src/services/dev/ai/devAiJsonProvider";
+import {
+  createRagicFormulaAiSuggestionService,
+  type RagicFormulaAiRuntimeConfig,
+} from "../../../src/services/dev/ai/ragicFormulaAiSuggestionService";
+import type { RagicFormulaAiContextBuilder } from "../../../src/services/dev/ai/ragicFormulaAiContextBuilder";
+import type { RagicFormulaPatchDryRunService } from "../../../src/services/dev/ragicFormulaPatchDryRunService";
+import type { RagicFormulaPatchDryRunResult } from "@shared-types/ragicDefinitions";
+
+const enabledConfig: RagicFormulaAiRuntimeConfig = {
+  enabled: true,
+  provider: "google",
+  model: "gemini-test",
+  effort: "minimal",
+  maxOutputTokens: 512,
+  maxConcurrentRequests: 2,
+  suggestRateLimitPerMinute: 6,
+  storeInteractions: false,
+  storeRawOutput: false,
+};
+
+function dryRunResult(newFormula: string): RagicFormulaPatchDryRunResult {
+  return {
+    allowed: true,
+    mode: "dry-run",
+    formPath: "default/devtest/51",
+    formName: "luo test",
+    fieldId: "9001108",
+    fieldName: "測試",
+    position: "G6",
+    formulaKind: "formula",
+    sourceRelativePath: "default/devtest/51_Sheet51_index.nui",
+    builderFilePath: "/tmp/51.nui",
+    sourceLine: 24,
+    oldFormula: "F6*D6+123456",
+    newFormula,
+    oldLinePreview: "D,7,6,9001108,測試,text=1&f=F6*D6+123456",
+    newLinePreview: `D,7,6,9001108,測試,text=1&f=${newFormula}`,
+    gitClean: true,
+    warnings: [],
+    blockers: [],
+  };
+}
+
+function contextBuilder(): RagicFormulaAiContextBuilder {
+  return {
+    async buildContext() {
+      return {
+        promptContext: "{\"targetField\":{\"fieldId\":\"9001108\",\"position\":\"G6\"}}",
+        preview: { fields: 2, formulas: 1, siblings: 0, similarItems: 0, chars: 60 },
+        fieldsById: new Map([
+          ["9001108", {
+            fieldId: "9001108",
+            fieldName: "測試",
+            kind: "D",
+            position: "G6",
+            sourceLine: 24,
+            attrs: {},
+          }],
+          ["9001105", {
+            fieldId: "9001105",
+            fieldName: "編號",
+            kind: "D",
+            position: "D6",
+            sourceLine: 13,
+            attrs: {},
+          }],
+        ]),
+        positions: new Set(["G6", "F6", "D6"]),
+        targetPosition: "G6",
+        targetSourceLine: 24,
+      };
+    },
+  };
+}
+
+function dryRunService(calls: unknown[] = []): RagicFormulaPatchDryRunService {
+  return {
+    async dryRunFormulaPatch(input) {
+      calls.push(input);
+      return dryRunResult(input.newFormula);
+    },
+  };
+}
+
+test("AI disabled 時不呼叫 Google", async () => {
+  let googleCalled = false;
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
+    model: "gemini-test",
+    async generateJsonText() {
+      googleCalled = true;
+      return "{}";
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: { ...enabledConfig, enabled: false },
+    providerClient: googleClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(),
+  });
+
+  await assert.rejects(
+    () =>
+      service.suggestFormula({
+        formPath: "default/devtest/51",
+        fieldId: "9001108",
+        formulaKind: "formula",
+        objective: "產生測試公式",
+      }),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_DISABLED"
+  );
+  assert.equal(googleCalled, false);
+});
+
+test("AI suggestion 解析 Google JSON 並呼叫 dry-run，不碰 apply", async () => {
+  const dryRunCalls: unknown[] = [];
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
+    model: "gemini-test",
+    async generateJsonText(request) {
+      assert.match(request.prompt, /產生測試公式/);
+      assert.match(request.prompt, /不要把「欄位不存在」誤寫成 ISBLANK/);
+      assert.equal(request.schema.type, "object");
+      assert.equal(request.model, "gemini-test");
+      assert.equal(request.effort, "minimal");
+      assert.equal(request.maxOutputTokens, 512);
+      assert.equal(request.storeInteraction, false);
+      return JSON.stringify({
+        proposedFormula: "F6*D6+1",
+        explanation: "依照現有欄位加總。",
+        assumptions: ["F6 與 D6 已存在"],
+        referencedFields: [
+          { fieldId: "9001105", position: "D6", name: "編號", reason: "測試引用" },
+        ],
+        risks: [],
+        confidence: "high",
+      });
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: enabledConfig,
+    providerClient: googleClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(dryRunCalls),
+    suggestionIdFactory: () => "suggestion-1",
+  });
+
+  const result = await service.suggestFormula({
+    formPath: "default/devtest/51",
+    fieldId: "9001108",
+    formulaKind: "formula",
+    objective: "產生測試公式",
+  });
+
+  assert.equal(result.suggestionId, "suggestion-1");
+  assert.equal(result.provider, "google");
+  assert.equal(result.position, "G6");
+  assert.equal(result.sourceLine, 24);
+  assert.equal(result.proposedFormula, "F6*D6+1");
+  assert.equal(result.dryRun.allowed, true);
+  assert.equal(result.dryRun.blockers.length, 0);
+  assert.equal(result.confidence, "high");
+  assert.equal(dryRunCalls.length, 1);
+  assert.deepEqual(
+    dryRunCalls[0],
+    {
+      formPath: "default/devtest/51",
+      fieldId: "9001108",
+      position: "G6",
+      sourceLine: 24,
+      formulaKind: "formula",
+      newFormula: "F6*D6+1",
+    },
+    "FORMULA_AI_OCCURRENCE_CONTRACT"
+  );
+});
+
+test("provider malformed JSON 會回共用分類錯誤且不呼叫 dry-run", async () => {
+  const dryRunCalls: unknown[] = [];
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
+    model: "gemini-test",
+    async generateJsonText() {
+      return "not json";
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: enabledConfig,
+    providerClient: googleClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(dryRunCalls),
+  });
+
+  await assert.rejects(
+    () =>
+      service.suggestFormula({
+        formPath: "default/devtest/51",
+        fieldId: "9001108",
+        formulaKind: "formula",
+        objective: "產生測試公式",
+      }),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_MALFORMED_JSON"
+  );
+  assert.equal(dryRunCalls.length, 0);
+});
+
+test("provider 回傳錯誤型別時 fail-closed 且不呼叫 dry-run", async () => {
+  const dryRunCalls: unknown[] = [];
+  const service = createRagicFormulaAiSuggestionService({
+    config: enabledConfig,
+    providerClient: {
+      name: "minimax",
+      model: "MiniMax-M3",
+      async generateJsonText() {
+        return JSON.stringify({
+          proposedFormula: { formula: "F6*D6+1" },
+          explanation: "錯誤型別不應被轉成字串。",
+          assumptions: [],
+          referencedFields: [],
+          risks: [],
+          confidence: "high",
+        });
+      },
+    },
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(dryRunCalls),
+  });
+
+  await assert.rejects(
+    () =>
+      service.suggestFormula({
+        formPath: "default/devtest/51",
+        fieldId: "9001108",
+        formulaKind: "formula",
+        objective: "產生測試公式",
+      }),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_BAD_JSON"
+  );
+  assert.equal(dryRunCalls.length, 0);
+});
+
+test("MiniMax 公式建議沿用相同 dry-run 契約並回報實際 provider", async () => {
+  const providerClient: DevAiJsonProvider = {
+    name: "minimax",
+    model: "MiniMax-M3",
+    async generateJsonText(request) {
+      assert.equal(request.model, "MiniMax-M3");
+      assert.equal(request.effort, "high");
+      return JSON.stringify({
+        proposedFormula: "F6*D6+1",
+        explanation: "依照已知欄位產生公式。",
+        assumptions: [],
+        referencedFields: [
+          { fieldId: "9001105", position: "D6", name: "編號", reason: "公式來源" },
+        ],
+        risks: [],
+        confidence: "high",
+      });
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: {
+      ...enabledConfig,
+      provider: "minimax",
+      model: "MiniMax-M3",
+      effort: "high",
+    },
+    providerClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(),
+  });
+
+  const result = await service.suggestFormula({
+    formPath: "default/devtest/51",
+    fieldId: "9001108",
+    formulaKind: "formula",
+    objective: "產生測試公式",
+  });
+
+  assert.equal(result.provider, "minimax");
+  assert.equal(result.model, "MiniMax-M3");
+  assert.equal(result.dryRun.allowed, true);
+});
+
+test("AI output 引用不存在欄位或位置會加 blocker", async () => {
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
+    model: "gemini-test",
+    async generateJsonText() {
+      return JSON.stringify({
+        proposedFormula: "ZZ99+1",
+        explanation: "測試不存在位置。",
+        assumptions: [],
+        referencedFields: [
+          { fieldId: "9999999", position: "ZZ99", name: "不存在", reason: "測試" },
+        ],
+        risks: [],
+        confidence: "medium",
+      });
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: enabledConfig,
+    providerClient: googleClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: dryRunService(),
+  });
+
+  const result = await service.suggestFormula({
+    formPath: "default/devtest/51",
+    fieldId: "9001108",
+    formulaKind: "formula",
+    objective: "產生測試公式",
+  });
+
+  assert.equal(result.dryRun.allowed, false);
+  assert.equal(result.confidence, "low");
+  assert.match(result.dryRun.blockers.join("\n"), /AI 引用不存在欄位 ID/);
+  assert.match(result.dryRun.blockers.join("\n"), /AI 公式引用目前表單不存在的位置/);
+  assert.match(result.risks.join("\n"), /Dry-run 阻擋：AI 引用不存在欄位 ID/);
+});
+
+test("dry-run 阻擋會覆蓋 Google high confidence 並寫入風險", async () => {
+  const googleClient: DevAiJsonProvider = {
+    name: "google",
+    model: "gemini-test",
+    async generateJsonText() {
+      return JSON.stringify({
+        proposedFormula: "IF(ISBLANK(C6), \"\", F6*D6+06100655)",
+        explanation: "測試循環參照。",
+        assumptions: [],
+        referencedFields: [
+          { fieldId: "9001105", position: "D6", name: "編號", reason: "測試引用" },
+        ],
+        risks: [],
+        confidence: "high",
+      });
+    },
+  };
+  const dryRunCalls: unknown[] = [];
+  const blockingDryRunService: RagicFormulaPatchDryRunService = {
+    async dryRunFormulaPatch(input) {
+      dryRunCalls.push(input);
+      return {
+        ...dryRunResult(input.newFormula),
+        allowed: false,
+        blockers: ["公式會造成循環參照：G6 -> C6 -> G6"],
+      };
+    },
+  };
+  const service = createRagicFormulaAiSuggestionService({
+    config: enabledConfig,
+    providerClient: googleClient,
+    contextBuilder: contextBuilder(),
+    dryRunService: blockingDryRunService,
+  });
+
+  const result = await service.suggestFormula({
+    formPath: "default/devtest/51",
+    fieldId: "9001108",
+    formulaKind: "formula",
+    objective: "假如欄位不存在，不執行這個公式",
+  });
+
+  assert.equal(dryRunCalls.length, 1);
+  assert.equal(result.dryRun.allowed, false);
+  assert.equal(result.confidence, "low");
+  assert.match(result.risks.join("\n"), /Dry-run 阻擋：公式會造成循環參照/);
+});
+
+test("Google client 將 401 與 429 分類成中文錯誤", async () => {
+  for (const [status, code] of [
+    [401, "DEV_AI_GOOGLE_AUTH_FAILED"],
+    [429, "DEV_AI_GOOGLE_RATE_LIMITED"],
+  ] as const) {
+    const client = createGoogleGeminiClient(
+      { apiKey: "key", model: "gemini-test", timeoutMs: 1000 },
+      (async () => new Response("{}", { status })) as typeof fetch
+    );
+    await assert.rejects(
+      () => client.generateJsonText({ prompt: "x", schema: { type: "object" } }),
+      (error) => error instanceof HttpError && error.code === code
+    );
+  }
+});
+
+test("Google client request 帶 speed 相關 generation config", async () => {
+  let capturedBody: Record<string, unknown> | null = null;
+  const client = createGoogleGeminiClient(
+    { apiKey: "key", model: "gemini-default", timeoutMs: 1000, thinkingLevel: "minimal", storeInteractions: false },
+    (async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify({ output_text: "{\"ok\":true}" }), { status: 200 });
+    }) as typeof fetch
+  );
+
+  await client.generateJsonText({
+    prompt: "x",
+    schema: { type: "object" },
+    model: "gemini-fast",
+    effort: "low",
+    maxOutputTokens: 321,
+    storeInteraction: true,
+  });
+
+  assert.ok(capturedBody);
+  const body = capturedBody as Record<string, unknown>;
+  assert.equal(body.model, "gemini-fast");
+  assert.equal(body.store, true);
+  assert.deepEqual(body.generation_config, {
+    thinking_level: "low",
+    max_output_tokens: 321,
+  });
+});
+
+test("Google client timeout 會回 DEV_AI_GOOGLE_TIMEOUT", async () => {
+  const client = createGoogleGeminiClient(
+    { apiKey: "key", model: "gemini-test", timeoutMs: 5 },
+    (async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      })) as typeof fetch
+  );
+
+  await assert.rejects(
+    () => client.generateJsonText({ prompt: "x", schema: { type: "object" } }),
+    (error) => error instanceof HttpError && error.code === "DEV_AI_GOOGLE_TIMEOUT"
+  );
+});

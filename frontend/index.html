@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-report.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>製造現場報工 Demo</title>
+    <style>
+      html,
+      body,
+      #root {
+        min-height: 100%;
+        margin: 0;
+        background: #f1f5f9;
+      }
+      #app-boot {
+        min-height: 100svh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #f1f5f9;
+        color: #475569;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .app-boot__content {
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .app-boot__spinner {
+        width: 36px;
+        height: 36px;
+        border: 3px solid #dbeafe;
+        border-top-color: #2563eb;
+        border-radius: 50%;
+        animation: app-boot-rotate 720ms linear infinite;
+      }
+      @keyframes app-boot-rotate {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .app-boot__spinner {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="app-boot" role="status" aria-live="polite" aria-busy="true">
+        <div class="app-boot__content">
+          <span class="app-boot__spinner" aria-hidden="true"></span>
+          <span>系統載入中...</span>
+        </div>
+      </div>
+    </div>
+    <noscript>此系統需要啟用 JavaScript 才能使用。</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

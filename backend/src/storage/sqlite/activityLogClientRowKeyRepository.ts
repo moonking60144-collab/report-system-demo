@@ -1,0 +1,297 @@
+import type { Database } from "sqlite";
+import { createConnectionSerializer, sqliteClient } from "./sqliteClient";
+
+/**
+ * activity log 寫入的 idempotency key 映射表。
+ *
+ * 用來擋使用者「按送出→網路 timeout→又按一次」的 retry 風暴造成 activity log 重複 entry。
+ * 每次 create activity log 前用 clientRowKey 先查：命中就回舊 entryId 不打 Ragic、未命中才真的寫。
+ */
+export interface ActivityLogClientRowKeyRecord {
+  clientRowKey: string;
+  entryId: string;
+  source: string;
+  operationFingerprint?: string;
+  reservationToken?: string;
+  status: ActivityLogClientRowKeyStatus;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ActivityLogClientRowKeyStatus = "pending" | "confirmed" | "indeterminate";
+
+export interface ActivityLogClientRowKeyReserveResult {
+  record: ActivityLogClientRowKeyRecord | null;
+  reserved: boolean;
+}
+
+interface RowShape {
+  client_row_key: string;
+  entry_id: string;
+  source: string;
+  operation_fingerprint: string | null;
+  reservation_token: string | null;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function normalizeStatus(status: string | null | undefined): ActivityLogClientRowKeyStatus {
+  if (status === "pending" || status === "indeterminate") return status;
+  return "confirmed";
+}
+
+function mapRow(row: RowShape): ActivityLogClientRowKeyRecord {
+  return {
+    clientRowKey: row.client_row_key,
+    entryId: row.entry_id,
+    source: row.source,
+    ...(row.operation_fingerprint
+      ? { operationFingerprint: row.operation_fingerprint }
+      : {}),
+    ...(row.reservation_token ? { reservationToken: row.reservation_token } : {}),
+    status: normalizeStatus(row.status),
+    ...(row.error_message ? { errorMessage: row.error_message } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export interface ActivityLogClientRowKeyRepository {
+  lookup(clientRowKey: string): Promise<ActivityLogClientRowKeyRecord | null>;
+  reservePending(input: {
+    clientRowKey: string;
+    source: string;
+    operationFingerprint?: string;
+    reservationToken?: string;
+    createdAt?: string;
+  }): Promise<ActivityLogClientRowKeyReserveResult>;
+  confirm(input: {
+    clientRowKey: string;
+    entryId: string;
+    source: string;
+    operationFingerprint?: string;
+    updatedAt?: string;
+  }): Promise<number>;
+  markIndeterminate(input: {
+    clientRowKey: string;
+    source: string;
+    errorMessage: string;
+    updatedAt?: string;
+  }): Promise<void>;
+  releasePending(input: {
+    clientRowKey: string;
+    source: string;
+  }): Promise<number>;
+  record(
+    input: Omit<
+      ActivityLogClientRowKeyRecord,
+      "createdAt" | "updatedAt" | "status" | "errorMessage"
+    > & { createdAt?: string }
+  ): Promise<void>;
+  deleteByEntryId(entryId: string): Promise<number>;
+  deleteByReservationIdentity(input: {
+    clientRowKey: string;
+    source: string;
+    reservationToken: string;
+    entryId: string;
+  }): Promise<number>;
+  cleanupOlderThan(thresholdIso: string): Promise<number>;
+}
+
+export function createActivityLogClientRowKeyRepository(
+  dbProvider: () => Promise<Database>
+): ActivityLogClientRowKeyRepository {
+  const { runSerializedWrite } = createConnectionSerializer(dbProvider);
+
+  return {
+    async lookup(clientRowKey: string) {
+      const trimmed = String(clientRowKey ?? "").trim();
+      if (!trimmed) return null;
+      const db = await dbProvider();
+      const row = await db.get<RowShape>(
+        `SELECT client_row_key, entry_id, source, operation_fingerprint, reservation_token, status, error_message, created_at, updated_at
+         FROM activityLog_client_row_keys
+         WHERE client_row_key = ?`,
+        trimmed
+      );
+      return row ? mapRow(row) : null;
+    },
+
+    async reservePending(input) {
+      const trimmed = String(input.clientRowKey ?? "").trim();
+      if (!trimmed) return { record: null, reserved: false };
+      const now = input.createdAt ?? new Date().toISOString();
+      let reserved = false;
+      await runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `INSERT INTO activityLog_client_row_keys
+             (client_row_key, entry_id, source, operation_fingerprint, reservation_token, status, error_message, created_at, updated_at)
+           VALUES (?, '', ?, ?, ?, 'pending', NULL, ?, ?)
+           ON CONFLICT(client_row_key) DO NOTHING`,
+          trimmed,
+          input.source,
+          input.operationFingerprint ?? null,
+          input.reservationToken ?? null,
+          now,
+          now
+        );
+        reserved = typeof result.changes === "number" && result.changes > 0;
+      });
+
+      const db = await dbProvider();
+      const row = await db.get<RowShape>(
+        `SELECT client_row_key, entry_id, source, operation_fingerprint, reservation_token, status, error_message, created_at, updated_at
+         FROM activityLog_client_row_keys
+         WHERE client_row_key = ?`,
+        trimmed
+      );
+      return { record: row ? mapRow(row) : null, reserved };
+    },
+
+    async confirm(input) {
+      const trimmed = String(input.clientRowKey ?? "").trim();
+      if (!trimmed) return 0;
+      const updatedAt = input.updatedAt ?? new Date().toISOString();
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `UPDATE activityLog_client_row_keys
+           SET entry_id = ?,
+               source = ?,
+               operation_fingerprint = ?,
+               status = 'confirmed',
+               error_message = NULL,
+               updated_at = ?
+           WHERE client_row_key = ?
+             AND source = ?
+             AND operation_fingerprint IS ?
+             AND status = 'pending'`,
+          input.entryId,
+          input.source,
+          input.operationFingerprint ?? null,
+          updatedAt,
+          trimmed,
+          input.source,
+          input.operationFingerprint ?? null
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
+    },
+
+    async markIndeterminate(input) {
+      const trimmed = String(input.clientRowKey ?? "").trim();
+      if (!trimmed) return;
+      const updatedAt = input.updatedAt ?? new Date().toISOString();
+      await runSerializedWrite(async (db) => {
+        await db.run(
+          `UPDATE activityLog_client_row_keys
+           SET status = 'indeterminate',
+               error_message = ?,
+               updated_at = ?
+           WHERE client_row_key = ?
+             AND source = ?
+             AND status = 'pending'`,
+          input.errorMessage,
+          updatedAt,
+          trimmed,
+          input.source
+        );
+      });
+    },
+
+    async releasePending(input) {
+      const trimmed = String(input.clientRowKey ?? "").trim();
+      if (!trimmed) return 0;
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `DELETE FROM activityLog_client_row_keys
+           WHERE client_row_key = ?
+             AND source = ?
+             AND status = 'pending'`,
+          trimmed,
+          input.source
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
+    },
+
+    async record(input) {
+      const trimmed = String(input.clientRowKey ?? "").trim();
+      if (!trimmed) return;
+      const createdAt = input.createdAt ?? new Date().toISOString();
+      await runSerializedWrite(async (db) => {
+        // ON CONFLICT 只補 pending/indeterminate；已 confirmed 的既有映射不可覆蓋。
+        await db.run(
+          `INSERT INTO activityLog_client_row_keys
+             (client_row_key, entry_id, source, operation_fingerprint, reservation_token, status, error_message, created_at, updated_at)
+           VALUES (?, ?, ?, ?, NULL, 'confirmed', NULL, ?, ?)
+           ON CONFLICT(client_row_key) DO UPDATE SET
+             entry_id = excluded.entry_id,
+             source = excluded.source,
+             operation_fingerprint = excluded.operation_fingerprint,
+             status = 'confirmed',
+             error_message = NULL,
+             updated_at = excluded.updated_at
+           WHERE activityLog_client_row_keys.status <> 'confirmed'`,
+          trimmed,
+          input.entryId,
+          input.source,
+          input.operationFingerprint ?? null,
+          createdAt,
+          createdAt
+        );
+      });
+    },
+
+    async deleteByEntryId(entryId: string) {
+      // reverify 確認 orphan 刪掉 Ragic entry 後，清掉指向這個已刪 entryId 的映射；
+      // 否則同 clientRowKey 重試會命中舊映射、回傳已刪 entryId 當成「已建立」。
+      const trimmed = String(entryId ?? "").trim();
+      if (!trimmed) return 0;
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `DELETE FROM activityLog_client_row_keys WHERE entry_id = ?`,
+          trimmed
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
+    },
+
+    async deleteByReservationIdentity(input) {
+      const clientRowKey = String(input.clientRowKey ?? "").trim();
+      const source = String(input.source ?? "").trim();
+      const reservationToken = String(input.reservationToken ?? "").trim();
+      const entryId = String(input.entryId ?? "").trim();
+      if (!clientRowKey || !source || !reservationToken || !entryId) return 0;
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `DELETE FROM activityLog_client_row_keys
+           WHERE client_row_key = ?
+             AND source = ?
+             AND reservation_token = ?
+             AND (entry_id = '' OR entry_id = ?)`,
+          clientRowKey,
+          source,
+          reservationToken,
+          entryId
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
+    },
+
+    async cleanupOlderThan(thresholdIso: string) {
+      return runSerializedWrite(async (db) => {
+        const result = await db.run(
+          `DELETE FROM activityLog_client_row_keys WHERE created_at < ?`,
+          thresholdIso
+        );
+        return typeof result.changes === "number" ? result.changes : 0;
+      });
+    },
+  };
+}
+
+export const activityLogClientRowKeyRepository: ActivityLogClientRowKeyRepository =
+  createActivityLogClientRowKeyRepository(() => sqliteClient.getDb());

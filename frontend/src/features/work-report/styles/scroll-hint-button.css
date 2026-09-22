@@ -1,0 +1,72 @@
+.detail-scroll-top-btn {
+  position: fixed;
+  right: 2.25rem;
+  bottom: 2rem;
+  z-index: 40;
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: rgba(255, 255, 255, 0.96);
+  color: #2563eb;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail-scroll-top-btn:hover {
+  background: #ffffff;
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.detail-scroll-chevron {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-top: 2.5px solid currentColor;
+  border-right: 2.5px solid currentColor;
+}
+
+.detail-scroll-chevron--up {
+  transform: translateY(0.12rem) rotate(-45deg);
+}
+
+.detail-scroll-chevron--down {
+  transform: translateY(-0.12rem) rotate(135deg);
+}
+
+.detail-scroll-top-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 2px solid rgba(37, 99, 235, 0.3);
+  animation: detail-scroll-pulse 3.6s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes detail-scroll-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.35;
+  }
+  40% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail-scroll-top-btn::after {
+    animation: none;
+  }
+}
