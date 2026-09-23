@@ -681,9 +681,13 @@ function Composer({
           }`}
           disabled={Boolean(disabledReason) || !draft.trim() || sending}
           onClick={onSend}
+          aria-label={sending ? "思考中" : "送出"}
         >
-          <SendOutlined />
-          {sending ? "處理中…" : "送出"}
+          {sending ? (
+            <span className="dev-ai-workspace__pending-mark" aria-hidden="true" />
+          ) : (
+            <><SendOutlined />送出</>
+          )}
         </button>
       </div>
     </section>

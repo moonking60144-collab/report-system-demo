@@ -7822,12 +7822,21 @@
   border-radius: 999px;
 }
 
-.dev-ai-workspace__send.is-loading svg {
-  animation: dev-ai-spin 1s linear infinite;
+.dev-ai-workspace__send.is-loading {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
 }
 
-@keyframes dev-ai-spin {
-  to { transform: rotate(360deg); }
+.dev-ai-workspace__pending-mark {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: currentColor;
 }
 
 @media (max-width: 980px) {
@@ -7881,8 +7890,7 @@
   .dev-ai-workspace__icon-btn,
   .dev-ai-workspace__prompt-grid button,
   .dev-ai-thinking-signal,
-  .dev-ai-thinking-signal i,
-  .dev-ai-workspace__send.is-loading svg {
+  .dev-ai-thinking-signal i {
     animation: none;
     transition: none;
   }
