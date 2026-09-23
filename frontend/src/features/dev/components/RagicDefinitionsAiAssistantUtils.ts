@@ -33,10 +33,10 @@ export function shouldDefaultIncludeDefinitions(formPath: string | undefined): b
 
 export function devAiContextStatusLabel(input: DevAiContextStatusInput): string {
   const speed = input.speedMode === "deep"
-    ? "Deep"
+    ? "深入"
     : input.speedMode === "balanced"
-      ? "Balanced"
-      : "Fast";
+      ? "標準"
+      : "快速";
   const scope = input.formPath?.trim()
     ? input.fieldId?.trim()
       ? "已帶入目前欄位"
@@ -44,7 +44,7 @@ export function devAiContextStatusLabel(input: DevAiContextStatusInput): string 
     : "自動選擇脈絡";
   const sources = [
     input.includeKnowledge ? "本地知識" : "不查知識",
-    input.includeDefinitions || input.formPath?.trim() ? "definitions" : "需要時查 definitions",
+    input.includeDefinitions || input.formPath?.trim() ? "表單設定" : "需要時查表單設定",
   ];
   return `${speed} · ${scope} · ${sources.join(" + ")}`;
 }

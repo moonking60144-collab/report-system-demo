@@ -9,9 +9,10 @@ export function formEvidence(detail: RagicDefinitionFormDetail, question: string
   const overview = [
     `表單：${detail.form.formName}；路徑：${formPath}`,
     `欄位 ${detail.fields.length}；公式 ${detail.formulas.length}；Workflow ${detail.workflows.length}`,
-    `欄位摘要（前 24 個）：${detail.fields.slice(0, 24).map(field => `${field.fieldName} [${field.fieldId}]`).join("；")}`,
+    `欄位摘要（前 24 個）：${detail.fields.slice(0, 24).map(field =>
+      `${field.fieldName} [${field.fieldId}] 位置=${field.position} 設定=${JSON.stringify(field.attrs)}`).join("；")}`,
     `Workflow 檔案：${detail.workflows.map(workflow => `${workflow.fileName} (${workflow.scope}, ${workflow.charCount} chars)`).join("；")}`,
-    "以上為目前 definitions 匯出定義，並非實際記錄資料；欄位清單為節錄，業務用途推論必須標示。",
+    "以上為公開 Demo 的合成 definitions，並非正式 Ragic 即時紀錄；這份樣本沒有主表／子表歸屬或按鈕綁定，不能推導必填條件或業務步驟的先後順序。",
   ].join("\n");
   const result: DevAiKnowledgeSource[] = [{ sourceId: `definitions:${formPath}:overview`, title: detail.form.formName,
     kind: "definitions", formPath, path: formPath, score: 20,

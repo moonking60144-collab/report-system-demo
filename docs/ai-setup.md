@@ -24,6 +24,8 @@ npm run knowledge:prepare -- --download
 npm run knowledge:prepare
 ```
 
+本版向量索引改依 Markdown 章節切塊，舊索引 profile 會失效；啟用 hybrid 前請在相同資料目錄重新執行 `knowledge:prepare`。公開合成檢索回歸案例與新舊詞法計分的比較方式見 [R1 評估說明](dev-ai-evals/r1/README.md)。
+
 準備完成後回到專案根目錄（`cd ..`），以自己的 provider key 啟動。以下以 MiniMax 為例：
 
 ```bash

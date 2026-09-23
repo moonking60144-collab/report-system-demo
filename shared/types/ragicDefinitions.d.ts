@@ -287,6 +287,10 @@ export type DevAiSpeedMode = "fast" | "balanced" | "deep";
 
 export interface DevAiChatRequest {
   question: string;
+  /** 延續上一輪實際問題的檢索文字；不覆寫使用者原始訊息。 */
+  retrievalQuery?: string;
+  formClarification?: { formNumber: string; candidates: Array<{ formPath: string; formName: string }> };
+  clarifySync?: boolean;
   /** Server 提供的 thread-local memory，不屬於已驗證的使用者 evidence。 */
   conversationContext?: string;
   mode?: DevAiChatMode;

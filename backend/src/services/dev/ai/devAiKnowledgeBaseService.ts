@@ -29,6 +29,7 @@ export interface DevAiKnowledgeBaseServiceDeps {
   cacheTtlMs?: number;
   now?: () => number;
   retrievalMode?: "lexical" | "hybrid" | "vector";
+  lexicalProfile?: "legacy" | "phrase";
   vectorDbFile?: string;
   embeddingCacheDir?: string;
   embeddingProvider?: DevAiEmbeddingProvider;
@@ -90,6 +91,20 @@ function tokenize(text: string): Set<string> {
     if (token && token.length >= 1) tokens.add(token);
   }
   return tokens;
+}
+
+function chinesePhrases(query: string): string[] {
+  const phrases = new Set<string>();
+  const normalized = stripDevAiNetworkAddresses(query, findDevAiNetworkAddressOccurrences(query));
+  for (const run of normalized.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let length = 4; length >= 2; length -= 1) {
+      for (let start = 0; start + length <= run.length; start += 1) {
+        phrases.add(run.slice(start, start + length));
+        if (phrases.size === 96) return [...phrases];
+      }
+    }
+  }
+  return [...phrases];
 }
 
 function titleFromContent(filePath: string, content: string): string {
@@ -165,7 +180,7 @@ function matchesRequestedAsset(document: KnowledgeDocument, queryTokens: Set<str
   return requested.some((address) => addresses.some((token) => token === address || (!address.includes(":") && token.startsWith(`${address}:`))));
 }
 
-function scoreDocument(document: KnowledgeDocument, queryTokens: Set<string>): number {
+function scoreDocument(document: KnowledgeDocument, queryTokens: Set<string>, rarePhrases: string[], identifiers: Set<string>, boostIdentifiers: boolean): number {
   const haystack = `${document.title}\n${document.content}`.toLowerCase();
   const addressTokens = [...queryTokens].filter((token) => DEV_AI_IPV4_TOKEN.test(token));
   const documentTokens = addressTokens.length ? tokenize(haystack) : new Set<string>();
@@ -185,7 +200,13 @@ function scoreDocument(document: KnowledgeDocument, queryTokens: Set<string>): n
     if (haystack.includes(token)) score += token.length > 1 ? 2 : 1;
     if (token.length > 1 && searchTerms.includes(token)) score += 4;
   }
-  return score;
+  const identifierTokens = boostIdentifiers && identifiers.size ? tokenize(haystack) : null;
+  const identifierMatches = identifierTokens
+    ? [...identifiers].filter((token) => identifierTokens.has(token)).length : 0;
+  const phraseBonus = identifiers.size && !identifierMatches ? 0
+    : rarePhrases.reduce((longest, phrase) =>
+      haystack.includes(phrase) ? Math.max(longest, phrase.length) : longest, 0) * 2;
+  return score + (boostIdentifiers ? identifierMatches * 24 : 0) + phraseBonus;
 }
 
 function shouldIncludeOfficialKnowledge(query: string): boolean {
@@ -257,6 +278,7 @@ export function createDevAiKnowledgeBaseService(
     | "lexical"
     | "hybrid"
     | "vector";
+  const lexicalProfile = deps.lexicalProfile ?? "phrase";
   if (!["lexical", "hybrid", "vector"].includes(retrievalMode)) throw new Error("DEV_AI_RETRIEVAL_MODE 必須為 lexical、hybrid 或 vector");
   const vectorDbFile = deps.vectorDbFile ?? env.DEV_AI_VECTOR_DB_FILE;
   const embeddingCacheDir = deps.embeddingCacheDir ?? env.DEV_AI_EMBEDDING_CACHE_DIR;
@@ -317,15 +339,23 @@ export function createDevAiKnowledgeBaseService(
     const query = maskSecrets(request.query.trim());
     if (!query) return [];
     const queryTokens = tokenize(query);
+    const identifiers = new Set([...queryTokens].filter((token) => /^\d{5,10}$|^[a-z][a-z0-9_/-]*\d[a-z0-9_/-]*$/.test(token)));
+    for (const match of query.matchAll(/\b([a-z_$][\w$]*)\s*\(/gi)) identifiers.add(match[1].toLowerCase());
     const includeOfficialKnowledge = shouldIncludeOfficialKnowledge(request.query);
     const includeCommonRules = COMMON_RULE_HINTS.some((hint) => request.query.toLowerCase().includes(hint));
     const includeOfficialForQuery = includeOfficialKnowledge && (includeCommonRules || ![...queryTokens].some((token) => DEV_AI_IPV4_TOKEN.test(token)));
     const documents = await loadDocuments(request.signal);
     const searchGeneration = generation;
+    const phrases = lexicalProfile === "phrase" && retrievalMode !== "vector" ? chinesePhrases(query) : [];
+    const rareLimit = Math.max(1, Math.min(4, Math.floor(documents.length / 4)));
+    const phraseTexts = phrases.length ? documents.map((document) => `${document.title}\n${document.content}`) : [];
+    const rarePhrases = phrases.filter((phrase) => phraseTexts.reduce((count, text) =>
+      count + Number(text.includes(phrase)), 0) <= rareLimit);
     const ranked = documents
       .map((document) => ({
         document,
-        score: scoreDocument(document, queryTokens),
+        score: scoreDocument(document, queryTokens, rarePhrases, identifiers,
+          lexicalProfile === "phrase" && retrievalMode !== "vector"),
       }))
       .filter((entry) => entry.score > 0)
       .filter((entry) => entry.document.kind !== "official" || includeOfficialForQuery)

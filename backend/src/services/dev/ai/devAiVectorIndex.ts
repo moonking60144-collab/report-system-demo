@@ -45,18 +45,45 @@ export interface DevAiVectorIndexStatus {
 }
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const CHUNK_CHARS = 360;
+const SECTION_CHUNK_CHARS = 560;
+const LONG_SECTION_CHUNK_CHARS = 360;
 const CHUNK_OVERLAP = 80;
+
+function sectionStartsFor(content: string): number[] {
+  const starts = [0];
+  let fenced: { marker: string; length: number } | null = null;
+  let offset = 0;
+  for (const line of content.split("\n")) {
+    const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (delimiter) {
+      const marker = delimiter[1][0];
+      if (!fenced) fenced = { marker, length: delimiter[1].length };
+      else if (fenced.marker === marker && delimiter[1].length >= fenced.length) fenced = null;
+    } else if (!fenced && offset > 0 && /^#{1,6}[ \t]+.+$/.test(line)) starts.push(offset);
+    offset += line.length + 1;
+  }
+  return starts;
+}
 
 function chunksFor(documents: DevAiIndexDocument[]): Chunk[] {
   const chunks: Chunk[] = [];
   for (const document of [...documents].sort((a, b) => a.sourceId.localeCompare(b.sourceId))) {
-    for (let start = 0; start < document.content.length; start += CHUNK_CHARS - CHUNK_OVERLAP) {
-      const end = Math.min(document.content.length, start + CHUNK_CHARS);
-      const input = `${document.title.slice(0, 120)}\n${(document.searchTerms ?? []).join(" ").slice(0, 160)}\n${document.content.slice(start, end)}`;
-      chunks.push({ id: hash(JSON.stringify([document.sourceId, start, end, input])), sourceId: document.sourceId, start, end, input });
-      if (chunks.length > 5000) throw new HttpError(503, "知識索引超過目前容量，請先整理知識內容", "DEV_AI_VECTOR_CAPACITY");
-      if (end === document.content.length) break;
+    const sectionStarts = sectionStartsFor(document.content);
+    for (const [index, sectionStart] of sectionStarts.entries()) {
+      const sectionEnd = sectionStarts[index + 1] ?? document.content.length;
+      const chunkChars = sectionEnd - sectionStart <= SECTION_CHUNK_CHARS
+        ? SECTION_CHUNK_CHARS : LONG_SECTION_CHUNK_CHARS;
+      const headingEnd = document.content.indexOf("\n", sectionStart);
+      const heading = document.content.slice(sectionStart, headingEnd < 0 ? sectionEnd : Math.min(headingEnd, sectionEnd));
+      const sectionHeading = /^#{1,6}[ \t]+/.test(heading) ? heading.slice(0, 120) : "";
+      for (let start = sectionStart; start < sectionEnd;) {
+        const end = Math.min(sectionEnd, start + chunkChars);
+        const input = `${document.title.slice(0, 120)}\n${(document.searchTerms ?? []).join(" ").slice(0, 160)}\n${sectionHeading}\n${document.content.slice(start, end)}`;
+        chunks.push({ id: hash(JSON.stringify([document.sourceId, start, end, input])), sourceId: document.sourceId, start, end, input });
+        if (chunks.length > 5000) throw new HttpError(503, "知識索引超過目前容量，請先整理知識內容", "DEV_AI_VECTOR_CAPACITY");
+        if (end === sectionEnd) break;
+        start = Math.max(start + 1, end - CHUNK_OVERLAP);
+      }
     }
   }
   return chunks;
@@ -94,7 +121,7 @@ function cosine(a: number[], b: number[]) {
 export function createDevAiVectorIndex(options: { dbFile?: string; embeddingProvider?: DevAiEmbeddingProvider } = {}) {
   const provider = options.embeddingProvider ?? createDevAiEmbeddingProvider();
   const dbFile = options.dbFile ?? env.DEV_AI_VECTOR_DB_FILE;
-  const profile = `${provider.profile}:dim${provider.dimensions}:chunk${CHUNK_CHARS}:overlap${CHUNK_OVERLAP}:v2`;
+  const profile = `${provider.profile}:dim${provider.dimensions}:section${SECTION_CHUNK_CHARS}:long${LONG_SECTION_CHUNK_CHARS}:overlap${CHUNK_OVERLAP}:v3`;
   let dbPromise: Promise<Database> | undefined;
   let mutationChain: Promise<unknown> = Promise.resolve();
   let closed = false;

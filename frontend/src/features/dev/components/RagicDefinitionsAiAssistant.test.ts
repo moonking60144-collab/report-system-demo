@@ -70,14 +70,14 @@ describe("Dev AI context defaults", () => {
         includeDefinitions: true,
         speedMode: "fast",
       })
-    ).toBe("Fast · 已帶入目前欄位 · 本地知識 + definitions");
+    ).toBe("快速 · 已帶入目前欄位 · 本地知識 + 表單設定");
     expect(
       devAiContextStatusLabel({
         includeKnowledge: true,
         includeDefinitions: false,
         speedMode: "balanced",
       })
-    ).toBe("Balanced · 自動選擇脈絡 · 本地知識 + 需要時查 definitions");
+    ).toBe("標準 · 自動選擇脈絡 · 本地知識 + 需要時查表單設定");
   });
 });
 
