@@ -16,7 +16,8 @@
     "export:definitions": "tsx scripts/export-ragic-definitions.ts",
     "review:dev-ai-official-knowledge": "tsx scripts/review-dev-ai-official-knowledge.ts",
     "knowledge:prepare": "cross-env DEMO_MODE=true tsx scripts/prepare-dev-ai-knowledge.ts",
-    "eval:dev-ai-retrieval": "cross-env DEMO_MODE=true tsx scripts/run-dev-ai-retrieval-eval.ts"
+    "eval:dev-ai-retrieval": "cross-env DEMO_MODE=true tsx scripts/run-dev-ai-retrieval-eval.ts",
+    "eval:dev-ai-retrieval:r1": "cross-env DEMO_MODE=true tsx scripts/run-dev-ai-retrieval-episodes.ts"
   },
   "engines": {
     "node": ">=20.18.1"

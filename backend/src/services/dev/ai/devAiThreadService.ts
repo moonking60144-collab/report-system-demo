@@ -4,6 +4,7 @@ import { HttpError } from "../../../utils/httpError";
 import { createKeyedSerialQueue } from "../../../utils/keyedSerialQueue";
 import { createStableJsonFingerprint } from "../../../utils/stableJsonFingerprint";
 import { maskSecrets } from "../ragicFormulaPatchDryRunService";
+import { ragicDefinitionsReadService, type RagicDefinitionsReadService } from "../ragicDefinitionsReadService";
 import {
   devAiChatService,
   type DevAiChatOptions,
@@ -19,7 +20,10 @@ import {
 } from "./devAiThreadTitle";
 import {
   asksAboutForm,
+  formNumbersFromQuestion,
   formPathsFromQuestion,
+  isContextualFormFollowUp,
+  isFormPathOnly,
   normalizeExplicitFormPath,
 } from "./devAiFormContext";
 import {
@@ -54,6 +58,7 @@ export interface DevAiThreadServiceDeps {
   archivedThreadRetentionDays?: number;
   repository?: DevAiThreadRepository;
   chatService?: DevAiChatService;
+  definitionsService?: Pick<RagicDefinitionsReadService, "listForms">;
   formulaService?: RagicFormulaAiSuggestionService;
   now?: () => Date;
   summaryEnabled?: boolean;
@@ -206,7 +211,7 @@ function inferIntent(
   const hasFormulaTarget = Boolean(context.formPath && context.fieldId && context.formulaKind);
   const formulaWords = /公式|草案|dry[- ]?run|計算|回傳|改成|修改|formula|欄位/.test(text);
   if (hasFormulaTarget && formulaWords) return "formula";
-  if (formPathsFromQuestion(text).length || (context.formPath && asksAboutForm(text))) {
+  if (formPathsFromQuestion(text).length || asksAboutForm(text) || (context.formPath && isContextualFormFollowUp(text))) {
     return "definitions";
   }
   if (/definitions?|ragic|欄位|表單|workflow|\.nui|依賴|公式/.test(text)) return "definitions";
@@ -325,6 +330,7 @@ export function createDevAiThreadService(
   );
   const repository = deps.repository ?? devAiThreadRepository;
   const chatService = deps.chatService ?? devAiChatService;
+  const definitionsService = deps.definitionsService ?? ragicDefinitionsReadService;
   const formulaService = deps.formulaService ?? ragicFormulaAiSuggestionService;
   const now = deps.now ?? (() => new Date());
   const summaryEnabled = deps.summaryEnabled ?? env.DEV_AI_THREAD_SUMMARY_ENABLED;
@@ -382,6 +388,7 @@ export function createDevAiThreadService(
       const history = (
         await repository.listMessages(actor, threadId, Math.max(threadContextMessages, 40))
       ).filter((item) => item.status === "completed");
+      const lastUserMessage = [...history].reverse().find((item) => item.role === "user");
       const suppliedPaths = formPathsFromQuestion(message);
       if (suppliedPaths.length > 1) {
         throw new HttpError(
@@ -395,22 +402,56 @@ export function createDevAiThreadService(
         request.context !== null &&
         "formPath" in request.context;
       const previousPaths = !requestIncludesFormPath && !context.formPath && suppliedPaths.length === 0
-        ? [...history]
-            .reverse()
-            .filter((item) => item.role === "user")
-            .map((item) => formPathsFromQuestion(item.content))
-            .find((paths) => paths.length > 0)
+        && lastUserMessage && isFormPathOnly(lastUserMessage.content)
+        && (asksAboutForm(message) || isContextualFormFollowUp(message))
+        ? formPathsFromQuestion(lastUserMessage.content)
         : undefined;
       const paths = suppliedPaths.length ? suppliedPaths : previousPaths;
       if (paths?.length === 1 && paths[0] !== context.formPath) {
         context = mergeContext(context, { formPath: paths[0] });
       }
-      const intent = inferIntent(request, thread.mode, context);
+      let formClarification: { formNumber: string; candidates: Array<{ formPath: string; formName: string }> } | undefined;
+      if (!suppliedPaths.length) {
+        const numbers = formNumbersFromQuestion(message);
+        if (numbers.length > 1) throw new HttpError(400, "本次提到多張表單，請分開提問。", "DEV_AI_FORM_AMBIGUOUS");
+        if (numbers.length === 1) {
+          const listing = await definitionsService.listForms({ limit: 200 }).catch(() => {
+            throw new HttpError(503, "Demo 表單目錄目前無法讀取，請稍後再試。", "DEV_AI_FORM_CATALOG_UNAVAILABLE");
+          });
+          if (listing.meta.truncated) throw new HttpError(503, "表單目錄未完整載入，請提供完整表單路徑。", "DEV_AI_FORM_CATALOG_INCOMPLETE");
+          const candidates = listing.data.filter((form) => form.formPath.split("/").at(-1) === numbers[0]);
+          if (!candidates.length) throw new HttpError(404, `Demo 找不到編號 ${numbers[0]} 的表單，請確認編號。`, "DEV_AI_FORM_NOT_FOUND");
+          if (candidates.length > 1) {
+            context = mergeContext(context, { formPath: null });
+            formClarification = { formNumber: numbers[0], candidates: candidates.map(({ formPath, formName }) => ({ formPath, formName })) };
+          } else context = mergeContext(context, { formPath: candidates[0].formPath });
+        }
+      }
+      const intent = formClarification || suppliedPaths.length || formNumbersFromQuestion(message).length
+        ? "definitions" : inferIntent(request, thread.mode, context);
 
       const recent = threadContextMessages > 0
         ? history.slice(-threadContextMessages)
             .map((item) => ({ role: item.role, content: item.content }))
         : [];
+      const previousQuestionForForm = context.formPath
+        ? [...history].reverse().find((item) => item.role === "user" && !isFormPathOnly(item.content)
+          && (item.metadata.retrievalFormPath === context.formPath
+            || formPathsFromQuestion(item.content).includes(context.formPath!)))?.content
+        : undefined;
+      const priorFormQuestion = isFormPathOnly(message) && context.formPath
+        ? previousQuestionForForm
+        : undefined;
+      const earlierFormQuestion = context.formPath && isContextualFormFollowUp(message)
+        ? previousQuestionForForm : undefined;
+      const retrievalQuery = priorFormQuestion ?? (earlierFormQuestion ? `${earlierFormQuestion}\n${message}` : undefined);
+      const clarifySync = Boolean(context.formPath && /同步|沒更新|未更新/.test(message)
+        && !/WO-\d+|entry\s*id|紀錄\s*id|工令\s*(?:號|編號)?\s*[:：#]?\s*[A-Za-z]*-?\d{4,}|欄位.{0,20}(?:從|由).{0,20}(?:改成|變成)/i.test(message)
+        && recent.some((item) => item.role === "user" && asksAboutForm(item.content)));
+      const formRelated = Boolean(formClarification || suppliedPaths.length || formNumbersFromQuestion(message).length
+        || requestIncludesFormPath || asksAboutForm(message)
+        || (context.formPath && isContextualFormFollowUp(message))
+        || (context.fieldId && /欄位|公式|此欄/.test(message)));
       const summaryPrefix = thread.summary
         ? `以下是同一個 Dev AI thread 的摘要，僅作為目前回答的 thread-local memory；不要把它當成全域 RAG knowledge：\n${thread.summary}\n\n`
         : "";
@@ -539,13 +580,17 @@ export function createDevAiThreadService(
       const chat = await chatService.ask(
         {
           question: message,
+          ...(retrievalQuery ? { retrievalQuery } : {}),
+          ...(formClarification ? { formClarification } : {}),
+          ...(clarifySync ? { clarifySync: true } : {}),
           ...(memoryPrefix.trim() ? { conversationContext: memoryPrefix.trim() } : {}),
-          mode: intent === "definitions" ? "definitions" : "general",
+          mode: intent === "definitions" && formRelated ? "definitions" : "general",
           speedMode: request.speedMode ?? "fast",
-          ...(context.formPath ? { formPath: context.formPath } : {}),
-          ...(context.fieldId ? { fieldId: context.fieldId } : {}),
+          ...(context.formPath && formRelated
+            ? { formPath: context.formPath } : {}),
+          ...(context.fieldId && formRelated ? { fieldId: context.fieldId } : {}),
           includeKnowledge: request.includeKnowledge !== false,
-          includeDefinitions: request.includeDefinitions === true || intent === "definitions",
+          includeDefinitions: formRelated && (request.includeDefinitions === true || intent === "definitions"),
           maxSources: request.speedMode === "deep" ? 10 : request.speedMode === "balanced" ? 8 : 6,
         },
         {
@@ -567,7 +612,9 @@ export function createDevAiThreadService(
         content: maskSecrets(message),
         intent,
         now: sentAt,
-        metadata: { mode: normalizeMode(request.mode ?? thread.mode), context },
+        metadata: { mode: normalizeMode(request.mode ?? thread.mode), context,
+          ...(context.formPath && formRelated ? { retrievalFormPath: context.formPath } : {}),
+          ...(retrievalQuery ? { retrievalQuery: maskSecrets(retrievalQuery) } : {}) },
       });
       const assistantMessage = await repository.appendMessage({
         threadId,

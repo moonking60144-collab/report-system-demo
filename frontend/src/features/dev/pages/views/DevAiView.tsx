@@ -56,7 +56,7 @@ export function DevAiView() {
   const [draft, setDraft] = useState("");
   const [speedMode, setSpeedMode] = useState<DevAiSpeedMode>("fast");
   const [includeKnowledge, setIncludeKnowledge] = useState(true);
-  const [includeDefinitions, setIncludeDefinitions] = useState(false);
+  const [includeDefinitions, setIncludeDefinitions] = useState(true);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [readiness, setReadiness] = useState<DevAiReadiness | null>(null);
@@ -653,7 +653,7 @@ function Composer({
                 disabled={!knowledgeAvailable}
                 onChange={(event) => onIncludeKnowledgeChange(event.target.checked)}
               />
-              本地 knowledge
+              查詢知識庫
             </label>
             <label>
               <input
@@ -661,16 +661,16 @@ function Composer({
                 checked={includeDefinitions}
                 onChange={(event) => onIncludeDefinitionsChange(event.target.checked)}
               />
-              definitions 優先帶入
+              表單問題優先查詢 Demo 設定
             </label>
             <select
               value={speedMode}
               onChange={(event) => onSpeedModeChange(event.target.value as DevAiSpeedMode)}
-              aria-label="速度模式"
+              aria-label="回答模式"
             >
-              <option value="fast">Fast</option>
-              <option value="balanced">Balanced</option>
-              <option value="deep">Deep</option>
+              <option value="fast">快速</option>
+              <option value="balanced">標準</option>
+              <option value="deep">深入</option>
             </select>
           </div>
         </details>

@@ -220,6 +220,7 @@ function isOutputTruncatedError(error: unknown): boolean {
 function buildPrompt(params: {
   mode: DevAiChatMode;
   question: string;
+  retrievalQuery?: string;
   conversationContext?: string;
   context: string;
   definitionsStatus: DevAiChatContextPreview["definitionsStatus"];
@@ -236,6 +237,7 @@ function buildPrompt(params: {
     "threadTitle 請根據本次問題與回答產生 4 到 24 字的短標題，只能使用繁體中文或英文；不得使用簡體字、日文、韓文、emoji、引號或 Markdown。",
     "對話記憶只用於理解追問，不是已驗證 evidence；若與目前使用者訊息衝突，以目前訊息為準。",
     "回答必須優先依據提供的本次參考資料。資料不足時，請明確說明缺少什麼，不要編造公司事實、欄位、表單、流程或資料狀態。",
+    "這是公開 Demo；表單 definitions 為合成樣本，不是正式 Ragic 即時資料。欄位名稱與 Workflow 檔名不能證明主表必填、按鈕執行順序或實際紀錄同步狀態。使用者只說『資料沒同步』時，先詢問是指 AI 沒找到表單定義，還是某筆紀錄的值未更新；不要先列瀏覽器快取、網路或 Session 等未經查核的原因。",
     "如果問題涉及 Ragic definitions、公式、欄位或 workflow，請引用 context 中的 sourceIds。",
     params.definitionsStatus === "unavailable"
       ? `Definitions 本次不可用（${params.definitionsErrorCode ?? "UNKNOWN"}）；不得宣稱已核對目前表單。`
@@ -252,6 +254,8 @@ function buildPrompt(params: {
     "",
     "本次參考資料:",
     params.context,
+    ...(params.retrievalQuery && params.retrievalQuery !== params.question
+      ? ["本次檢索承接的問題：", params.retrievalQuery] : []),
     "",
     "Mode:",
     params.mode,
@@ -426,7 +430,7 @@ function shouldIncludeDefinitions(
 ): boolean {
   if (mode === "definitions") return true;
   if (!request.formPath && !request.fieldId) return request.includeDefinitions === true;
-  const question = request.question.trim();
+  const question = request.retrievalQuery?.trim() || request.question.trim();
   return asksAboutForm(question) || /\b[A-Z]\d{1,3}\b|此欄/i.test(question)
     || Boolean(request.fieldId && question.includes(request.fieldId));
 }
@@ -475,11 +479,13 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
     signal?: AbortSignal
   ): Promise<{ sources: DevAiKnowledgeSource[]; preview: DevAiChatContextPreview; context: string }> {
     const question = request.question.trim();
+    const retrievalQuestion = request.retrievalQuery?.trim() || question;
     const maxSources = Math.max(1, Math.min(12, Math.trunc(request.maxSources ?? 8)));
     const sources: DevAiKnowledgeSource[] = [];
     if (request.includeKnowledge !== false) {
       try {
-        sources.push(...await knowledgeService.search({ query: question, maxItems: maxSources, signal }));
+        sources.push(...await knowledgeService.search({ query: retrievalQuestion,
+          maxItems: Math.min(24, maxSources * 3), signal }));
       } catch (error) {
         if (isAbortError(error)) throw error;
         if (error instanceof HttpError) throw error;
@@ -497,10 +503,10 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
       try {
         const requestedFieldId = request.fieldId?.trim() || fieldIdFromQuestion(question);
         if (request.formPath && !requestedFieldId && definitionsService.readForm) {
-          sources.push(...formEvidence(await definitionsService.readForm(request.formPath), question));
+          sources.push(...formEvidence(await definitionsService.readForm(request.formPath), retrievalQuestion));
         } else {
           let result = await definitionsService.search({
-            ...(requestedFieldId ? { fieldId: requestedFieldId } : { q: question }),
+            ...(requestedFieldId ? { fieldId: requestedFieldId } : { q: retrievalQuestion }),
             ...(request.formPath ? { formPath: request.formPath } : {}),
             type: "all",
             limit: maxSources,
@@ -508,7 +514,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
           let score = requestedFieldId ? 10 : request.formPath ? 8 : 5;
           if (!result.data.length && requestedFieldId) {
             result = await definitionsService.search({
-              q: question,
+              q: retrievalQuestion,
               ...(request.formPath ? { formPath: request.formPath } : {}),
               type: "all",
               limit: maxSources,
@@ -537,7 +543,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
     const rankedSources = Array.from(
       new Map(sources.map((source) => [source.sourceId, source])).values()
     ).sort((a, b) => b.score - a.score);
-    const official = asksForWorkflow(question)
+    const official = asksForWorkflow(retrievalQuestion)
       ? rankedSources.find((source) => source.sourceId === "official:ragic-workflow-es5")
         ?? rankedSources.find((source) => source.kind === "official")
       : rankedSources.find((source) => source.kind === "official");
@@ -545,7 +551,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
     const reservedDefinitions = rankedSources
       .filter((source) => source.kind === "definitions")
       .slice(0, request.formPath ? maxSources - reservedKnowledge.length : Math.ceil(maxSources / 2));
-    const workflow = request.formPath && asksForWorkflow(question)
+    const workflow = request.formPath && asksForWorkflow(retrievalQuestion)
       ? rankedSources.find((source) => source.kind === "definitions" && source.sourceType === "workflow")
       : undefined;
     if (workflow && reservedDefinitions.length && !reservedDefinitions.includes(workflow)) {
@@ -633,6 +639,29 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
             latencyMs: Math.max(0, now() - startedAt),
           };
         }
+        if (request.formClarification) {
+          const { formNumber, candidates } = request.formClarification;
+          const answer = `找到多張編號 ${formNumber} 的表單：\n${candidates.map((candidate) => `- ${candidate.formName}（${candidate.formPath}）`).join("\n")}\n請提供你要查看的完整表單路徑。`;
+          return {
+            chatId, provider: "local", model: "form-selection", threadTitle: "選擇表單",
+            mode: "definitions", speedMode, answerFormat: "plain", answer,
+            assumptions: [], followUps: [], contextSources: [], citedEvidence: [], sources: [],
+            contextPreview: { knowledgeItems: 0, definitionItems: 0, chars: 0, trimmed: false },
+            providerAttempts: 0, outputFallbackApplied: false, outputTokenLimit: 0,
+            latencyMs: Math.max(0, now() - startedAt),
+          };
+        }
+        if (request.clarifySync) {
+          return {
+            chatId, provider: "local", model: "sync-clarification", threadTitle: "釐清資料更新問題",
+            mode: "general", speedMode, answerFormat: "plain",
+            answer: "你說的「沒同步」是指 Dev AI 沒找到 Demo 表單定義，還是某筆工令紀錄的值沒有更新？請指出表單及具體紀錄。這個公開 Demo 只含合成 definitions，無法查核正式 Ragic 的即時資料。",
+            assumptions: [], followUps: [], contextSources: [], citedEvidence: [], sources: [],
+            contextPreview: { knowledgeItems: 0, definitionItems: 0, chars: 0, trimmed: false },
+            providerAttempts: 0, outputFallbackApplied: false, outputTokenLimit: 0,
+            latencyMs: Math.max(0, now() - startedAt),
+          };
+        }
         const context = await collectSources(request, mode, options.signal);
         const model = modelForSpeed(config, speedMode);
         const initialOutputTokens = outputTokensForRequest(config, speedMode, question);
@@ -645,6 +674,7 @@ export function createDevAiChatService(deps: DevAiChatServiceDeps = {}): DevAiCh
             prompt: buildPrompt({
               mode,
               question,
+              retrievalQuery: request.retrievalQuery,
               conversationContext: request.conversationContext,
               context: context.context,
               definitionsStatus: context.preview.definitionsStatus,

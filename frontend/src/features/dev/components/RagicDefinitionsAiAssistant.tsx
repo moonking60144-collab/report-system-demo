@@ -686,9 +686,9 @@ export function RagicDefinitionsAiAssistant({
                     value={speedMode}
                     onChange={(event) => setSpeedMode(event.target.value as DevAiSpeedMode)}
                   >
-                    <option value="fast">Fast：少脈絡、低延遲</option>
-                    <option value="balanced">Balanced：一般脈絡</option>
-                    <option value="deep">Deep：更多脈絡、較慢</option>
+                    <option value="fast">快速：少脈絡、低延遲</option>
+                    <option value="balanced">標準：一般脈絡</option>
+                    <option value="deep">深入：更多脈絡、較慢</option>
                   </select>
                 </label>
                 <div className="ragic-defs-ai-bot__thread-actions" aria-label="對話操作">
@@ -708,7 +708,7 @@ export function RagicDefinitionsAiAssistant({
                     disabled={!readiness?.knowledge.available}
                     onChange={(event) => setIncludeKnowledge(event.target.checked)}
                   />
-                  本地 knowledge
+                  查詢知識庫
                 </label>
                 <label>
                   <input
@@ -719,13 +719,13 @@ export function RagicDefinitionsAiAssistant({
                       setIncludeDefinitions(event.target.checked);
                     }}
                   />
-                  definitions 優先帶入
+                  表單問題優先查詢 Demo 設定
                 </label>
               </div>
               <div className="ragic-defs-ai-bot__safety" aria-label="AI 公式助手限制">
                 <span>不直接套用</span>
                 <span>不寫 .nui</span>
-                <span>{speedModeLabel(speedMode)} mode</span>
+                <span>{speedModeLabel(speedMode)}模式</span>
               </div>
               {mode === "chat" ? (
                 <AiKnowledgeStatusCard
@@ -1190,11 +1190,11 @@ function confidenceLabel(confidence: RagicFormulaAiSuggestResult["confidence"]):
 function speedModeLabel(speedMode: DevAiSpeedMode): string {
   switch (speedMode) {
     case "deep":
-      return "Deep";
+      return "深入";
     case "balanced":
-      return "Balanced";
+      return "標準";
     default:
-      return "Fast";
+      return "快速";
   }
 }
 
