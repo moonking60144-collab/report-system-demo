@@ -2,6 +2,7 @@ import type { Server } from "http";
 import compression from "compression";
 import cors from "cors";
 import express from "express";
+import { isSameOriginRequest } from "./bootstrap/corsPolicy";
 import {
   startBatchCreateRowKeyCleanup,
   stopBatchCreateRowKeyCleanup,
@@ -252,23 +253,29 @@ app.set("trust proxy", env.TRUST_PROXY);
 // 反向代理若已自行 gzip，這層會因 response 已帶 Content-Encoding 而跳過，不會雙重壓縮。
 app.use(compression());
 app.use(
-  cors({
-    credentials: true,
-    exposedHeaders: ["Content-Disposition"],
-    origin(origin, callback) {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
+  cors<express.Request>((req, optionsCallback) => {
+    optionsCallback(null, {
+      credentials: true,
+      exposedHeaders: ["Content-Disposition"],
+      origin(origin, callback) {
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
 
-      const allowedOrigins = env.CORS_ORIGINS;
-      if (allowedOrigins.includes("*") || allowedOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
+        const allowedOrigins = env.CORS_ORIGINS;
+        if (
+          allowedOrigins.includes("*") ||
+          allowedOrigins.includes(origin) ||
+          isSameOriginRequest(origin, req.protocol, req.get("host"))
+        ) {
+          callback(null, true);
+          return;
+        }
 
-      callback(new Error(`CORS origin not allowed: ${origin}`));
-    },
+        callback(new Error(`CORS origin not allowed: ${origin}`));
+      },
+    });
   })
 );
 // 明確化 body size limit：Express 預設 100kb，這邊顯化為 1mb（報工 payload 最大幾十 KB，足量）
