@@ -5,6 +5,7 @@ interface FixedHorizontalScrollbarProps {
   tableWrapRef: RefObject<HTMLDivElement | null>;
   enabled?: boolean;
   placement?: "fixed" | "contained";
+  onVisibilityChange?: (visible: boolean) => void;
 }
 
 type SyncSource = "bar" | "table" | null;
@@ -59,6 +60,7 @@ export function FixedHorizontalScrollbar({
   tableWrapRef,
   enabled = true,
   placement = "fixed",
+  onVisibilityChange,
 }: FixedHorizontalScrollbarProps) {
   const barRef = useRef<HTMLDivElement | null>(null);
   const syncSourceRef = useRef<SyncSource>(null);
@@ -74,6 +76,11 @@ export function FixedHorizontalScrollbar({
   );
   const [inViewport, setInViewport] = useState(true);
   const active = enabled && !pageHidden && inViewport;
+  const visible = active && metrics.visible;
+
+  useEffect(() => {
+    onVisibilityChange?.(visible);
+  }, [onVisibilityChange, visible]);
 
   const releaseSyncLock = useCallback(() => {
     window.requestAnimationFrame(() => {
