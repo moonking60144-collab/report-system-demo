@@ -1066,22 +1066,6 @@
   display: none;
 }
 
-.fixed-h-scrollbar-shell.is-contained {
-  position: absolute;
-  inset-inline: 0;
-  bottom: 0;
-  z-index: 30;
-  width: auto;
-  height: 14px;
-  padding-bottom: 0;
-  border-top: 0;
-  background: #f1f5f9;
-}
-
-.fixed-h-scrollbar-shell.is-contained .fixed-h-scrollbar-viewport {
-  height: 14px;
-}
-
 .fixed-h-scrollbar-viewport {
   height: 30px;
   overflow-x: auto;

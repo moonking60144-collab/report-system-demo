@@ -85,7 +85,6 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
   const tableWrapRef = useRef<HTMLDivElement | null>(null);
   const shouldVirtualize = visibleRecords.length >= LIST_VIRTUALIZATION_RECORD_THRESHOLD;
   const [tableBodyHeight, setTableBodyHeight] = useState(400);
-  const [hasContainedScrollbar, setHasContainedScrollbar] = useState(false);
   useEffect(() => {
     const wrapper = tableWrapRef.current;
     const stage = wrapper?.closest<HTMLElement>(".work-report-table-stage");
@@ -148,14 +147,11 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
     let frame = 0;
     const measure = () => {
       const header = wrapper.querySelector<HTMLElement>(".ant-table-header");
-      const scrollbar = wrapper.querySelector<HTMLElement>(
-        ".fixed-h-scrollbar-shell.is-contained:not(.is-hidden)"
-      );
       const available = wrapper.closest(".work-report-viewport")
         ? wrapper.clientHeight
         : window.innerHeight - wrapper.getBoundingClientRect().top - 64;
       setTableBodyHeight(Math.max(1, Math.floor(
-        available - (header?.offsetHeight ?? 0) - (scrollbar?.offsetHeight ?? 0) - 2
+        available - (header?.offsetHeight ?? 0) - 2
       )));
     };
     const scheduleMeasure = () => {
@@ -173,7 +169,7 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
       observer.disconnect();
       window.removeEventListener("resize", scheduleMeasure);
     };
-  }, [hasRenderableContent, shouldVirtualize, hasContainedScrollbar]);
+  }, [hasRenderableContent, shouldVirtualize]);
   const virtualScrollWidth = useMemo(() => getVirtualScrollWidth(columns), [columns]);
   const horizontalScrollWidth: number | string = shouldVirtualize
     ? columnDisplayMode === "fit"
@@ -278,12 +274,6 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
           rowClassName={buildRowClassName}
           onRow={buildRowProps}
         />
-        <FixedHorizontalScrollbar
-          tableWrapRef={tableWrapRef}
-          enabled={!shouldVirtualize}
-          placement="contained"
-          onVisibilityChange={setHasContainedScrollbar}
-        />
       </div>
 
       <div className="pager">
@@ -302,6 +292,11 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
           </button>
         </div>
       </div>
+      <FixedHorizontalScrollbar
+        tableWrapRef={tableWrapRef}
+        enabled={!shouldVirtualize}
+        endInset={showScrollHintButton ? 52 : 0}
+      />
       <WorkReportListScrollHintButton
         enabled={showScrollHintButton}
         tableWrapRef={tableWrapRef}

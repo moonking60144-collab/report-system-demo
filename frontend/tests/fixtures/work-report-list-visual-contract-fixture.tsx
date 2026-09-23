@@ -363,6 +363,7 @@ function WorkReportListVisualContractFixture() {
       />
       {statusProbe ? (
         <WorkReportTableSection
+          showScrollHintButton={new URLSearchParams(window.location.search).has("scrollHint")}
           columns={columns}
           columnDisplayMode={columnDisplayMode}
           visibleRecords={statusRecords}
