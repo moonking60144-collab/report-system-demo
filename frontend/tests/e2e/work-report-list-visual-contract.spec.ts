@@ -621,6 +621,21 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720
   });
 }
 
+test('切換 25／50／100／25 筆後，浮動按鈕仍能到達最後一列', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&scrollHint=1');
+  for (const size of [50, 100, 25]) {
+    await page.locator('.workspace-page-size .ant-select').click();
+    await page.locator('.ant-select-item-option').filter({ hasText: new RegExp(`^${size}$`) }).click();
+  }
+  const outer = page.locator('.ragic-list-main');
+  const body = page.locator('.ant-table-body');
+  await page.getByRole('button', { name: '到最底', exact: true }).click();
+  await expect.poll(() => outer.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+  await expect.poll(() => body.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+  await expect(body.locator('[data-row-key="status-24"]')).toBeInViewport();
+});
+
 for (const size of [25, 100]) {
   test(`${size} 筆進入明細再返回，恢復表格內捲動與原工令`, async ({ page }) => {
     const document = TEST_DOCUMENT.replaceAll('mountWorkReportListVisualContract', 'mountWorkReportScrollNavigation')

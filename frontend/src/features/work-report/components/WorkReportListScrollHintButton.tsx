@@ -82,6 +82,17 @@ export const WorkReportListScrollHintButton = memo(function WorkReportListScroll
       top: toBottom ? outerScroller.scrollHeight : 0,
       behavior: "smooth",
     });
+    if (toBottom && tableScroller.matches(".ant-table-body")) {
+      tableScroller.addEventListener("scrollend", () => {
+        if (tableWrapRef.current?.contains(tableScroller)) {
+          const remaining = tableScroller.scrollHeight - tableScroller.clientHeight - tableScroller.scrollTop;
+          // Page-size changes can settle the final body height a few pixels after scrolling starts.
+          if (remaining > 0 && remaining <= 4) {
+            tableScroller.scrollTop = tableScroller.scrollHeight;
+          }
+        }
+      }, { once: true });
+    }
     tableScroller.scrollTo({
       top: toBottom ? tableScroller.scrollHeight : 0,
       behavior: "smooth",
