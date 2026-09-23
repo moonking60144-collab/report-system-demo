@@ -57,7 +57,7 @@ for (const outcome of ["gone", "found", "read-error", "delete-error"] as const) 
       clientRowKey: "rollback-key", source: "downtime",
       create: async (reservation?: ActivityLogClientRowKeyRecord) => {
         await verifyNewlyCreatedActivityLogEntryOrRollback({
-          activityLogPath: "/16", entryId: "42", expected: { workOrderNo: "EXPECTED", type: "PA" },
+          activityLogPath: env.UPSTREAM_ACTIVITY_LOG_PATH, entryId: "42", expected: { workOrderNo: "EXPECTED", type: "PA" },
           createOperationId: reservation!.reservationToken!,
           options: { onReadIndeterminate: async payload => {
             await service.enqueue({ ...payload, source: "downtime", clientRowKey: "rollback-key",
