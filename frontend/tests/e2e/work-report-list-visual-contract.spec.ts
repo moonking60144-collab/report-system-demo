@@ -565,6 +565,14 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720
             );
           })
           .toBeLessThanOrEqual(1);
+        await expect
+          .poll(async () => {
+            const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
+            const lastRowBounds = await page.locator('[data-row-key="status-24"]').boundingBox();
+            if (!scrollbarBounds || !lastRowBounds) return Number.POSITIVE_INFINITY;
+            return lastRowBounds.y + lastRowBounds.height - scrollbarBounds.y;
+          })
+          .toBeLessThanOrEqual(0);
       } else {
         await expect(fixedHorizontalScrollbar).toHaveCount(0);
         const virtualHorizontalScrollbar = page.locator('.ant-table-tbody-virtual-scrollbar-horizontal');
