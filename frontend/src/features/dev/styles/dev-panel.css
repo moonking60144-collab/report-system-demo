@@ -6560,82 +6560,82 @@
   letter-spacing: 0.04em;
 }
 
+.dev-ai-thinking-signal {
+  display: inline-flex;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 30px;
+  height: 20px;
+  color: var(--dev-ai-accent, #58a6ff);
+  animation: dev-ai-thinking-gather 2.4s ease-in-out infinite;
+}
+
+.dev-ai-thinking-signal i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.35;
+  animation: dev-ai-thinking-flow 2.4s ease-in-out infinite;
+}
+
+.dev-ai-thinking-signal i:nth-child(2) {
+  width: 7px;
+  height: 3px;
+  border-radius: 2px;
+  background: #6bd4c6;
+  animation-delay: 180ms;
+}
+
+.dev-ai-thinking-signal i:nth-child(3) {
+  border-radius: 50%;
+  animation-delay: 360ms;
+}
+
+@keyframes dev-ai-thinking-flow {
+  0%, 10%, 70%, 100% {
+    opacity: 0.35;
+    transform: translateY(0) scale(0.86);
+  }
+
+  24%, 38% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.12);
+  }
+
+  55% {
+    opacity: 0.52;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes dev-ai-thinking-gather {
+  0%, 60%, 100% {
+    transform: scaleX(1);
+  }
+
+  72% {
+    transform: scaleX(0.82);
+  }
+}
+
 .ragic-defs-ai-bot__thinking {
   position: relative;
-  overflow: hidden;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 10px 12px;
   padding: 13px;
   border-radius: 16px;
-  border: var(--dev-border-hairline) solid rgba(94, 234, 212, 0.18);
+  border: var(--dev-border-hairline) solid rgba(148, 163, 184, 0.12);
   background: rgba(10, 16, 26, 0.78);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.025) inset;
 }
 
-.ragic-defs-ai-bot__thinking::before {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto;
-  height: 2px;
-  background: linear-gradient(90deg, rgba(94, 234, 212, 0.72), rgba(88, 166, 255, 0.28), transparent 74%);
-  opacity: 0.58;
-  animation: aiBotStatusBreath 2.4s ease-in-out infinite;
-}
-
-.ragic-defs-ai-bot__thinking-orbit {
-  position: relative;
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.ragic-defs-ai-bot__thinking .dev-ai-thinking-signal {
   align-self: center;
-  border-radius: 13px;
-  border: var(--dev-border-hairline) solid rgba(94, 234, 212, 0.22);
-  background: rgba(2, 6, 23, 0.42);
-  color: rgba(204, 251, 241, 0.9);
-  overflow: hidden;
-}
-
-.ragic-defs-ai-bot__thinking-orbit::after {
-  content: "";
-  position: absolute;
-  right: 8px;
-  top: 8px;
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--ai-bot-cyan);
-  opacity: 0.62;
-  animation: aiBotStatusBreath 2.4s ease-in-out infinite;
-}
-
-.ragic-defs-ai-bot__thinking-orbit svg {
-  position: relative;
-  z-index: 1;
-  font-size: 17px;
-}
-
-.ragic-defs-ai-bot__thinking-orbit i {
-  position: absolute;
-  bottom: 7px;
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(94, 234, 212, 0.45);
-}
-
-.ragic-defs-ai-bot__thinking-orbit i:nth-child(2) {
-  right: 19px;
-}
-
-.ragic-defs-ai-bot__thinking-orbit i:nth-child(3) {
-  right: 14px;
-}
-
-.ragic-defs-ai-bot__thinking-orbit i:nth-child(4) {
-  right: 9px;
+  justify-self: center;
 }
 
 .ragic-defs-ai-bot__thinking-copy {
@@ -7008,16 +7008,6 @@
   }
 }
 
-@keyframes aiBotStatusBreath {
-  0%,
-  100% {
-    opacity: 0.46;
-  }
-  50% {
-    opacity: 0.72;
-  }
-}
-
 @media (max-height: 760px) {
   .ragic-defs-ai-bot__panel {
     height: calc(100vh - 116px);
@@ -7080,7 +7070,7 @@
     grid-template-columns: 1fr;
   }
 
-  .ragic-defs-ai-bot__thinking-orbit {
+  .ragic-defs-ai-bot__thinking .dev-ai-thinking-signal {
     justify-self: start;
   }
 
@@ -7109,9 +7099,7 @@
 
   .ragic-defs-ai-bot__orb::after,
   .ragic-defs-ai-bot__submit.is-loading::after,
-  .ragic-defs-ai-bot__submit.is-loading .ragic-defs-ai-bot__submit-icon,
-  .ragic-defs-ai-bot__thinking::before,
-  .ragic-defs-ai-bot__thinking-orbit::after {
+  .ragic-defs-ai-bot__submit.is-loading .ragic-defs-ai-bot__submit-icon {
     animation: none;
   }
 }
@@ -7310,8 +7298,7 @@
   min-width: 0;
 }
 
-.dev-ai-workspace__orb,
-.dev-ai-workspace__thinking-orbit {
+.dev-ai-workspace__orb {
   position: relative;
   flex: 0 0 auto;
   display: inline-flex;
@@ -7732,30 +7719,6 @@
   gap: 12px;
 }
 
-.dev-ai-workspace__thinking-orbit {
-  color: var(--dev-ai-copper);
-}
-
-.dev-ai-workspace__thinking-orbit i {
-  position: absolute;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dev-ai-copper);
-  animation: dev-ai-pulse 1.2s ease-in-out infinite;
-}
-
-.dev-ai-workspace__thinking-orbit i:nth-child(2) {
-  right: 2px;
-  top: 8px;
-}
-
-.dev-ai-workspace__thinking-orbit i:nth-child(3) {
-  left: 4px;
-  bottom: 8px;
-  animation-delay: 0.2s;
-}
-
 .dev-ai-workspace__composer {
   position: sticky;
   bottom: 0;
@@ -7867,18 +7830,6 @@
   to { transform: rotate(360deg); }
 }
 
-@keyframes dev-ai-pulse {
-  0%,
-  100% {
-    transform: scale(0.72);
-    opacity: 0.45;
-  }
-  50% {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
-
 @media (max-width: 980px) {
   .dev-ai-workspace {
     padding: 12px;
@@ -7929,10 +7880,17 @@
   .dev-ai-workspace__thread,
   .dev-ai-workspace__icon-btn,
   .dev-ai-workspace__prompt-grid button,
-  .dev-ai-workspace__thinking-orbit i,
+  .dev-ai-thinking-signal,
+  .dev-ai-thinking-signal i,
   .dev-ai-workspace__send.is-loading svg {
     animation: none;
     transition: none;
+  }
+
+  .dev-ai-thinking-signal,
+  .dev-ai-thinking-signal i {
+    transform: none;
+    opacity: 0.68;
   }
 }
 

@@ -45,6 +45,7 @@ import {
   type DevAiMessageSubmission,
 } from "../../utils/devAiClientMessageId";
 import { DevAiMessageContent } from "../../components/DevAiMessageContent";
+import { DevAiThinkingSignal } from "../../components/DevAiThinkingSignal";
 
 export function DevAiView() {
   const { token, onAuthFailure } = useDevContext();
@@ -584,11 +585,7 @@ function EmptyConversation({
 function ThinkingCard() {
   return (
     <div className="dev-ai-workspace__thinking" role="status" aria-live="polite">
-      <span className="dev-ai-workspace__thinking-orbit" aria-hidden>
-        <RobotOutlined />
-        <i />
-        <i />
-      </span>
+      <DevAiThinkingSignal />
       <div>
         <strong>AI 正在判斷、檢索與整理</strong>
         <p>依速度模式控制 context，必要時查本地 knowledge / definitions，再把結果寫回本 thread。</p>
