@@ -513,7 +513,7 @@ test.describe("work-report navigation stability", () => {
     );
     const fixedHorizontalScrollbar = page.locator(".fixed-h-scrollbar-shell");
     await expect(fixedHorizontalScrollbar).toHaveCount(1);
-    await expect(fixedHorizontalScrollbar).toHaveClass(/is-contained/);
+    await expect(fixedHorizontalScrollbar).toHaveCSS("position", "fixed");
     await expect(fixedHorizontalScrollbar).toBeVisible();
     await expect(hintButton).toHaveCSS("bottom", "12px");
     const hintBounds = await hintButton.boundingBox();
@@ -521,6 +521,9 @@ test.describe("work-report navigation stability", () => {
     expect(hintBounds).not.toBeNull();
     expect(nextPageBounds).not.toBeNull();
     expect(nextPageBounds!.x + nextPageBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
+    const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
+    expect(scrollbarBounds).not.toBeNull();
+    expect(scrollbarBounds!.x + scrollbarBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
     const pagerBounds = await page.locator(".pager").boundingBox();
     expect(pagerBounds).not.toBeNull();
     const tableBounds = await page.locator(".table-wrap").boundingBox();
@@ -534,10 +537,10 @@ test.describe("work-report navigation stability", () => {
     await expect
       .poll(async () => {
         const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
-        const tableBounds = await page.locator(".table-wrap").boundingBox();
-        if (!scrollbarBounds || !tableBounds) return Number.POSITIVE_INFINITY;
+        const outerBounds = await outerScroller.boundingBox();
+        if (!scrollbarBounds || !outerBounds) return Number.POSITIVE_INFINITY;
         return Math.abs(
-          scrollbarBounds.y + scrollbarBounds.height - (tableBounds.y + tableBounds.height)
+          scrollbarBounds.y - (outerBounds.y + outerBounds.height)
         );
       })
       .toBeLessThanOrEqual(1);

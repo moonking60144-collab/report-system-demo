@@ -4,8 +4,7 @@ import type { RefObject } from "react";
 interface FixedHorizontalScrollbarProps {
   tableWrapRef: RefObject<HTMLDivElement | null>;
   enabled?: boolean;
-  placement?: "fixed" | "contained";
-  onVisibilityChange?: (visible: boolean) => void;
+  endInset?: number;
 }
 
 type SyncSource = "bar" | "table" | null;
@@ -59,8 +58,7 @@ function findHorizontalScroller(root: HTMLElement): HTMLElement | null {
 export function FixedHorizontalScrollbar({
   tableWrapRef,
   enabled = true,
-  placement = "fixed",
-  onVisibilityChange,
+  endInset = 0,
 }: FixedHorizontalScrollbarProps) {
   const barRef = useRef<HTMLDivElement | null>(null);
   const syncSourceRef = useRef<SyncSource>(null);
@@ -76,11 +74,6 @@ export function FixedHorizontalScrollbar({
   );
   const [inViewport, setInViewport] = useState(true);
   const active = enabled && !pageHidden && inViewport;
-  const visible = active && metrics.visible;
-
-  useEffect(() => {
-    onVisibilityChange?.(visible);
-  }, [onVisibilityChange, visible]);
 
   const releaseSyncLock = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -176,7 +169,7 @@ export function FixedHorizontalScrollbar({
     const rect = root.getBoundingClientRect();
     const viewportLeft = Math.max(rect.left, 0);
     const viewportRight = Math.min(rect.right, window.innerWidth);
-    const viewportWidth = Math.max(0, viewportRight - viewportLeft);
+    const viewportWidth = Math.max(0, viewportRight - viewportLeft - endInset);
     const isVisible =
       viewportWidth > 0 &&
       rect.bottom > 0 &&
@@ -186,7 +179,7 @@ export function FixedHorizontalScrollbar({
     const nextMetrics: ScrollbarMetrics = {
       left: viewportLeft,
       width: viewportWidth,
-      contentWidth: tableScroller.scrollWidth,
+      contentWidth: Math.max(0, tableScroller.scrollWidth - endInset),
       visible: isVisible,
     };
 
@@ -206,7 +199,7 @@ export function FixedHorizontalScrollbar({
     if (bar && bar.scrollLeft !== tableScroller.scrollLeft) {
       bar.scrollLeft = tableScroller.scrollLeft;
     }
-  }, [active, bindTableScroller, tableWrapRef]);
+  }, [active, bindTableScroller, endInset, tableWrapRef]);
 
   const scheduleRefreshMetrics = useCallback(() => {
     if (refreshFrameRef.current !== null) {
@@ -349,11 +342,11 @@ export function FixedHorizontalScrollbar({
 
   return (
     <div
-      className={`fixed-h-scrollbar-shell${placement === "contained" ? " is-contained" : ""}${metrics.visible ? "" : " is-hidden"}`}
-      style={placement === "fixed" ? {
+      className={`fixed-h-scrollbar-shell${metrics.visible ? "" : " is-hidden"}`}
+      style={{
         left: `${metrics.left}px`,
         width: `${metrics.width}px`,
-      } : undefined}
+      }}
       aria-hidden={!metrics.visible}
     >
       <div

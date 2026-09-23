@@ -498,7 +498,7 @@ for (const formId of ["901", "902"]) {
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }, { width: 820, height: 560 }, { width: 390, height: 844 }]) {
   test(`報工先捲走上方工具區，再由表格接手捲動 ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await page.goto('/__work-report-list-visual-contract__?statusProbe=1');
+    await page.goto('/__work-report-list-visual-contract__?statusProbe=1&scrollHint=1');
     await page.locator('.workspace-display-mode').getByRole('button', { name: '精簡', exact: true }).click();
     for (const size of [25, 50, 100, 25]) {
       await page.locator('.workspace-page-size .ant-select').click();
@@ -510,6 +510,21 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720
       await body.evaluate(element => { element.scrollTop = 0; });
       await expect(page.locator('.work-report-table-stage')).not.toHaveClass(/is-focus-docked/);
       await expect.poll(() => outer.evaluate(element => element.scrollHeight - element.clientHeight)).toBeGreaterThan(40);
+      if (size < 40) {
+        const bar = page.locator('.fixed-h-scrollbar-shell:not(.is-hidden)');
+        const hint = page.locator('.detail-scroll-top-btn');
+        await expect(hint).toBeVisible();
+        await expect.poll(async () => {
+          const barBounds = await bar.boundingBox();
+          const outerBounds = await outer.boundingBox();
+          return barBounds && outerBounds
+            ? Math.abs(barBounds.y - (outerBounds.y + outerBounds.height))
+            : Number.POSITIVE_INFINITY;
+        }).toBeLessThanOrEqual(1);
+        const barBounds = await bar.boundingBox();
+        const hintBounds = await hint.boundingBox();
+        expect(barBounds!.x + barBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
+      }
 
       const sidebarBefore = viewport.width > 960
         ? await page.locator('.fixed-filter-sidebar').boundingBox()
@@ -545,7 +560,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720
       const fixedHorizontalScrollbar = page.locator('.fixed-h-scrollbar-shell');
       if (size < 40) {
         await expect(fixedHorizontalScrollbar).toHaveCount(1);
-        await expect(fixedHorizontalScrollbar).toHaveClass(/is-contained/);
+        await expect(fixedHorizontalScrollbar).toHaveCSS('position', 'fixed');
         await expect(fixedHorizontalScrollbar).toBeVisible();
         await expect
           .poll(() => body.evaluate(element => element.scrollWidth > element.clientWidth))
@@ -558,13 +573,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720
         await expect
           .poll(async () => {
             const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
-            const tableBounds = await page.locator('.table-wrap').boundingBox();
-            if (!scrollbarBounds || !tableBounds) return Number.POSITIVE_INFINITY;
+            const outerBounds = await outer.boundingBox();
+            if (!scrollbarBounds || !outerBounds) return Number.POSITIVE_INFINITY;
             return Math.abs(
-              scrollbarBounds.y + scrollbarBounds.height - (tableBounds.y + tableBounds.height)
+              scrollbarBounds.y - (outerBounds.y + outerBounds.height)
             );
           })
           .toBeLessThanOrEqual(1);
+        const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
+        expect(scrollbarBounds!.y).toBeGreaterThanOrEqual(pager!.y + pager!.height - 1);
+        expect(scrollbarBounds!.y + scrollbarBounds!.height).toBeLessThanOrEqual(viewport.height - 11);
+        await fixedHorizontalScrollbar.locator('.fixed-h-scrollbar-viewport').evaluate(element => {
+          element.scrollLeft = element.scrollWidth;
+        });
+        await expect.poll(() => body.evaluate(element =>
+          Math.abs(element.scrollLeft - (element.scrollWidth - element.clientWidth))
+        )).toBeLessThanOrEqual(3);
         await expect
           .poll(async () => {
             const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();

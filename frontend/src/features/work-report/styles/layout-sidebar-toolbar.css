@@ -2031,6 +2031,22 @@ h1 {
   padding-bottom: 0;
 }
 
+.work-report-viewport:has(.fixed-h-scrollbar-shell:not(.is-hidden)) .ragic-list-main {
+  height: calc(100% - 14px);
+}
+
+.work-report-viewport .fixed-h-scrollbar-shell {
+  bottom: 0.75rem;
+  height: 14px;
+  padding-bottom: 0;
+  border-top: 0;
+  background: #f1f5f9;
+}
+
+.work-report-viewport .fixed-h-scrollbar-viewport {
+  height: 14px;
+}
+
 .work-report-viewport .work-report-list-workspace {
   flex: none;
 }
