@@ -407,6 +407,13 @@ export class MockRagicClient {
             subtableRow[readKey] = value;
           }
         }
+        // 新增報工先寫活動紀錄的備註欄位，再由 workflow 帶回工令子表。
+        const activityLogRemarkFieldId = env.UPSTREAM_ACTIVITY_LOG_REMARK_FIELD_ID;
+        if (activityLogRemarkFieldId in activityLogRecord) {
+          const remark = activityLogRecord[activityLogRemarkFieldId];
+          subtableRow[subtableWriteFields.remark] = remark;
+          subtableRow[subtableReadFields.remark] = remark;
+        }
         const subtableId = parentConfig.subtableId;
         const existingSub =
           (parentRecord[subtableId] as Record<string, RagicRecord> | undefined) ?? {};
