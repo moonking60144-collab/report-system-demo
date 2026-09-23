@@ -53,6 +53,7 @@ import {
 } from "./RagicDefinitionsAiAssistantUtils";
 import { FORMULA_KIND_LABELS } from "./ragicDefinitionsExplorerUtils";
 import { FormulaSyntax } from "./ragicDefinitionsSyntax";
+import { DevAiThinkingSignal } from "./DevAiThinkingSignal";
 import {
   resolveDevAiMessageSubmission,
   type DevAiMessageSubmission,
@@ -768,12 +769,7 @@ export function RagicDefinitionsAiAssistant({
 function AiFormulaThinkingState({ mode }: { mode: "formula" | "chat" }) {
   return (
     <div className="ragic-defs-ai-bot__thinking" role="status" aria-live="polite">
-      <div className="ragic-defs-ai-bot__thinking-orbit" aria-hidden>
-        <RobotOutlined />
-        <i />
-        <i />
-        <i />
-      </div>
+      <DevAiThinkingSignal />
       <div className="ragic-defs-ai-bot__thinking-copy">
         <strong>{mode === "formula" ? "AI 正在處理這個公式" : "AI 正在檢索本地脈絡"}</strong>
         <span>思考中...</span>
