@@ -414,6 +414,7 @@ export async function closeWorkOrderAccepted(
     clientMutationId: string;
     workOrderNo?: string | null;
     expectedEntryLastUpdatedAt?: string;
+    expectedEntrySnapshotHash?: string;
     editSessionId?: string;
     editLockVersion?: number;
   }
@@ -428,6 +429,9 @@ export async function closeWorkOrderAccepted(
         "x-client-mutation-id": options.clientMutationId,
         ...(options.expectedEntryLastUpdatedAt
           ? { "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt }
+          : {}),
+        ...(options.expectedEntrySnapshotHash
+          ? { "x-entry-snapshot-hash": options.expectedEntrySnapshotHash }
           : {}),
         ...(options.editSessionId
           ? { "x-edit-session-id": options.editSessionId }
@@ -448,6 +452,7 @@ export async function reopenWorkOrderAccepted(
     clientMutationId: string;
     workOrderNo?: string | null;
     expectedEntryLastUpdatedAt?: string;
+    expectedEntrySnapshotHash?: string;
     editSessionId?: string;
     editLockVersion?: number;
   }
@@ -462,6 +467,9 @@ export async function reopenWorkOrderAccepted(
         "x-client-mutation-id": options.clientMutationId,
         ...(options.expectedEntryLastUpdatedAt
           ? { "x-entry-last-updated-at": options.expectedEntryLastUpdatedAt }
+          : {}),
+        ...(options.expectedEntrySnapshotHash
+          ? { "x-entry-snapshot-hash": options.expectedEntrySnapshotHash }
           : {}),
         ...(options.editSessionId
           ? { "x-edit-session-id": options.editSessionId }

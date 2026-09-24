@@ -1174,7 +1174,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             formId: ctx.formId,
             entryId: ctx.entryId,
             accepted: true,
-            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt || ctx.expectedEntrySnapshotHash ? "deferred" : "skipped",
           },
         });
         return;
@@ -1335,7 +1335,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
           formId: ctx.formId,
           entryId: ctx.entryId,
           accepted: true,
-          preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+          preconditionCheck: ctx.expectedEntryLastUpdatedAt || ctx.expectedEntrySnapshotHash ? "deferred" : "skipped",
         },
       });
     })
@@ -1660,7 +1660,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             formId: ctx.formId,
             entryId: ctx.entryId,
             accepted: true,
-            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt || ctx.expectedEntrySnapshotHash ? "deferred" : "skipped",
           },
         });
         return;
@@ -1789,7 +1789,7 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
             formId: ctx.formId,
             entryId: ctx.entryId,
             accepted: true,
-            preconditionCheck: ctx.expectedEntryLastUpdatedAt ? "deferred" : "skipped",
+            preconditionCheck: ctx.expectedEntryLastUpdatedAt || ctx.expectedEntrySnapshotHash ? "deferred" : "skipped",
           },
         });
         return;

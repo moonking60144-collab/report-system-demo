@@ -1080,6 +1080,30 @@ test("update worker 的 Ragic 5xx 寫入結果不明會禁止直接重送", asyn
   );
 });
 
+test("本站機台寫後驗證失敗保留有界目標與回讀值供任務診斷", async () => {
+  const suffix = Date.now();
+  const task = createReportTaskService.enqueue({
+    taskType: "update-report", operationKind: "update-main-machine",
+    formId: "901", entryId: `E-MACHINE-DIAG-${suffix}`, queueKey: `901:E-MACHINE-DIAG-${suffix}`,
+    clientMutationId: `machine-diag-${suffix}`, operationFingerprint: `machine-diag-${suffix}`,
+    worker: async () => { throw new UpstreamError("回讀值不一致", "RAGIC_WRITE_VERIFY_FAILED",
+      { expectedMachineCode: "MA51", confirmedMachineCode: "MA52" }); },
+  });
+  await waitForTaskStatus(task.taskId, "failed");
+  const expected = { expectedMachineCode: "MA51", confirmedMachineCode: "MA52" };
+  assert.deepEqual(createReportTaskService.getTask(task.taskId)?.error?.mainMachineVerification, expected);
+  assert.deepEqual(workReportTaskRegistryService.getTask(task.taskId)?.mainMachineVerification, expected);
+  workReportTaskRegistryService.upsertTask({
+    taskId: task.taskId,
+    taskType: "update-report",
+    status: "success",
+    formId: "901",
+    entryId: `E-MACHINE-DIAG-${suffix}`,
+    updatedAt: new Date(Date.now() + 1).toISOString(),
+  });
+  assert.equal(workReportTaskRegistryService.getTask(task.taskId)?.mainMachineVerification, null);
+});
+
 test("update 寫入後 verify 或回算未完成會標記 indeterminate", async () => {
   const errorCodes = [
     "RAGIC_WRITE_VERIFY_FAILED",

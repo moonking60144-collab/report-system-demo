@@ -33,6 +33,20 @@ const reply = (route: Route, tasks: unknown[] = []) => route.fulfill({
   body: JSON.stringify({ data: tasks }),
 });
 
+test("結案任務顯示真正操作名稱，機台驗證失敗顯示目標與回讀值", async ({ page }) => {
+  await mount(page, async (route) => reply(route, [
+    { ...task, taskId: "task-close", taskType: "update-report", operationKind: "close-work-order", status: "failed" },
+    { ...task, taskId: "task-reopen", taskType: "update-report", operationKind: "reopen-work-order", status: "failed" },
+    { ...task, taskId: "task-machine", taskType: "update-report", operationKind: "update-main-machine", status: "failed",
+      mainMachineVerification: { expectedMachineCode: "MA51", confirmedMachineCode: "MA52" } },
+  ]));
+  const drawer = page.getByRole("dialog", { name: "任務中心" });
+  await expect(drawer.getByText("人工結案工令", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("取消結案工令", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("目標機台: MA51", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("回讀機台: MA52", { exact: true })).toBeVisible();
+});
+
 
 test("SSE 合併完成事件立即刷新，連線正常時使用低頻補查，關閉後不查詢", async ({ page }) => {
   await mockTaskEvents(page);

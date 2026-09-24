@@ -14,6 +14,7 @@ const ERROR_CODE_TRANSLATION_MAP: Record<string, string> = {
   INVALID_OPERATOR_ID: "workReport:errors.codes.invalidOperatorId",
   INVALID_OPERATOR_MAPPING: "workReport:errors.codes.invalidOperatorMapping",
   ENTRY_CONFLICT: "workReport:errors.codes.entryConflict",
+  ENTRY_BASELINE_UNAVAILABLE: "workReport:errors.codes.entryBaselineUnavailable",
   ENTRY_STATUS_UNKNOWN: "workReport:errors.codes.entryStatusUnknown",
   ENTRY_EDIT_LOCKED: "workReport:errors.codes.entryEditLocked",
   CLIENT_MUTATION_ID_REQUIRED: "workReport:errors.codes.clientMutationIdRequired",

@@ -333,6 +333,7 @@ export interface WorkReportRouterDeps {
       priority?: RagicReadPriority;
       timeoutMs?: number;
       maxRetries?: number;
+      expectedEntrySnapshotHash?: string;
     }
   ): Promise<void>;
   assertEntryEditableBySession(input: {

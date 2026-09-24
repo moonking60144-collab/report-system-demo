@@ -10,4 +10,4 @@
  * 每次 commit 想 bump 版本就改這個常數一行。沒打算自動讀 git tag / package.json，
  * 維持「使用者明示更新」的語意。
  */
-export const APP_VERSION = "0.1.3";
+export const APP_VERSION = "0.1.4";

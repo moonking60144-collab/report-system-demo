@@ -77,6 +77,7 @@ export interface ReportSortRule {
 
 export interface WorkReportRecord {
   id: string;
+  entrySnapshotHash?: string;
   reports: WorkReportItem[];
   [key: string]: unknown;
 }

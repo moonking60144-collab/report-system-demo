@@ -47,6 +47,7 @@ export interface WorkReportItem {
 
 export interface WorkReportRecord {
   id: string;
+  entrySnapshotHash?: string;
   lastUpdatedAt?: string | null;
   machineCode?: string | null;
   filterMachineCode?: string | null;
@@ -390,6 +391,7 @@ export interface WorkReportQueueTask extends MutationLifecycleTiming {
   message: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  mainMachineVerification?: { expectedMachineCode: string; confirmedMachineCode: string | null } | null;
   actorClientId: string | null;
   actorTabId: string | null;
   actorIp: string | null;

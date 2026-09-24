@@ -14,7 +14,7 @@ describe("getWorkReportTaskErrorMessage", () => {
         errorMessage: "Request failed with status code 409",
         message: null,
       })
-    ).toBe("這筆工令在你編輯期間已被其他人更新，請先刷新後再重新送出。");
+    ).toBe("這筆工令的內容已變更，請先刷新後再重新送出。");
   });
 
   it("保留業務上下文並替換內部 code", () => {
@@ -24,7 +24,7 @@ describe("getWorkReportTaskErrorMessage", () => {
         errorMessage: "批次新增尚未開始：ENTRY_CONFLICT",
         message: null,
       })
-    ).toBe("批次新增尚未開始：這筆工令在你編輯期間已被其他人更新，請先刷新後再重新送出。");
+    ).toBe("批次新增尚未開始：這筆工令的內容已變更，請先刷新後再重新送出。");
   });
 
   it("把工令狀態未知翻成使用者看得懂的訊息", () => {

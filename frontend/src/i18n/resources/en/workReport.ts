@@ -972,6 +972,9 @@ const workReportEn = {
       eventSource: "Event source",
       retryFrom: "Retried From",
       retrySubmittedAs: "Retried As",
+      targetMachine: "Target Machine",
+      readBackMachine: "Read-back Machine",
+      notReadBack: "Unavailable",
     },
     status: {
       pending: "Queued",
@@ -994,6 +997,8 @@ const workReportEn = {
       updateUrgent: "Update Urgent",
       updateSortOrder: "Update Work Order Sort",
       updatePlannedEndDate: "Update Planned End Date",
+      closeWorkOrder: "Close Work Order",
+      reopenWorkOrder: "Reopen Work Order",
       delete: "Delete Report",
       deleteBatch: "Batch Delete",
       sync: "Sync",
@@ -1171,7 +1176,9 @@ const workReportEn = {
       invalidOperatorId: "The operator ID is invalid. Please select it again.",
       invalidOperatorMapping: "Operator mapping failed. Please select the operator again.",
       entryConflict:
-        "This work order was updated by someone else while you were editing. Please refresh before submitting again.",
+        "This work order's content changed. Please refresh before submitting again.",
+      entryBaselineUnavailable:
+        "The version you originally viewed could not be verified. Nothing was written; please refresh and try again.",
       entryStatusUnknown:
         "Ragic could not return the latest work order status. This report was not written yet; please retry later.",
       entryEditLocked:

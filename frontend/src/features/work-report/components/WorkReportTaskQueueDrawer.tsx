@@ -135,6 +135,12 @@ function getTaskTypeLabel(
   if (task.operationKind === "update-planned-end-date") {
     return t("workReport:taskQueue.taskTypes.updatePlannedEndDate");
   }
+  if (task.operationKind === "close-work-order") {
+    return t("workReport:taskQueue.taskTypes.closeWorkOrder");
+  }
+  if (task.operationKind === "reopen-work-order") {
+    return t("workReport:taskQueue.taskTypes.reopenWorkOrder");
+  }
   const taskType = task.taskType;
   if (taskType === "create-report") {
     return t("workReport:taskQueue.taskTypes.create");
@@ -703,6 +709,12 @@ export function WorkReportTaskQueueDrawer({
                   <div className="detail-task-queue-item-message">
                     {getWorkReportTaskErrorMessage(task) || task.message || "--"}
                   </div>
+                  {task.status === "failed" && task.operationKind === "update-main-machine" && task.mainMachineVerification ? (
+                    <div className="detail-task-queue-item-meta">
+                      <span>{t("workReport:taskQueue.fields.targetMachine")}: {task.mainMachineVerification.expectedMachineCode}</span>
+                      <span>{t("workReport:taskQueue.fields.readBackMachine")}: {task.mainMachineVerification.confirmedMachineCode ?? t("workReport:taskQueue.fields.notReadBack")}</span>
+                    </div>
+                  ) : null}
                   {batchProgress ? (
                     <div className="detail-task-queue-progress">
                       <div className="detail-task-queue-progress-head">

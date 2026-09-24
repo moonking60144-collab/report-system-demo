@@ -15,14 +15,15 @@ import { workReportEditingPresenceService } from "../../workReportEditingPresenc
 import { hasReadableSqliteSnapshot } from "../readModelState";
 import { isWorkOrderClosedEntry } from "../shared/workOrderStatus";
 import { workReportReadService } from "../workReportReadService";
+import { buildEntrySnapshotHash } from "../shared/entrySnapshotHash";
 
-const ENTRY_CONFLICT_IGNORED_KEYS = new Set(["lastUpdatedAt", "filterLastUpdatedAt", "snapshotHash"]);
 const log = createLogger("work-report-mutation-precondition");
 
 export interface EntryConflictPreconditionOptions {
   priority?: RagicReadPriority;
   timeoutMs?: number;
   maxRetries?: number;
+  expectedEntrySnapshotHash?: string;
 }
 
 export interface EntryEditingPreconditionInput {
@@ -42,34 +43,6 @@ function resolveRecordLastUpdatedAt(record: WorkReportRecord | null | undefined)
   ).trim();
 }
 
-function normalizeEntryConflictComparableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => normalizeEntryConflictComparableValue(item));
-  }
-  if (!value || typeof value !== "object") {
-    return value ?? null;
-  }
-
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([key, nextValue]) => {
-        if (ENTRY_CONFLICT_IGNORED_KEYS.has(key) || key.endsWith("Display")) {
-          return false;
-        }
-        return nextValue !== undefined;
-      })
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, nextValue]) => [
-        key,
-        normalizeEntryConflictComparableValue(nextValue),
-      ])
-  );
-}
-
-function buildEntryConflictFingerprint(record: WorkReportRecord): string {
-  return JSON.stringify(normalizeEntryConflictComparableValue(record));
-}
-
 function isRagicStaleCheckUnavailable(error: unknown): boolean {
   const candidate = error as { message?: unknown };
   return (
@@ -87,7 +60,8 @@ class WorkReportMutationPreconditionService {
     options: EntryConflictPreconditionOptions = {}
   ): Promise<void> {
     const expected = String(expectedEntryLastUpdatedAt ?? "").trim();
-    if (!expected) {
+    const expectedHash = String(options.expectedEntrySnapshotHash ?? "").trim();
+    if (!expected && !expectedHash) {
       return;
     }
 
@@ -100,6 +74,7 @@ class WorkReportMutationPreconditionService {
       formId,
       entryId,
       expected,
+      expectedHash,
       latestRecord
     );
   }
@@ -188,7 +163,17 @@ class WorkReportMutationPreconditionService {
     formId: string,
     entryId: string
   ): Promise<RagicRecord> {
-    return this.assertCreateEntryAcceptsReports(formId, entryId);
+    const startedAt = Date.now();
+    try {
+      return await this.assertCreateEntryAcceptsReports(formId, entryId);
+    } finally {
+      log.info({
+        event: "batch-create.entry-status-precheck-timing",
+        formId,
+        entryId,
+        durationMs: Date.now() - startedAt,
+      });
+    }
   }
 
   private async readLatestEntryForConflictCheck(
@@ -219,23 +204,29 @@ class WorkReportMutationPreconditionService {
     formId: string,
     entryId: string,
     expected: string,
+    expectedHash: string,
     latestRecord: WorkReportRecord
   ): Promise<void> {
     const latestUpdatedAt = resolveRecordLastUpdatedAt(latestRecord);
-    if (latestUpdatedAt === expected) {
+    if (expectedHash && buildEntrySnapshotHash(latestRecord) === expectedHash) {
+      if (latestUpdatedAt !== expected) log.info({ event: "mutation.timestamp-drift-allowed", formId, entryId,
+        expectedLastUpdatedAt: expected, latestLastUpdatedAt: latestUpdatedAt });
       return;
     }
+    if (expectedHash) {
+      throw new HttpError(409, "這筆工令的內容已變更，請先刷新後再重新送出。", "ENTRY_CONFLICT");
+    }
+    if (latestUpdatedAt === expected) return;
 
     const expectedSnapshot = await this.getExpectedEntrySnapshotFromReadModel(
       formId,
       entryId,
       expected
     );
-    if (
-      expectedSnapshot &&
-      buildEntryConflictFingerprint(expectedSnapshot) ===
-        buildEntryConflictFingerprint(latestRecord)
-    ) {
+    if (!expectedSnapshot) {
+      throw new HttpError(409, "目前無法確認你原先看到的工令版本，尚未執行寫入；請重新整理後再試。", "ENTRY_BASELINE_UNAVAILABLE");
+    }
+    if (buildEntrySnapshotHash(expectedSnapshot) === buildEntrySnapshotHash(latestRecord)) {
       log.info({
         event: "mutation.timestamp-drift-allowed",
         formId,
@@ -248,7 +239,7 @@ class WorkReportMutationPreconditionService {
 
     throw new HttpError(
       409,
-      "這筆工令在你編輯期間已被其他人更新，請先刷新後再重新送出。",
+      "這筆工令的內容已變更，請先刷新後再重新送出。",
       "ENTRY_CONFLICT"
     );
   }
