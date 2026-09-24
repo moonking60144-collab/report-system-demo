@@ -14,6 +14,7 @@ import {
 import { getSelectableWorkReportColumns } from "../../src/features/work-report/hooks/workReportColumnDefinitions";
 import { useColumnMenuState } from "../../src/features/work-report/hooks/useColumnMenuState";
 import { useWorkReportColumns } from "../../src/features/work-report/hooks/useWorkReportColumns";
+import { useWorkReportMarkedRow } from "../../src/features/work-report/hooks/useWorkReportMarkedRow";
 import { WorkReportTableSection } from "../../src/features/work-report/components/WorkReportTableSection";
 import { WorkReportWorkspaceToolbar } from "../../src/features/work-report/components/WorkReportWorkspaceToolbar";
 import { readColumnDisplayMode, writeColumnDisplayMode } from "../../src/features/work-report/utils/storageUtils";
@@ -125,7 +126,11 @@ function WorkReportListVisualContractFixture() {
   }));
   const formId: "901" | "902" =
     new URLSearchParams(window.location.search).get("formId") === "902" ? "902" : "901";
-  const [, setPage] = useState(1);
+  const { markedRow, toggleMarkedRow, clearMarkedRow } = useWorkReportMarkedRow(formId);
+  const visibleColumnOrder = useMemo(() => new URLSearchParams(window.location.search).has("denseColumns")
+    ? getSelectableWorkReportColumns(formId, "fit").map((column) => column.key)
+    : VISIBLE_COLUMN_ORDER, [formId]);
+  const [page, setPage] = useState(1);
   const [records, setRecords] = useState<WorkReportRecord[]>(() =>
     INITIAL_RECORDS.map((record) => ({ ...record }))
   );
@@ -195,13 +200,13 @@ function WorkReportListVisualContractFixture() {
     const availableKeys = getSelectableWorkReportColumns(formId, columnDisplayMode).map(
       (column) => column.key
     );
-    return new Set(availableKeys.filter((key) => !VISIBLE_COLUMN_ORDER.includes(key)));
-  }, [columnDisplayMode, formId]);
+    return new Set(availableKeys.filter((key) => !visibleColumnOrder.includes(key)));
+  }, [columnDisplayMode, formId, visibleColumnOrder]);
   const { columns } = useWorkReportColumns({
     currentFormId: formId,
     columnDisplayMode,
     columnWidthOverrides: {},
-    columnOrder: VISIBLE_COLUMN_ORDER,
+    columnOrder: visibleColumnOrder,
     hiddenColumnKeys,
     columnColors: {},
     onColumnResizeStart: () => undefined,
@@ -327,13 +332,15 @@ function WorkReportListVisualContractFixture() {
         currentPageGroupLabel="製程 A 報工"
         currentPageContextLabel={formId === "901" ? "901 / PA" : "902 / PB"}
         matchedCount={statusProbe ? statusRecords.length : records.length}
+        markedRow={markedRow}
+        onClearMarkedRow={clearMarkedRow}
         searchValue=""
         onSearchValueChange={() => undefined}
         onSearchSubmit={() => undefined}
-        page={1}
-        hasMoreForPager={false}
-        onPrevPage={() => undefined}
-        onNextPage={() => undefined}
+        page={page}
+        hasMoreForPager={statusProbe}
+        onPrevPage={() => setPage(previous => Math.max(1, previous - 1))}
+        onNextPage={() => setPage(previous => previous + 1)}
         activeFilterCount={0}
         hasPendingFilterChanges={false}
         filterPanelOpen={false}
@@ -358,7 +365,7 @@ function WorkReportListVisualContractFixture() {
         controlsDisabled={false}
         isSyncingFromRagic={false}
         onRefresh={() => undefined}
-        stickyEnabled={false}
+        stickyEnabled={statusProbe}
         onHeightChange={() => undefined}
       />
       {statusProbe ? (
@@ -367,21 +374,14 @@ function WorkReportListVisualContractFixture() {
           columns={columns}
           columnDisplayMode={columnDisplayMode}
           visibleRecords={statusRecords}
-          pageFrom={1}
-          pageTo={statusRecords.length}
-          page={1}
-          loading={false}
           backgroundLoading={false}
           error={null}
           hasRenderableContent
-          submitting={false}
-          isHydratingAllRecords={false}
-          hasMoreForPager={false}
           softBusy={false}
           softBusyLabel={null}
           highlightedEntryId="normal"
-          onPrevPage={() => undefined}
-          onNextPage={() => undefined}
+          markedRow={markedRow}
+          onToggleMarkedRow={toggleMarkedRow}
           onOpenDetail={() => {
             window.__workReportListVisualDetailOpenCount =
               (window.__workReportListVisualDetailOpenCount ?? 0) + 1;

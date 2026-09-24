@@ -1265,6 +1265,7 @@ export function useWorkReportDataPipeline({
     processedPreviewRecords,
     visibleRecords,
     displayedPage,
+    displayedPageSize,
     pageFrom,
     pageTo,
     hasMoreForPager,

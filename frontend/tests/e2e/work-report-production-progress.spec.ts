@@ -33,6 +33,7 @@ async function installDetailMocks(
     cumulativeValues: number[];
     targetQty: number;
     expandFirstRow?: boolean;
+    machineCode?: string;
   }
 ) {
   let closeRequestCount = 0;
@@ -80,6 +81,7 @@ async function installDetailMocks(
             id: entryId,
             lastUpdatedAt: "2026-08-04T00:00:00.000Z",
             workOrderNo: `TEST-${formId}-UNDER-TARGET`,
+            machineCode: options.machineCode,
             status: "未結案",
             targetQtyPc: targetQty,
             reportsLoaded: true,
@@ -250,6 +252,79 @@ test("批次新增換列時不會把前一列的延後草稿套到新列", async
   const observedValues = samples.filter(Boolean);
   expect(observedValues).toContain(finalValue);
   expect(observedValues.every((value) => value === finalValue)).toBe(true);
+});
+
+test("批次新增不等待選項載入，晚到的選項也不覆蓋輸入", async ({ page }) => {
+  const entryId = "990109";
+  await installDetailMocks(page, {
+    formId: "901",
+    entryId,
+    cumulativeValues: [10],
+    targetQty: 10_000,
+    machineCode: "DEMO-01",
+  });
+
+  let releaseOptions!: () => void;
+  const optionsHeld = new Promise<void>((resolve) => {
+    releaseOptions = resolve;
+  });
+  let signalOptionsRequested!: () => void;
+  const optionsRequested = new Promise<void>((resolve) => {
+    signalOptionsRequested = resolve;
+  });
+  await page.route("**/api/forms/901/options**", async (route) => {
+    signalOptionsRequested();
+    await optionsHeld;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          machineId: [{
+            value: "DEMO-01",
+            label: "DEMO-01 - 測試機台",
+            display: "測試機台",
+            machineDefault: {
+              machineCode: "DEMO-01",
+              processCode: "TI02",
+              status: "使用中",
+            },
+          }],
+        },
+      }),
+    });
+  });
+
+  try {
+    await page.goto(`/reports/901/${entryId}?landingPage=thread-rolling-901&topView=report`);
+    await dismissSystemNoticeIfPresent(page);
+    await optionsRequested;
+
+    const existingRow = page.locator("tr[data-row-kind='detail']").first();
+    await existingRow.dblclick({ force: true });
+    const firstRow = page.locator("tr[data-row-kind='create-placeholder']").first();
+    await firstRow.locator("td").first().click({ force: true });
+    const quantityInput = firstRow.locator("[data-inline-editor-key='productionQty']");
+    await expect(quantityInput).toBeVisible({ timeout: 1_000 });
+    await quantityInput.fill("99");
+
+    const secondRow = page.locator("tr[data-row-kind='create-placeholder']").nth(1);
+    await secondRow.locator("td").first().click({ force: true });
+    const secondQuantityInput = secondRow.locator("[data-inline-editor-key='productionQty']");
+    await expect(secondQuantityInput).toBeVisible({ timeout: 1_000 });
+    await secondQuantityInput.fill("42");
+
+    releaseOptions();
+    await expect(secondQuantityInput).toHaveValue("42");
+    await expect(secondRow.locator("[data-inline-editor-key='machineId'] .detail-inline-picker-value"))
+      .toHaveText("DEMO-01");
+    await expect(firstRow.locator("[data-inline-editor-key='productionQty']"))
+      .toHaveCount(0);
+    await expect(existingRow.locator("[data-inline-editor-key='date']"))
+      .toHaveCount(0);
+  } finally {
+    releaseOptions();
+  }
 });
 
 test("StrictMode 重掛 effects 後虛擬捲動仍採用實測列高", async ({ page }) => {

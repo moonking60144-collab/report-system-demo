@@ -12,6 +12,8 @@ import {
 } from "../../src/routes/workReportRouterFactory";
 import type { WorkReportQueueTaskRecord } from "../../src/services/work-report/workReportTaskRegistryService";
 import { WorkReportTaskRegistryService } from "../../src/services/work-report/workReportTaskRegistryService";
+import { workReportTaskRegistryService } from "../../src/services/work-report/workReportTaskRegistryService";
+import { createReportTaskService } from "../../src/services/createReportTaskService";
 import { workReportEditingPresenceService } from "../../src/services/workReportEditingPresenceService";
 import { runWorkReportEntryMutationExclusive } from "../../src/services/work-report/workReportEntryMutationQueue";
 import { realtimeEventBus } from "../../src/events/realtimeEventBus";
@@ -29,7 +31,8 @@ function createDeps(): WorkReportRouterDeps {
       hasBlockingScheduleMutation: false,
       count: 0,
     }),
-    acknowledgeScheduleMutationObservation: (_formId, _entryId) => 0,
+    getUnresolvedScheduleMutationTaskIds: (_formId, _entryId) => [],
+    acknowledgeScheduleMutationObservation: (_formId, _entryId, _taskIds) => 0,
     getTaskRecord: (_taskId) => null,
     getSyncStatus: async (_formId) => null,
     getReports: async (_formId, _query) => ({
@@ -462,6 +465,64 @@ test("GET /api/forms/901/reports/:entryId strict refresh 不會以 SQLite 舊快
     assert.equal(payload.data.id, "E-901");
     assert.equal(payload.meta.cacheSource, "ragic-live");
     assert.equal(acknowledgedEntryId, "E-901");
+  });
+});
+
+test("strict refresh 只解除讀取開始前的未決任務，晚到失敗須再刷新", async () => {
+  const deps = createDeps();
+  const entryId = "E-REFRESH-OBSERVATION-RACE";
+  const failMutation = async (key: string) => {
+    const task = createReportTaskService.enqueue({
+      taskType: "update-report", operationKind: "update-sort-order", formId: "901", entryId,
+      queueKey: `901:${entryId}`, clientMutationId: key, operationFingerprint: key,
+      worker: async () => { throw new HttpError(502, "write outcome unknown", "RAGIC_WRITE_VERIFY_FAILED"); },
+    });
+    await runWorkReportEntryMutationExclusive("901", entryId, async () => undefined);
+    assert.equal(createReportTaskService.getTask(task.taskId)?.writeIndeterminate, true);
+    return task.taskId;
+  };
+  let releaseRead!: () => void;
+  const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let markReadStarted!: () => void;
+  const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+  deps.getUnresolvedScheduleMutationTaskIds = workReportTaskRegistryService.getUnresolvedScheduleMutationTaskIds.bind(workReportTaskRegistryService);
+  deps.acknowledgeScheduleMutationObservation = createReportTaskService.acknowledgeScheduleMutationObservation.bind(createReportTaskService);
+  let readCount = 0;
+  deps.getReportByEntryId = async () => {
+    if (++readCount === 1) {
+      markReadStarted();
+      await readBlocked;
+    }
+    return { data: { id: entryId, reports: [] }, meta: { cacheSource: "ragic-live", cacheState: "fresh", snapshotAt: null } };
+  };
+  await withTestServer(deps, async (baseUrl) => {
+    const url = `${baseUrl}/api/forms/901/reports/${entryId}?refresh=1&strictRefresh=1`;
+    const oldRefresh = fetch(url);
+    await readStarted;
+    let laterId: string;
+    try {
+      laterId = await failMutation("refresh-race-later");
+    } finally {
+      releaseRead();
+    }
+    assert.equal((await oldRefresh).status, 200);
+    assert.equal(createReportTaskService.getTask(laterId)?.writeIndeterminate, true, "OLD_REFRESH_MUST_NOT_SETTLE_LATER_WRITE");
+    assert.deepEqual(deps.getUnresolvedScheduleMutationTaskIds("901", entryId), [laterId]);
+    assert.equal((await fetch(url)).status, 200);
+    assert.equal(createReportTaskService.getTask(laterId)?.writeIndeterminate, false);
+    assert.deepEqual(deps.getUnresolvedScheduleMutationTaskIds("901", entryId), []);
+  });
+});
+
+test("strict refresh 讀取失敗不解除未決任務", async () => {
+  const deps = createDeps();
+  let acknowledgements = 0;
+  deps.getUnresolvedScheduleMutationTaskIds = () => ["unresolved"];
+  deps.getReportByEntryId = async () => { throw new HttpError(503, "read failed", "RAGIC_STALE_CHECK_UNAVAILABLE"); };
+  deps.acknowledgeScheduleMutationObservation = () => { acknowledgements += 1; return 1; };
+  await withTestServer(deps, async (baseUrl) => {
+    assert.equal((await fetch(`${baseUrl}/api/forms/901/reports/E-901?refresh=1&strictRefresh=1`)).status, 503);
+    assert.equal(acknowledgements, 0);
   });
 });
 

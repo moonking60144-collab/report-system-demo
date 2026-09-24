@@ -1,4 +1,9 @@
 const workReportZhTw = {
+  cellCopy: {
+    markRow: "標記此工令",
+    unmarkRow: "取消工令標記",
+    clearMarkedRow: "清除標記 {{workOrderNo}}",
+  },
   page: {
     title: "製造現場報工 Demo",
     groupLineA: "製程 A 報工",
@@ -919,6 +924,7 @@ const workReportZhTw = {
       active: "處理中 {{count}}",
       success: "已完成 {{count}}",
       failed: "需處理 {{count}}",
+      observed: "已重新確認 {{count}}",
     },
     progress: {
       label: "處理進度 {{processed}} / {{total}}",
@@ -956,6 +962,8 @@ const workReportZhTw = {
       targetMachine: "目標機台",
       readBackMachine: "回讀機台",
       notReadBack: "未取得",
+      observedAt: "重新確認時間",
+      originalFailure: "原始失敗",
     },
     status: {
       pending: "排隊中",
@@ -968,6 +976,7 @@ const workReportZhTw = {
       deleting: "刪除中",
       deleted: "已刪除",
       needsAttention: "需處理",
+      observedFailure: "先前失敗，已重新確認",
     },
     taskTypes: {
       create: "新增報工",

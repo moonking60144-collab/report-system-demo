@@ -31,10 +31,10 @@ function List() {
       <h1>捲動恢復測試</h1>
       <WorkReportTableSection columnDisplayMode="fit"
         columns={[{ title: "工令", dataIndex: "workOrderNo", width: 700 }]}
-        visibleRecords={records} pageFrom={1} pageTo={size} page={1} loading={false} backgroundLoading={false}
-        error={null} hasRenderableContent submitting={false} isHydratingAllRecords={false}
-        hasMoreForPager={false} softBusy={false} softBusyLabel={null} highlightedEntryId={highlightedEntryId}
-        onPrevPage={() => {}} onNextPage={() => {}} onOpenDetail={handleOpenDetail}
+        visibleRecords={records} backgroundLoading={false}
+        error={null} hasRenderableContent
+        softBusy={false} softBusyLabel={null} highlightedEntryId={highlightedEntryId}
+        markedRow={null} onToggleMarkedRow={() => {}} onOpenDetail={handleOpenDetail}
         onPreloadDetail={() => {}} onRetry={() => {}} />
     </div></section>
   </div></main>;

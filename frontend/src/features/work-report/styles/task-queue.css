@@ -109,6 +109,17 @@
   color: #b91c1c;
 }
 
+.detail-task-queue-summary .is-observed,
+.detail-task-queue-status-badge.is-observed {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.detail-task-queue-item.is-observed {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
 .detail-task-queue-list {
   display: grid;
   gap: 0.75rem;

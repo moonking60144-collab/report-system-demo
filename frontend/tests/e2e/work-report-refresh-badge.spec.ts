@@ -65,7 +65,7 @@ for (const width of [375, 768, 1440]) {
       await expect(badge.locator(".loading-spinner")).toHaveCount(0);
       await page.getByRole("button", { name: "切換操作鎖定" }).click();
       await expect(table).toHaveClass(/is-soft-busy/);
-      await expect(table.locator(".table-soft-busy-overlay")).toBeVisible();
+      await expect(table.locator(".table-soft-busy-overlay")).toHaveCount(0);
       await expect(table).toHaveCSS("pointer-events", "none");
     });
   }

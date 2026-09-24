@@ -180,6 +180,7 @@ export function useWorkReportDetailInlineController({
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const editingRowSnapshotRef = useRef<{ formId: WorkReportFormId | null; entryId: string | null; rowId: string; hash?: string; timestamp?: string } | null>(null);
   const [editingRowDraft, setEditingRowDraft] = useState<FormState | null>(null);
+  const createActivationVersionRef = useRef(0);
   const [savingRowId, setSavingRowId] = useState<string | null>(null);
   const [linkedPickerState, setLinkedPickerState] = useState<LinkedPickerState | null>(null);
   const [autoHighlightedInlineKeys, setAutoHighlightedInlineKeys] = useState<InlineEditableDetailKey[]>([]);
@@ -643,8 +644,16 @@ export function useWorkReportDetailInlineController({
       if (editingRowId === row.rowId) {
         return;
       }
+      const activationVersion = ++createActivationVersionRef.current;
       await ensureOptionsLoaded();
+      if (createActivationVersionRef.current !== activationVersion) {
+        return;
+      }
       if ((await acquireRowEditLock(row.rowId)) === null) {
+        return;
+      }
+      if (createActivationVersionRef.current !== activationVersion) {
+        void releaseRowEditLock(row.rowId);
         return;
       }
       editingRowSnapshotRef.current = {
@@ -657,7 +666,7 @@ export function useWorkReportDetailInlineController({
         rowId: row.rowId,
       });
     },
-    [acquireRowEditLock, editingRowId, ensureOptionsLoaded, formId, logDetailEvent, modalOpen, record, safeEntryId, submitting, t]
+    [acquireRowEditLock, editingRowId, ensureOptionsLoaded, formId, logDetailEvent, modalOpen, record, releaseRowEditLock, safeEntryId, submitting, t]
   );
 
   const activateInlineCreateRow = useCallback(
@@ -672,25 +681,48 @@ export function useWorkReportDetailInlineController({
       if (editingRowId === rowId && (!draftOverride || editingRowDraft)) {
         return;
       }
-      const options = await ensureOptionsLoaded();
+      const activationVersion = ++createActivationVersionRef.current;
       const createDraft =
         draftOverride
           ? applyCreateDefaultsToFormState(
               draftOverride,
               record,
-              options.machineId ?? [],
-              options.operatorId ?? []
+              formOptions.machineId ?? [],
+              formOptions.operatorId ?? []
             )
           : buildInitialFormState(
               "create",
               null,
               record,
-              options.machineId ?? []
+              formOptions.machineId ?? []
             );
       setEditingRowId(rowId);
       setEditingRowDraft(createDraft);
       logDetailEvent("ui", "inline-create-opened", `開啟 inline 新增：row ${rowId}`, {
         rowId,
+      });
+      const options = await ensureOptionsLoaded();
+      if (createActivationVersionRef.current !== activationVersion) {
+        return;
+      }
+      setEditingRowDraft((current) => {
+        if (!current || createActivationVersionRef.current !== activationVersion) {
+          return current;
+        }
+        const defaults = applyCreateDefaultsToFormState(
+          current,
+          record,
+          options.machineId ?? [],
+          options.operatorId ?? []
+        );
+        return {
+          ...defaults,
+          machineId: current.machineId !== createDraft.machineId ? current.machineId : defaults.machineId,
+          operatorId: current.operatorId !== createDraft.operatorId ? current.operatorId : defaults.operatorId,
+          operatorName: current.operatorName !== createDraft.operatorName ? current.operatorName : defaults.operatorName,
+          processCode: current.processCode !== createDraft.processCode ? current.processCode : defaults.processCode,
+          reportType: current.reportType !== createDraft.reportType ? current.reportType : defaults.reportType,
+        };
       });
     },
     [
@@ -698,6 +730,7 @@ export function useWorkReportDetailInlineController({
       editingRowId,
       ensureOptionsLoaded,
       formId,
+      formOptions,
       logDetailEvent,
       modalOpen,
       record,
@@ -1013,6 +1046,7 @@ export function useWorkReportDetailInlineController({
     if (savingRowId) {
       return;
     }
+    createActivationVersionRef.current += 1;
     if (editingRowId) {
       logDetailEvent("ui", "inline-edit-cancelled", "取消 inline 編輯", {
         rowId: editingRowId,

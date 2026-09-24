@@ -449,7 +449,6 @@
   }
 
   .work-report-workspace-toolbar {
-    position: static;
     flex-direction: column;
     align-items: stretch;
     gap: 0.5rem;
@@ -470,10 +469,6 @@
 
   .work-report-workspace-center .workspace-quick-search {
     display: grid;
-  }
-
-  .workspace-pager {
-    display: none;
   }
 
   .work-report-workspace-actions {

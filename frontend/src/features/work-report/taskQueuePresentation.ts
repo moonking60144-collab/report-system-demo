@@ -12,6 +12,12 @@ export function isTaskActive(task: Pick<WorkReportQueueTask, "status">): boolean
   return task.status === "pending" || task.status === "running";
 }
 
+export function isObservedTaskFailure(task: WorkReportQueueTask): boolean {
+  return task.status === "failed" && Boolean(task.scheduleMutationObservedAt) &&
+    task.writeIndeterminate !== true && task.lifecycleState !== "indeterminate" &&
+    task.lifecycleState !== "unknown";
+}
+
 export function isMutationQueueTask(
   task: Pick<WorkReportQueueTask, "taskType">
 ): boolean {
@@ -73,6 +79,7 @@ export function summarizeTaskQueue(tasks: WorkReportQueueTask[]): {
   activeCount: number;
   successCount: number;
   failedCount: number;
+  observedCount: number;
 } {
   return tasks.reduce(
     (summary, task) => {
@@ -81,11 +88,12 @@ export function summarizeTaskQueue(tasks: WorkReportQueueTask[]): {
       } else if (task.status === "success") {
         summary.successCount += 1;
       } else if (task.status === "failed") {
-        summary.failedCount += 1;
+        if (isObservedTaskFailure(task)) summary.observedCount += 1;
+        else summary.failedCount += 1;
       }
       return summary;
     },
-    { activeCount: 0, successCount: 0, failedCount: 0 }
+    { activeCount: 0, successCount: 0, failedCount: 0, observedCount: 0 }
   );
 }
 

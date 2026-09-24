@@ -8,6 +8,7 @@ import {
 } from "../../../ragic/client";
 import { FormConfig } from "../../../types/formConfig";
 import { HttpError, UpstreamError } from "../../../utils/httpError";
+import { isRagicRequestAdmissionError } from "../../../infra/ragicRequestScheduler";
 
 export function extractRagicErrorDetail(error: unknown): {
   status?: number;
@@ -29,7 +30,7 @@ export function throwRagicHttpError(
     messagePrefix: string;
   }
 ): never {
-  if (error instanceof HttpError) {
+  if (error instanceof HttpError || isRagicRequestAdmissionError(error)) {
     throw error;
   }
   const { status, message } = extractRagicErrorDetail(error);

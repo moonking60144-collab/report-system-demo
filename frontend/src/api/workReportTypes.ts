@@ -387,6 +387,7 @@ export interface WorkReportQueueTask extends MutationLifecycleTiming {
   slotAcquiredAt?: string | null;
   writeStartedAt?: string | null;
   finishedAt: string | null;
+  scheduleMutationObservedAt?: string | null;
   updatedAt: string;
   message: string | null;
   errorCode: string | null;

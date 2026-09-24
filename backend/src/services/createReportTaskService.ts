@@ -123,6 +123,7 @@ export interface CreateReportTaskWorkerContext {
 
 interface TaskSnapshotPayload {
   version: string;
+  dispatchBarrierVersion?: number;
   savedAt: string;
   tasks: CreateReportTask[];
 }
@@ -314,15 +315,18 @@ class CreateReportTaskService {
   acknowledgeScheduleMutationObservation(
     formId: string,
     entryId: string,
+    taskIds: readonly string[],
     observedAt = new Date().toISOString()
   ): number {
     const normalizedEntryId = String(entryId ?? "").trim();
     if (!normalizedEntryId) {
       return 0;
     }
+    const observedTaskIds = new Set(taskIds);
     let acknowledgedCount = 0;
     for (const [taskId, task] of this.tasks.entries()) {
       if (
+        !observedTaskIds.has(taskId) ||
         task.formId !== formId ||
         task.entryId !== normalizedEntryId ||
         !isUnresolvedScheduleMutationTask(task)
@@ -343,6 +347,7 @@ class CreateReportTaskService {
       workReportTaskRegistryService.acknowledgeScheduleMutationObservation(
         formId,
         normalizedEntryId,
+        taskIds,
         observedAt
       );
     if (acknowledgedCount > 0) {
@@ -410,7 +415,7 @@ class CreateReportTaskService {
       Date.parse(slotAcquiredAt) - Date.parse(task.acceptedAt ?? task.createdAt)
     );
     const entryQueueWaitMs = Math.max(0, acceptedToSlotMs - syncWaitMs);
-    this.updateTask(taskId, {
+    const dispatchPersistence = this.updateTask(taskId, {
       status: "running",
       startedAt,
       slotAcquiredAt,
@@ -424,6 +429,10 @@ class CreateReportTaskService {
     });
 
     try {
+      // Recovery can trust pending only when the snapshot records this barrier.
+      await dispatchPersistence.catch(() => {
+        throw new HttpError(503, "任務狀態無法保存，尚未執行寫入；請稍後重試。", "TASK_PERSISTENCE_FAILED");
+      });
       const workerResult = this.normalizeTaskResult(
         await worker({
           updateMutationTiming: (input) => {
@@ -537,10 +546,10 @@ class CreateReportTaskService {
     }
   }
 
-  private updateTask(taskId: string, patch: Partial<CreateReportTask>): void {
+  private updateTask(taskId: string, patch: Partial<CreateReportTask>): Promise<void> {
     const task = this.tasks.get(taskId);
     if (!task) {
-      return;
+      return Promise.resolve();
     }
 
     const nextTask: CreateReportTask = {
@@ -574,7 +583,7 @@ class CreateReportTaskService {
 
     this.syncTaskToRegistry(this.tasks.get(taskId)!);
     this.pruneHistory();
-    this.schedulePersist();
+    return this.schedulePersist();
   }
 
   private markWaitingForSync(taskId: string): void {
@@ -834,7 +843,7 @@ class CreateReportTaskService {
         }
       }
 
-      const recoveredCount = this.recoverInterruptedTasks();
+      const recoveredCount = this.recoverInterruptedTasks(parsed.dispatchBarrierVersion === 1);
       await workReportTaskRegistryService.initialize();
       this.syncAllTasksToRegistry();
       this.pruneHistory();
@@ -856,7 +865,7 @@ class CreateReportTaskService {
     }
   }
 
-  private recoverInterruptedTasks(): number {
+  private recoverInterruptedTasks(hasDispatchBarrier = true): number {
     const recoveredAt = new Date().toISOString();
     let recoveredCount = 0;
 
@@ -865,7 +874,7 @@ class CreateReportTaskService {
         continue;
       }
 
-      const writeIndeterminate = task.status === "running";
+      const writeIndeterminate = task.status === "running" || !hasDispatchBarrier;
       const taskLabel = resolveTaskBaseMessage(task);
       recoveredCount += 1;
       const recoveredTask = this.normalizeTaskLifecycle({
@@ -878,7 +887,7 @@ class CreateReportTaskService {
         error: {
           code: "TASK_RECOVERED_AFTER_RESTART",
           message: writeIndeterminate
-            ? `服務重啟時${taskLabel}正在執行，Ragic 寫入結果尚未確認；請先重新整理確認，不可直接重送`
+            ? `服務重啟時${taskLabel}的執行結果尚未確認；請先重新整理確認，不可直接重送`
             : "服務重啟，原排隊任務尚未開始，已標記為失敗，請重新送出",
         },
       });
@@ -921,24 +930,19 @@ class CreateReportTaskService {
     }
   }
 
-  private schedulePersist(): void {
+  private schedulePersist(): Promise<void> {
     if (!env.CREATE_TASK_PERSIST_ENABLED) {
-      return;
+      return Promise.resolve();
     }
 
-    this.persistChain = this.persistChain
-      .catch(() => {
-        // NOTE: keep chain alive
-      })
-      .then(async () => {
-        await this.persistToDisk();
-      })
-      .catch((error) => {
-        console.warn("[create-task][snapshot-save-failed]", {
-          filePath: this.resolveStoreFilePath(),
-          error: error instanceof Error ? error.message : String(error),
-        });
+    const persistence = this.persistChain.then(() => this.persistToDisk());
+    this.persistChain = persistence.catch((error) => {
+      console.warn("[create-task][snapshot-save-failed]", {
+        filePath: this.resolveStoreFilePath(),
+        error: error instanceof Error ? error.message : String(error),
       });
+    });
+    return persistence;
   }
 
   private async persistToDisk(): Promise<void> {
@@ -948,6 +952,7 @@ class CreateReportTaskService {
 
     const snapshot: TaskSnapshotPayload = {
       version: TASK_SNAPSHOT_VERSION,
+      dispatchBarrierVersion: 1,
       savedAt: new Date().toISOString(),
       tasks: Array.from(this.tasks.values())
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))

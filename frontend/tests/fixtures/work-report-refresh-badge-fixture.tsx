@@ -53,11 +53,10 @@ export function Fixture() {
     />
     <WorkReportTableSection
       columns={[{ title: "工令單號", dataIndex: "workOrderNo", width: 180 }]}
-      columnDisplayMode="fit" visibleRecords={records} pageFrom={1} pageTo={1} page={1}
-      loading={false} backgroundLoading={refreshing} error={null} hasRenderableContent
-      submitting={false} isHydratingAllRecords={false} hasMoreForPager={false}
+      columnDisplayMode="fit" visibleRecords={records}
+      backgroundLoading={refreshing} error={null} hasRenderableContent
       softBusy={softBusy} softBusyLabel={null} highlightedEntryId={null}
-      onPrevPage={noop} onNextPage={noop} onOpenDetail={noop} onPreloadDetail={noop} onRetry={noop}
+      markedRow={null} onToggleMarkedRow={noop} onOpenDetail={noop} onPreloadDetail={noop} onRetry={noop}
     />
   </main>;
 }
