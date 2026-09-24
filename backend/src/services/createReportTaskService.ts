@@ -40,6 +40,22 @@ export interface CreateReportTaskResult {
 export interface CreateReportTaskError {
   code?: string;
   message: string;
+  mainMachineVerification?: { expectedMachineCode: string; confirmedMachineCode: string | null };
+}
+
+function mainMachineVerificationDiagnostic(error: unknown, operationKind?: WorkReportQueueTaskOperationKind):
+  CreateReportTaskError["mainMachineVerification"] {
+  if (operationKind !== "update-main-machine" ||
+    !error || typeof error !== "object" || (error as { code?: unknown }).code !== "RAGIC_WRITE_VERIFY_FAILED") return undefined;
+  const detail = (error as { upstreamDetail?: unknown }).upstreamDetail;
+  if (!detail || typeof detail !== "object") return undefined;
+  const values = detail as { expectedMachineCode?: unknown; confirmedMachineCode?: unknown };
+  if (typeof values.expectedMachineCode !== "string") return undefined;
+  const bounded = (value: string) => value.replace(/[\r\n\t]/g, " ").slice(0, 80);
+  return {
+    expectedMachineCode: bounded(values.expectedMachineCode),
+    confirmedMachineCode: typeof values.confirmedMachineCode === "string" ? bounded(values.confirmedMachineCode) : null,
+  };
 }
 
 export interface CreateReportTask {
@@ -464,6 +480,7 @@ class CreateReportTaskService {
     } catch (error) {
       const finishedAt = new Date().toISOString();
       const currentTask = this.tasks.get(taskId);
+      const mainMachineVerification = mainMachineVerificationDiagnostic(error, task.operationKind);
       const normalizedError =
         error instanceof Error
           ? {
@@ -472,6 +489,7 @@ class CreateReportTaskService {
                   ? String((error as { code?: unknown }).code)
                   : undefined,
               message: error.message,
+              ...(mainMachineVerification ? { mainMachineVerification } : {}),
             }
           : { message: String(error) };
       const failurePhase =
@@ -980,6 +998,7 @@ class CreateReportTaskService {
       message,
       errorCode: task.error?.code ?? null,
       errorMessage: task.error?.message ?? null,
+      mainMachineVerification: task.error?.mainMachineVerification ?? null,
       writeIndeterminate: task.writeIndeterminate ?? null,
       actorClientId: task.actorClientId ?? null,
       actorTabId: task.actorTabId ?? null,

@@ -21,6 +21,7 @@ import {
   parseEditLockVersion,
   parseEditSessionId,
   parseExpectedEntryLastUpdatedAt,
+  parseExpectedEntrySnapshotHash,
 } from "./workReportRequest";
 
 // 保留 re-export 避免動到既有 callers；新程式碼請直接從 ./taskActorContext import
@@ -136,6 +137,7 @@ export interface MutationRequestContext {
   editSessionId?: string;
   editLockVersion?: number;
   expectedEntryLastUpdatedAt?: string;
+  expectedEntrySnapshotHash?: string;
   clientMutationId?: string;
   createIdempotencyKey?: string;
   actor: TaskActorContext;
@@ -169,6 +171,9 @@ export function parseMutationRequestContext(
     editLockVersion: parseEditLockVersion(req.header("x-edit-lock-version")),
     expectedEntryLastUpdatedAt: parseExpectedEntryLastUpdatedAt(
       req.header("x-entry-last-updated-at")
+    ),
+    expectedEntrySnapshotHash: parseExpectedEntrySnapshotHash(
+      req.header("x-entry-snapshot-hash")
     ),
     clientMutationId: String(req.header("x-client-mutation-id") ?? "").trim() || undefined,
     createIdempotencyKey:
@@ -261,6 +266,7 @@ export async function assertMutationEntryNotModified(
       priority: "mutation",
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries,
+      expectedEntrySnapshotHash: ctx.expectedEntrySnapshotHash,
     }
   );
 }

@@ -294,7 +294,7 @@ export function toNullableIsoDateTime(value: unknown): string | null {
 
 export function buildSearchText(record: WorkReportRecord): string | null {
   const parts = Object.entries(record)
-    .filter(([key, value]) => key !== "reports" && key !== "id" && value !== null && value !== undefined)
+    .filter(([key, value]) => key !== "reports" && key !== "id" && key !== "entrySnapshotHash" && value !== null && value !== undefined)
     .map(([, value]) => String(value).trim())
     .filter(Boolean);
   if (parts.length === 0) {

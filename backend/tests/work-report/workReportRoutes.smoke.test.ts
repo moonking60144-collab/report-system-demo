@@ -2573,12 +2573,14 @@ test("close/reopen async variant 都先受理並在 worker 寫 audit", async (t)
     deps.assertEntryNotModified = async (
       formId,
       entryId,
-      expectedEntryLastUpdatedAt
+      expectedEntryLastUpdatedAt,
+      options
     ) => {
       staleCheckCalls += 1;
       assert.equal(formId, "901");
       assert.equal(entryId, "E-901");
       assert.equal(expectedEntryLastUpdatedAt, "2026-08-12T00:00:00.000Z");
+      assert.equal(options?.expectedEntrySnapshotHash, `sha256:${"a".repeat(64)}`);
     };
     deps.enqueueCreateTask = (input) => {
       assert.equal(input.taskType, "update-report");
@@ -2613,6 +2615,7 @@ test("close/reopen async variant 都先受理並在 worker 寫 audit", async (t)
           headers: {
             "x-client-mutation-id": `${item.path}-mutation-1`,
             "x-entry-last-updated-at": "2026-08-12T00:00:00.000Z",
+            "x-entry-snapshot-hash": `sha256:${"a".repeat(64)}`,
           },
         }
       );

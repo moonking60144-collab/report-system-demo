@@ -12,7 +12,7 @@ import {
 } from "./taskBatchRetryStore";
 import type { WorkReportQueueTask } from "../../api/workReport";
 
-export type BatchCreateRetryBlockReason = "indeterminate" | "precondition" | "statusUnknown";
+export type BatchCreateRetryBlockReason = "indeterminate" | "precondition" | "statusUnknown" | "baselineUnavailable";
 
 function readTaskFailureText(task: WorkReportQueueTask): string {
   return `${task.errorCode ?? ""} ${task.errorMessage ?? ""} ${task.message ?? ""}`;
@@ -38,6 +38,9 @@ export function getBatchCreateRetryBlockReason(
   ) {
     return "statusUnknown";
   }
+  if (text.includes("ENTRY_BASELINE_UNAVAILABLE")) {
+    return "baselineUnavailable";
+  }
   if (
     text.includes("ENTRY_CONFLICT") ||
     text.includes("ENTRY_EDIT_LOCKED") ||
@@ -55,6 +58,9 @@ function getBatchCreateRetryBlockedMessage(reason: BatchCreateRetryBlockReason):
   }
   if (reason === "statusUnknown") {
     return "這筆批次新增在開始前因無法確認工令狀態而中止，不能沿用舊資料重送；請稍後刷新工令後重新新增。";
+  }
+  if (reason === "baselineUnavailable") {
+    return "這筆批次新增在開始前無法確認你原先看到的工令版本，不能沿用舊資料重送；請刷新工令後重新新增。";
   }
   return "這筆批次新增在開始前就因工令狀態已變更而失敗，不能沿用舊資料重送；請刷新工令後重新新增。";
 }

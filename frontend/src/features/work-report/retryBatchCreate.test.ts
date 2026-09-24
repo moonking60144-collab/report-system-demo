@@ -111,6 +111,16 @@ describe("retryBatchCreateFromRecord", () => {
     expect(enqueueRetryPoll).not.toHaveBeenCalled();
   });
 
+  it("blocks baseline-unavailable retries without claiming the work order changed", async () => {
+    vi.mocked(fetchWorkReportQueueTask).mockResolvedValueOnce(createFailedBatchTask({
+      errorCode: "ENTRY_BASELINE_UNAVAILABLE",
+      errorMessage: "目前無法確認你原先看到的工令版本",
+    }));
+    await expect(retryBatchCreateFromRecord(createRetryRecord()))
+      .rejects.toThrow("無法確認你原先看到的工令版本");
+    expect(createReportsBatchAccepted).not.toHaveBeenCalled();
+  });
+
   it("classifies precondition and indeterminate failures separately", () => {
     expect(getBatchCreateRetryBlockReason(
       createFailedBatchTask({

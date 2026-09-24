@@ -7,6 +7,9 @@ import { workReportSqliteRepository } from "../../src/storage/sqlite/workReportS
 import { READ_MODEL_SCHEMA_VERSION } from "../../src/storage/sqlite/readModelSchema";
 import type { WorkReportRecord } from "../../src/types/workReport";
 import { HttpError } from "../../src/utils/httpError";
+import { buildEntrySnapshotHash } from "../../src/services/work-report/shared/entrySnapshotHash";
+import { getFormConfig } from "../../src/config/forms";
+import { transformRow } from "../../src/services/work-report/queries/rowTransform";
 
 function createRecord(overrides: Partial<WorkReportRecord> = {}): WorkReportRecord {
   return {
@@ -152,7 +155,7 @@ test("assertEntryNotModified 在 live Ragic 內容真的改變時維持 409", as
   );
 });
 
-test("assertEntryNotModified 不用不符合 expected timestamp 的 SQLite snapshot 放行", async (t) => {
+test("assertEntryNotModified 找不到使用者原版本時不把未知誤稱為內容衝突", async (t) => {
   const sqliteRecord = createRecord({
     lastUpdatedAt: "2026-06-24T00:55:00.000Z",
   });
@@ -166,8 +169,58 @@ test("assertEntryNotModified 不用不符合 expected timestamp 的 SQLite snaps
     (error) =>
       error instanceof HttpError &&
       error.statusCode === 409 &&
-      error.code === "ENTRY_CONFLICT"
+      error.code === "ENTRY_BASELINE_UNAVAILABLE"
   );
+});
+
+for (const formId of ["901", "902"] as const) {
+  test(`${formId} Demo 欄位轉換後，Callback 先更新快照不誤擋純時間漂移`, async (t) => {
+    const config = getFormConfig(formId);
+    const processSource = config.linkedFields?.processCode;
+    assert.ok(processSource);
+    const entryId = `E-${formId}`;
+    const makeRecord = (updatedAt: string, productionQty: string, display: string) =>
+      transformRow({
+        entryId,
+        data: {
+          _ragicId: entryId,
+          [config.mainFields.workOrderNo]: "WO-DEMO-0004",
+          [config.mainFields.status]: "未結案",
+          [config.mainFields.lastUpdatedAt]: updatedAt,
+          [config.subtableId]: {
+            "1001": {
+              [config.subtableFields.processCode]: "MB50",
+              [config.subtableFields.productionQty]: productionQty,
+            },
+          },
+        },
+      }, config, new Map([["processCode", new Map([["MB50", { [processSource.displayFieldId]: display }]])]]));
+    const viewedRecord = makeRecord("2026-06-24T01:00:00.000Z", "12", "舊製程顯示");
+    const callbackRecord = makeRecord("2026-06-24T01:05:00.000Z", "12", "新製程顯示");
+    const records = { sqliteRecord: viewedRecord, liveRecord: callbackRecord };
+    installPreconditionStubs(t, records);
+    const shown = await workReportReadService.getReportByEntryIdResult(formId, entryId);
+    assert.match(shown.data.entrySnapshotHash ?? "", /^sha256:[a-f0-9]{64}$/);
+    records.sqliteRecord = callbackRecord;
+
+    await assert.doesNotReject(() => workReportService.assertEntryNotModified(formId, entryId,
+      String(shown.data.lastUpdatedAt), { expectedEntrySnapshotHash: shown.data.entrySnapshotHash }));
+
+    const changedRecord = makeRecord("2026-06-24T01:05:00.000Z", "13", "新製程顯示");
+    records.sqliteRecord = changedRecord;
+    records.liveRecord = changedRecord;
+    await assert.rejects(() => workReportService.assertEntryNotModified(formId, entryId,
+      String(shown.data.lastUpdatedAt), { expectedEntrySnapshotHash: shown.data.entrySnapshotHash }),
+    (error) => error instanceof HttpError && error.code === "ENTRY_CONFLICT");
+  });
+}
+
+test("Callback 已覆蓋 SQLite 時保留使用者原 hash，可放行純時間漂移", async (t) => {
+  const viewedRecord = createRecord();
+  const callbackRecord = createRecord({ lastUpdatedAt: "2026-06-24T01:05:00.000Z" });
+  installPreconditionStubs(t, { sqliteRecord: callbackRecord, liveRecord: callbackRecord });
+  await assert.doesNotReject(() => workReportService.assertEntryNotModified("901", "E-901",
+    String(viewedRecord.lastUpdatedAt), { expectedEntrySnapshotHash: buildEntrySnapshotHash(viewedRecord) }));
 });
 
 test("assertEntryNotModified 在 Ragic stale check 逾時時回 typed 504 且不放行寫入", async (t) => {

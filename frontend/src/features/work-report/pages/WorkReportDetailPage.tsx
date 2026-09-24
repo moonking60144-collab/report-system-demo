@@ -209,6 +209,7 @@ const BASE_DETAIL_KEYS = [
   "cumulativeQty",
   "remark",
 ] as const;
+const INTERNAL_DETAIL_ROW_KEYS = new Set(["snapshotHash"]);
 
 const SETUP_COLUMNS_ORDER_901: ReadonlyArray<OrderedDetailColumn> = [
   { key: "setupAdjustType", label: "workReport:reportForm.setupSection.fields.setupAdjustType", className: "col-setup-adjust-type" },
@@ -526,6 +527,7 @@ export function WorkReportDetailPage() {
   const [workOrderClosing, setWorkOrderClosing] = useState(false);
   const workOrderCloseRequestInFlightRef = useRef(false);
   const [workOrderConfirmAction, setWorkOrderConfirmAction] = useState<"close" | "reopen" | null>(null);
+  const workOrderConfirmBaselineRef = useRef<{ timestamp?: string; hash?: string } | null>(null);
   const [workOrderUnderTargetAcknowledged, setWorkOrderUnderTargetAcknowledged] = useState(false);
   const [hiddenColumnsByForm, setHiddenColumnsByForm] = useState<Record<string, string[]>>(
     () => readDetailHiddenColumnsByForm()
@@ -1526,7 +1528,7 @@ export function WorkReportDetailPage() {
     const dynamicKeys: string[] = [];
     const seen = new Set<string>();
     for (const key of ALWAYS_AVAILABLE_DETAIL_DYNAMIC_KEYS) {
-      if (knownKeys.has(key) || seen.has(key)) {
+      if (knownKeys.has(key) || INTERNAL_DETAIL_ROW_KEYS.has(key) || seen.has(key)) {
         continue;
       }
       seen.add(key);
@@ -1535,7 +1537,7 @@ export function WorkReportDetailPage() {
     for (const row of detailRows) {
       const rowRecord = row as Record<string, unknown>;
       for (const key of Object.keys(rowRecord)) {
-        if (knownKeys.has(key)) {
+        if (knownKeys.has(key) || INTERNAL_DETAIL_ROW_KEYS.has(key)) {
           continue;
         }
         if (key.endsWith("Display")) {
@@ -2668,6 +2670,10 @@ export function WorkReportDetailPage() {
   const handleManualCloseWorkOrder = useCallback(
     (action: "close" | "reopen") => {
       if (!record || workOrderClosing) return;
+      workOrderConfirmBaselineRef.current = {
+        timestamp: resolveExpectedEntryLastUpdatedAt(record),
+        hash: record.entrySnapshotHash,
+      };
       setWorkOrderUnderTargetAcknowledged(false);
       setWorkOrderConfirmAction(action);
     },
@@ -2692,17 +2698,20 @@ export function WorkReportDetailPage() {
     setWorkOrderClosing(true);
     try {
       const action = workOrderConfirmAction;
+      const baseline = workOrderConfirmBaselineRef.current;
       const clientMutationId = createClientMutationId();
       const accepted = action === "close"
         ? await closeWorkOrderAccepted(formId, safeEntryId, {
             clientMutationId,
             workOrderNo: record?.workOrderNo ?? null,
-            expectedEntryLastUpdatedAt,
+            expectedEntryLastUpdatedAt: baseline?.timestamp,
+            expectedEntrySnapshotHash: baseline?.hash,
           })
         : await reopenWorkOrderAccepted(formId, safeEntryId, {
             clientMutationId,
             workOrderNo: record?.workOrderNo ?? null,
-            expectedEntryLastUpdatedAt,
+            expectedEntryLastUpdatedAt: baseline?.timestamp,
+            expectedEntrySnapshotHash: baseline?.hash,
           });
       await registerAcceptedMutationTask("update", accepted, undefined, {
         mutationId: clientMutationId,
@@ -2725,6 +2734,7 @@ export function WorkReportDetailPage() {
           ? "workReport:detailPage.manualCloseSuccess"
           : "workReport:detailPage.manualReopenSuccess";
       setWorkOrderConfirmAction(null);
+      workOrderConfirmBaselineRef.current = null;
       setWorkOrderUnderTargetAcknowledged(false);
       setNotice({ type: "success", message: t(successKey) });
     } catch (error) {
@@ -2735,7 +2745,6 @@ export function WorkReportDetailPage() {
     }
   }, [
     formId,
-    expectedEntryLastUpdatedAt,
     isUnderTargetCloseWarningStep,
     record?.status,
     record?.workOrderNo,
@@ -2750,6 +2759,7 @@ export function WorkReportDetailPage() {
       return;
     }
     setWorkOrderConfirmAction(null);
+    workOrderConfirmBaselineRef.current = null;
     setWorkOrderUnderTargetAcknowledged(false);
   }, [workOrderClosing]);
 

@@ -11,6 +11,7 @@ import { workReportSqliteRepository } from "../../storage/sqlite/workReportSqlit
 import { WorkReportReadSupport } from "./shared/workReportReadSupport";
 import { createRagicLiveReadMeta, resolveSqliteReadMeta } from "./readModelState";
 import { runWorkReportEntryProjection } from "../work-report-sync/workReportEntryProjectionQueue";
+import { buildEntrySnapshotHash } from "./shared/entrySnapshotHash";
 
 export class WorkReportEntryReadService {
   constructor(
@@ -32,7 +33,10 @@ export class WorkReportEntryReadService {
       persistRefreshToSqlite?: boolean;
     } = {}
   ): Promise<WorkReportRecord> {
-    return (await this.getReportByEntryIdResult(formId, entryId, options)).data;
+    const result = await this.getUndecoratedEntryResult(formId, entryId, options);
+    const record = { ...result.data };
+    delete record.entrySnapshotHash;
+    return record;
   }
 
   async getReportByEntryIdResult(
@@ -47,12 +51,24 @@ export class WorkReportEntryReadService {
       persistRefreshToSqlite?: boolean;
     } = {}
   ): Promise<ReportEntryQueryResult> {
+    const result = await this.getUndecoratedEntryResult(formId, entryId, options);
+    return { ...result, data: { ...result.data, entrySnapshotHash: buildEntrySnapshotHash(result.data) } };
+  }
+
+  private async getUndecoratedEntryResult(
+    formId: string,
+    entryId: string,
+    options: NonNullable<Parameters<WorkReportEntryReadService["getReportByEntryIdResult"]>[2]>
+  ): Promise<ReportEntryQueryResult> {
+    let result: ReportEntryQueryResult;
     if (options.refresh && options.persistRefreshToSqlite) {
-      return runWorkReportEntryProjection(formId, entryId, () =>
+      result = await runWorkReportEntryProjection(formId, entryId, () =>
         this.readReportByEntryIdResult(formId, entryId, options)
       );
+    } else {
+      result = await this.readReportByEntryIdResult(formId, entryId, options);
     }
-    return this.readReportByEntryIdResult(formId, entryId, options);
+    return result;
   }
 
   private async readReportByEntryIdResult(

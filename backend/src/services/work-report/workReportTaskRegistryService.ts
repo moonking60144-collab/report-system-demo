@@ -79,6 +79,7 @@ export interface WorkReportQueueTaskRecord {
   message: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  mainMachineVerification?: { expectedMachineCode: string; confirmedMachineCode: string | null } | null;
   actorClientId: string | null;
   actorTabId: string | null;
   actorIp: string | null;
@@ -131,6 +132,7 @@ interface UpsertWorkReportQueueTaskInput {
   message?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  mainMachineVerification?: { expectedMachineCode: string; confirmedMachineCode: string | null } | null;
   actorClientId?: string | null;
   actorTabId?: string | null;
   actorIp?: string | null;
@@ -314,6 +316,9 @@ export class WorkReportTaskRegistryService {
         input.errorMessage === undefined
           ? existing?.errorMessage ?? null
           : normalizeOptionalString(input.errorMessage),
+      mainMachineVerification: input.mainMachineVerification === undefined
+        ? existing?.mainMachineVerification ?? null
+        : input.mainMachineVerification,
       actorClientId:
         normalizeOptionalString(input.actorClientId) ??
         existing?.actorClientId ??
@@ -430,6 +435,9 @@ export class WorkReportTaskRegistryService {
     };
 
     next.lifecycleState = resolveMutationLifecycleState(next);
+    if (next.status === "success") {
+      next.mainMachineVerification = null;
+    }
     if (next.status === "success" && next.timings?.failurePhase) {
       const { failurePhase: _failurePhase, ...successfulTimings } = next.timings;
       next.timings = successfulTimings;

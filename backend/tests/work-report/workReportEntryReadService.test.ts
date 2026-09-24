@@ -124,6 +124,8 @@ test("detail refresh=1 成功讀到 Ragic live 後會回寫 SQLite entry snapsho
   assert.equal(upsertInputs.length, 1);
   assert.equal(upsertInputs[0].formId, "901");
   assert.equal(upsertInputs[0].record.workOrderNo, "WO-901-new");
+  assert.equal(record.entrySnapshotHash, undefined);
+  assert.equal(upsertInputs[0].record.entrySnapshotHash, undefined);
   assert.match(upsertInputs[0].snapshotAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(touchSyncStateCalled, false);
 });
@@ -172,11 +174,16 @@ test("detail SQLite fallback 會回傳 stale snapshot metadata", async (t) => {
     id: "E-901",
     workOrderNo: "WO-901",
     reports: [],
+    entrySnapshotHash: `sha256:${"f".repeat(64)}`,
   }));
 
   const result = await service.getReportByEntryIdResult("901", "E-901");
+  const internalRecord = await service.getReportByEntryId("901", "E-901");
 
   assert.equal(result.data.id, "E-901");
+  assert.match(result.data.entrySnapshotHash ?? "", /^sha256:[a-f0-9]{64}$/);
+  assert.notEqual(result.data.entrySnapshotHash, `sha256:${"f".repeat(64)}`);
+  assert.equal(internalRecord.entrySnapshotHash, undefined);
   assert.deepEqual(result.meta, {
     cacheSource: "sqlite",
     cacheState: "stale",

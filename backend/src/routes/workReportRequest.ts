@@ -641,6 +641,15 @@ export function parseExpectedEntryLastUpdatedAt(headerValue: string | undefined)
   return normalized || undefined;
 }
 
+export function parseExpectedEntrySnapshotHash(headerValue: string | undefined): string | undefined {
+  const normalized = String(headerValue ?? "").trim();
+  if (!normalized) return undefined;
+  if (!/^sha256:[a-f0-9]{64}$/.test(normalized)) {
+    throw new HttpError(400, "工令版本識別碼格式不正確，請重新整理後再試。", "INVALID_ENTRY_SNAPSHOT_HASH");
+  }
+  return normalized;
+}
+
 export function parseEditSessionId(headerValue: string | undefined): string | undefined {
   const normalized = String(headerValue ?? "").trim();
   return normalized || undefined;
