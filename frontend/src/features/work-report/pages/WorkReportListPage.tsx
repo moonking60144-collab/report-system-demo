@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Modal } from "antd";
@@ -25,6 +25,7 @@ import {
 } from "../hooks/useWorkReportDataPipeline";
 import { useWorkReportColumns } from "../hooks/useWorkReportColumns";
 import { useWorkReportListNavigation } from "../hooks/useWorkReportListNavigation";
+import { useWorkReportMarkedRow } from "../hooks/useWorkReportMarkedRow";
 import {
   useWorkReportListData,
   type PreviewReadMetric,
@@ -145,8 +146,10 @@ export function WorkReportListPage() {
     globalFilterDraft: initialListViewState?.globalFilterDraft,
     globalFilters: initialListViewState?.globalFilters,
   });
+  const pendingPageScrollRef = useRef(false);
   const activeLandingPageConfig = WORK_REPORT_LANDING_PAGE_CONFIGS[activeLandingPageKey];
   const currentFormId = activeLandingPageConfig.formId;
+  const { markedRow, toggleMarkedRow, clearMarkedRow } = useWorkReportMarkedRow(currentFormId);
   const [customFilterDraft, setCustomFilterDraft] = useState<WorkReportFilterGroup>(() =>
     cloneWorkReportFilterGroup(
       initialListViewState?.customFilterDraft ??
@@ -345,13 +348,16 @@ export function WorkReportListPage() {
     [setGlobalFilterDraft]
   );
   const handlePreviousPage = useCallback(() => {
+    pendingPageScrollRef.current = true;
     setPage((previous) => Math.max(1, previous - 1));
   }, [setPage]);
   const handleNextPage = useCallback(() => {
+    pendingPageScrollRef.current = true;
     setPage((previous) => previous + 1);
   }, [setPage]);
   const handlePageSizeChange = useCallback(
     (nextPageSize: number) => {
+      pendingPageScrollRef.current = true;
       setPageSize(nextPageSize);
       setPage(1);
     },
@@ -527,8 +533,7 @@ export function WorkReportListPage() {
     visibleRecords,
     effectiveColumnSortRules,
     displayedPage,
-    pageFrom,
-    pageTo,
+    displayedPageSize,
     hasMoreForPager,
     currentPageReportCount,
     matchedRecordCount,
@@ -662,6 +667,33 @@ export function WorkReportListPage() {
     applySidebarPlaceholderView,
     initialQuickViewRestored: Boolean(initialListViewState?.activePlaceholderViewId),
   });
+  useLayoutEffect(() => {
+    if (
+      !pendingPageScrollRef.current ||
+      effectiveListLoading ||
+      displayedPage !== page ||
+      displayedPageSize !== pageSize ||
+      visibleRecords.length === 0
+    ) return;
+
+    const scrollRoot = document.querySelector<HTMLElement>(".ragic-list-main");
+    const table = scrollRoot?.querySelector<HTMLElement>(".work-report-table-stage");
+    const toolbar = scrollRoot?.querySelector<HTMLElement>(".work-report-workspace-toolbar");
+    const firstRow = table?.querySelector<HTMLElement>(".ant-table-tbody .ant-table-row");
+    const stickyHeader = table?.querySelector<HTMLElement>(".ant-table-sticky-holder");
+    if (!scrollRoot || !table || !toolbar || !firstRow || !stickyHeader) return;
+
+    if (
+      scrollRoot.scrollTop > 1 &&
+      firstRow.getBoundingClientRect().bottom <= stickyHeader.getBoundingClientRect().bottom + 1
+    ) {
+      scrollRoot.scrollTop +=
+        table.getBoundingClientRect().top -
+        scrollRoot.getBoundingClientRect().top -
+        toolbar.getBoundingClientRect().height;
+    }
+    pendingPageScrollRef.current = false;
+  }, [displayedPage, displayedPageSize, effectiveListLoading, page, pageSize, visibleRecords]);
   const { handleOpenDetail } = useWorkReportListNavigation({
     currentFormId,
     activeLandingPageKey,
@@ -895,9 +927,6 @@ export function WorkReportListPage() {
   });
 
   const effectiveTableSoftBusy = tableSoftBusy || previewTransitionPending;
-  const effectiveTableSoftBusyLabel = tableSoftBusyLabel ?? (
-    previewTransitionPending ? t("workReport:status.tableBusy.loading") : null
-  );
   const filterControlDisabled = effectiveListLoading || submitting || isHydratingAllRecords;
   const sidebarFilterControlDisabled = submitting || isHydratingAllRecords;
 
@@ -1123,6 +1152,8 @@ export function WorkReportListPage() {
                 currentPageGroupLabel={currentPageGroupLabel}
                 currentPageContextLabel={`${currentFormId} / ${currentPageProdTypeCode}`}
                 matchedCount={matchedRecordCount}
+                markedRow={markedRow}
+                onClearMarkedRow={clearMarkedRow}
                 searchValue={globalFilterDraft.globalKeyword}
                 onSearchValueChange={handleGlobalSearchDraftChange}
                 onSearchSubmit={() => handleApplyFilters()}
@@ -1154,7 +1185,7 @@ export function WorkReportListPage() {
                 controlsDisabled={filterControlDisabled}
                 isSyncingFromRagic={isSyncingFromRagic}
                 onRefresh={handleRefresh}
-                stickyEnabled={false}
+                stickyEnabled
               />
                 {filterPanelOpen ? (
                   <WorkReportFilterDrawer
@@ -1198,22 +1229,15 @@ export function WorkReportListPage() {
                   columns={columns}
                   columnDisplayMode={columnDisplayMode}
                   visibleRecords={visibleRecords}
-                  pageFrom={pageFrom}
-                  pageTo={pageTo}
-                  page={displayedPage}
-                  loading={effectiveListLoading}
                   backgroundLoading={listBackgroundLoading}
                   error={error}
                   hasRenderableContent={hasRenderableListContent}
-                  submitting={submitting}
-                  isHydratingAllRecords={isHydratingAllRecords}
-                  hasMoreForPager={hasMoreForPager}
                   softBusy={effectiveTableSoftBusy}
-                  softBusyLabel={effectiveTableSoftBusyLabel}
+                  softBusyLabel={tableSoftBusyLabel}
                   highlightedEntryId={highlightedEntryId}
+                  markedRow={markedRow}
+                  onToggleMarkedRow={toggleMarkedRow}
                   showScrollHintButton={localPreferences.showListScrollHintButton}
-                  onPrevPage={handlePreviousPage}
-                  onNextPage={handleNextPage}
                   onOpenDetail={handleOpenDetailFromTable}
                   onPreloadDetail={handlePreloadDetail}
                   onRetry={() => {

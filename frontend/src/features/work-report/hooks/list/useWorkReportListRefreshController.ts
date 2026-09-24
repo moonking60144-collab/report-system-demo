@@ -578,15 +578,9 @@ export function useWorkReportListRefreshController({
     [isSyncingFromRagic, loading]
   );
 
-  const tableSoftBusyLabel = useMemo(() => {
-    if (isSyncingFromRagic) {
-      return t("workReport:status.tableBusy.syncing");
-    }
-    if (loading) {
-      return t("workReport:status.tableBusy.loading");
-    }
-    return null;
-  }, [isSyncingFromRagic, loading, t]);
+  const tableSoftBusyLabel = isSyncingFromRagic
+    ? t("workReport:status.tableBusy.syncing")
+    : null;
 
   return {
     sseNoticeReloadToken,

@@ -131,6 +131,14 @@ success > failed > running > pending
 - 同 rank 狀態以較新的 `updatedAt` 為準。
 - 這條 precedence 是資料流 invariant；若要調整，必須同時更新 registry merge、route merge 與測試。
 
+### 排程修改的確認與恢復
+
+- strict refresh 只可確認該次讀取開始前已存在的未決 task IDs。讀取期間才產生的失敗不屬於這次觀測，必須保留阻擋直到下一次成功刷新；讀取失敗不能解除阻擋。
+- 啟用 task persistence 時，worker 必須等 `running` 狀態保存成功才開始；保存失敗回報 `TASK_PERSISTENCE_FAILED`，不得執行寫入。
+- 任務檔維持 `v1` envelope，另以 `dispatchBarrierVersion: 1` 表示寫入前保存契約。具有標記的 `pending` 可判定尚未派送；沒有標記的舊快照及所有 `running` 均保守恢復為結果不明。舊版讀寫後會移除未知的頂層標記，因此 rollback 後再升級仍採保守恢復。
+- scheduler 明確在派送前拒絕的錯誤保留原 code，不得轉成寫入結果不明；已送出後的 timeout 或寫後驗證失敗仍須保留不確定性，不得直接重送。
+- 重新觀測只代表已取得目前資料，不代表原失敗操作成功。registry 保留 failed 與原錯誤，抽屜另列「先前失敗，已重新確認」，不增加成功或需處理數，也不提供舊任務重送。
+
 ## Ragic 讀取與背景任務
 
 - Ragic read 應標明 priority lane：

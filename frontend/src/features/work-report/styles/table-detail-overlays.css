@@ -57,6 +57,21 @@
   animation: row-return-highlight 1.6s ease-out 1;
 }
 
+.work-report-table-stage .ragic-table .row-marked > .ant-table-cell {
+  box-shadow: inset 0 2px 0 #d97706, inset 0 -2px 0 #d97706,
+    inset 0 0 0 999px rgba(245, 158, 11, 0.14);
+}
+
+.work-report-table-stage .ragic-table .row-marked:hover > .ant-table-cell {
+  box-shadow: inset 0 2px 0 #b45309, inset 0 -2px 0 #b45309,
+    inset 0 0 0 999px rgba(245, 158, 11, 0.18);
+}
+
+.work-report-table-stage .ragic-table .row-marked .work-order-cell-button {
+  text-decoration-color: #b45309;
+  text-decoration-thickness: 2px;
+}
+
 .action-cell {
   display: flex;
   flex-wrap: wrap;

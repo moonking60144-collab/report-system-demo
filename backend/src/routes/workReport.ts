@@ -63,6 +63,8 @@ const workReportRouter = createWorkReportRouter({
     createReportTaskService.acknowledgeScheduleMutationObservation.bind(
       createReportTaskService
     ),
+  getUnresolvedScheduleMutationTaskIds:
+    workReportTaskRegistryService.getUnresolvedScheduleMutationTaskIds.bind(workReportTaskRegistryService),
   getTaskRecord: workReportTaskRegistryService.getTask.bind(workReportTaskRegistryService),
   getSyncStatus: workReportSyncService.getStatus.bind(workReportSyncService),
   getReports: workReportReadService.getReports.bind(workReportReadService),

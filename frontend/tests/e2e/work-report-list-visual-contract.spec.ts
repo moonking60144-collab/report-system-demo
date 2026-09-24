@@ -481,7 +481,7 @@ for (const formId of ["901", "902"]) {
       const normal = page.locator('[data-row-key="normal"]');
       await expect(running).toHaveClass(/row-running/);
       await expect(closed).toHaveClass(/row-running.*row-closed/);
-      await expect(running).toHaveJSProperty("tagName", size < 40 ? "TR" : "DIV");
+      await expect(running).toHaveJSProperty("tagName", "TR");
       await expect(running.locator(":scope > .ant-table-cell").first()).toHaveCSS("background-color", "rgb(157, 255, 157)");
       await expect(closed.locator(":scope > .ant-table-cell").first()).toHaveCSS("background-color", "rgb(241, 245, 249)");
       await expect(closed.locator(".work-order-cell-button")).toHaveCSS("color", "rgb(100, 116, 139)");
@@ -495,167 +495,139 @@ for (const formId of ["901", "902"]) {
   });
 }
 
+test('右鍵標記一次只保留一筆，保留業務底色並可從固定工具列清除', async ({ page }) => {
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&formId=901');
+  const normal = page.locator('[data-row-key="normal"]');
+  const running = page.locator('[data-row-key="running"]');
+  const closed = page.locator('[data-row-key="closed"]');
+  await normal.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '標記此工令' }).click();
+  await expect(normal).toHaveClass(/row-marked/);
+  await running.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '標記此工令' }).click();
+  await expect(normal).not.toHaveClass(/row-marked/);
+  await expect(running).toHaveClass(/row-running.*row-marked/);
+  await page.mouse.move(0, 0);
+  await expect(running.locator('td').first()).toHaveCSS('background-color', 'rgb(157, 255, 157)');
+  expect(await running.locator('td').first().evaluate(el => getComputedStyle(el).boxShadow)).toContain('245, 158, 11');
+  await closed.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '標記此工令' }).click();
+  await expect(closed).toHaveClass(/row-closed.*row-marked/);
+  await page.mouse.move(0, 0);
+  await expect(closed.locator('td').first()).toHaveCSS('background-color', 'rgb(241, 245, 249)');
+  await page.reload();
+  await expect(page.locator('[data-row-key="closed"]')).toHaveClass(/row-marked/);
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&formId=902');
+  await expect(page.locator('[data-row-key="closed"]')).not.toHaveClass(/row-marked/);
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&formId=901');
+  await page.getByRole('button', { name: '清除標記 WO-CLOSED' }).click();
+  await expect(page.locator('[data-row-key="closed"]')).not.toHaveClass(/row-marked/);
+  expect(await page.evaluate(() => sessionStorage.getItem('work-report:marked-row:901'))).toBeNull();
+});
+
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }, { width: 820, height: 560 }, { width: 390, height: 844 }]) {
-  test(`報工先捲走上方工具區，再由表格接手捲動 ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`報工列表只有外層垂直捲動，工具列與表頭固定 ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await page.goto('/__work-report-list-visual-contract__?statusProbe=1&scrollHint=1');
-    await page.locator('.workspace-display-mode').getByRole('button', { name: '精簡', exact: true }).click();
+    await page.goto('/__work-report-list-visual-contract__?statusProbe=1&denseColumns=1&scrollHint=1');
+    const outer = page.locator('.ragic-list-main');
+    const toolbar = page.locator('.work-report-workspace-toolbar');
+    const header = page.locator('.ant-table-sticky-holder');
+    const sidebar = page.locator('.fixed-filter-sidebar');
+    const sidebarBefore = viewport.width > 960 ? await sidebar.boundingBox() : null;
     for (const size of [25, 50, 100, 25]) {
       await page.locator('.workspace-page-size .ant-select').click();
       await page.locator('.ant-select-item-option').filter({ hasText: new RegExp(`^${size}$`) }).click();
-      const outer = page.locator('.ragic-list-main');
-      const body = page.locator(size < 40 ? '.ant-table-body' : '.ant-table-tbody-virtual-holder');
-      await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(1);
-      await outer.evaluate(element => { element.scrollTop = 0; });
-      await body.evaluate(element => { element.scrollTop = 0; });
-      await expect(page.locator('.work-report-table-stage')).not.toHaveClass(/is-focus-docked/);
-      await expect.poll(() => outer.evaluate(element => element.scrollHeight - element.clientHeight)).toBeGreaterThan(40);
-      if (size < 40) {
-        const bar = page.locator('.fixed-h-scrollbar-shell:not(.is-hidden)');
-        const hint = page.locator('.detail-scroll-top-btn');
-        await expect(hint).toBeVisible();
-        await expect.poll(async () => {
-          const barBounds = await bar.boundingBox();
-          const outerBounds = await outer.boundingBox();
-          return barBounds && outerBounds
-            ? Math.abs(barBounds.y - (outerBounds.y + outerBounds.height))
-            : Number.POSITIVE_INFINITY;
-        }).toBeLessThanOrEqual(1);
-        const barBounds = await bar.boundingBox();
-        const hintBounds = await hint.boundingBox();
-        expect(barBounds!.x + barBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
-      }
-
-      const sidebarBefore = viewport.width > 960
-        ? await page.locator('.fixed-filter-sidebar').boundingBox()
-        : null;
-      await outer.hover({ position: { x: Math.max(1, Math.min(300, viewport.width / 3)), y: 40 } });
-      await page.mouse.wheel(0, viewport.height * 2);
-      await expect.poll(() => outer.evaluate(element => element.scrollTop)).toBeGreaterThan(40);
-      await expect(page.locator('.work-report-table-stage')).toHaveClass(/is-focus-docked/);
-
-      const header = page.locator('.ant-table-header');
-      const headerBefore = await header.boundingBox();
-      const pager = await page.locator('.pager').boundingBox();
-      const outerBox = await outer.boundingBox();
-      expect(headerBefore!.y).toBeGreaterThanOrEqual(outerBox!.y - 1);
-      expect(pager!.y + pager!.height).toBeLessThanOrEqual(outerBox!.y + outerBox!.height + 1);
-      if (sidebarBefore) {
-        expect(await page.locator('.fixed-filter-sidebar').boundingBox()).toEqual(sidebarBefore);
-      }
-
-      const box = await body.boundingBox();
-      expect(box!.height).toBeGreaterThan(80);
-      const dockedOuterScrollTop = await outer.evaluate(element => element.scrollTop);
-      await page.mouse.move(box!.x + Math.min(150, box!.width / 2), box!.y + box!.height / 2);
-      await page.mouse.wheel(160, 350);
-      await expect.poll(() => body.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
-      expect(Math.abs(await outer.evaluate(element => element.scrollTop) - dockedOuterScrollTop)).toBeLessThanOrEqual(2);
-      await page.mouse.wheel(450, 0);
-      await expect.poll(() => header.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
-      expect(await header.boundingBox()).toEqual(headerBefore);
-      await body.evaluate(el => { el.scrollTop = el.scrollHeight; });
-      await page.mouse.wheel(0, 500);
-      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-      const fixedHorizontalScrollbar = page.locator('.fixed-h-scrollbar-shell');
-      if (size < 40) {
-        await expect(fixedHorizontalScrollbar).toHaveCount(1);
-        await expect(fixedHorizontalScrollbar).toHaveCSS('position', 'fixed');
-        await expect(fixedHorizontalScrollbar).toBeVisible();
-        await expect
-          .poll(() => body.evaluate(element => element.scrollWidth > element.clientWidth))
-          .toBe(true);
-        await expect
-          .poll(() => body.evaluate(element => ({
-            display: getComputedStyle(element, '::-webkit-scrollbar').display,
-          })))
-          .toEqual({ display: 'none' });
-        await expect
-          .poll(async () => {
-            const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
-            const outerBounds = await outer.boundingBox();
-            if (!scrollbarBounds || !outerBounds) return Number.POSITIVE_INFINITY;
-            return Math.abs(
-              scrollbarBounds.y - (outerBounds.y + outerBounds.height)
-            );
-          })
-          .toBeLessThanOrEqual(1);
-        const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
-        expect(scrollbarBounds!.y).toBeGreaterThanOrEqual(pager!.y + pager!.height - 1);
-        expect(scrollbarBounds!.y + scrollbarBounds!.height).toBeLessThanOrEqual(viewport.height - 11);
-        await fixedHorizontalScrollbar.locator('.fixed-h-scrollbar-viewport').evaluate(element => {
-          element.scrollLeft = element.scrollWidth;
-        });
-        await expect.poll(() => body.evaluate(element =>
-          Math.abs(element.scrollLeft - (element.scrollWidth - element.clientWidth))
-        )).toBeLessThanOrEqual(3);
-        await expect
-          .poll(async () => {
-            const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
-            const lastRowBounds = await page.locator('[data-row-key="status-24"]').boundingBox();
-            if (!scrollbarBounds || !lastRowBounds) return Number.POSITIVE_INFINITY;
-            return lastRowBounds.y + lastRowBounds.height - scrollbarBounds.y;
-          })
-          .toBeLessThanOrEqual(0);
-      } else {
-        await expect(fixedHorizontalScrollbar).toHaveCount(0);
-        const virtualHorizontalScrollbar = page.locator('.ant-table-tbody-virtual-scrollbar-horizontal');
-        await expect(virtualHorizontalScrollbar).toBeVisible();
-        await expect
-          .poll(async () => {
-            const scrollbarBounds = await virtualHorizontalScrollbar.boundingBox();
-            const bodyBounds = await body.boundingBox();
-            if (!scrollbarBounds || !bodyBounds) return Number.POSITIVE_INFINITY;
-            return Math.abs(
-              scrollbarBounds.y + scrollbarBounds.height - (bodyBounds.y + bodyBounds.height)
-            );
-          })
-          .toBeLessThanOrEqual(2);
-      }
-      await body.evaluate(el => { el.scrollTop = 0; });
-      await page.mouse.move(box!.x + Math.min(150, box!.width / 2), box!.y + box!.height / 2);
-      await page.mouse.wheel(0, -viewport.height * 2);
-      await expect.poll(() => outer.evaluate(element => element.scrollTop)).toBeLessThan(dockedOuterScrollTop - 20);
-      await expect(page.locator('.work-report-table-stage')).not.toHaveClass(/is-focus-docked/);
+      await expect(page.locator('.ant-select-dropdown:visible')).toHaveCount(0);
+      await expect(page.locator('.ragic-table tbody tr[data-row-key]')).toHaveCount(size);
+      await expect(page.locator('.ant-table-tbody-virtual-holder')).toHaveCount(0);
+      await expect(page.locator('.pager')).toHaveCount(0);
+      await expect(page.locator('.workspace-pager')).toBeVisible();
+      await expect.poll(() => outer.evaluate(el => el.scrollHeight - el.clientHeight)).toBeGreaterThan(100);
+      const innerVerticalRange = await page.locator('.ragic-table .ant-table-body').evaluate(el => el.scrollHeight - el.clientHeight);
+      expect(innerVerticalRange).toBeLessThanOrEqual(1);
+      await outer.evaluate(el => { el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2); });
+      await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeGreaterThan(100);
+      const [outerBox, toolbarBox, headerBox] = await Promise.all([outer.boundingBox(), toolbar.boundingBox(), header.boundingBox()]);
+      expect(Math.abs(toolbarBox!.y - outerBox!.y)).toBeLessThanOrEqual(1);
+      expect(Math.abs(headerBox!.y - toolbarBox!.y - toolbarBox!.height)).toBeLessThanOrEqual(1);
+      if (sidebarBefore) expect(await sidebar.boundingBox()).toEqual(sidebarBefore);
+      const beforeWheel = await outer.evaluate(el => el.scrollTop);
+      await page.mouse.move(outerBox!.x + 150, headerBox!.y + headerBox!.height + 100);
+      await page.mouse.wheel(0, 120);
+      await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeGreaterThan(beforeWheel);
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
+      await outer.evaluate(el => { el.scrollTop = 0; });
     }
   });
 }
 
-test('切換 25／50／100／25 筆後，浮動按鈕仍能到達最後一列', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&scrollHint=1');
-  for (const size of [50, 100, 25]) {
-    await page.locator('.workspace-page-size .ant-select').click();
-    await page.locator('.ant-select-item-option').filter({ hasText: new RegExp(`^${size}$`) }).click();
-  }
-  const outer = page.locator('.ragic-list-main');
-  const body = page.locator('.ant-table-body');
-  await page.getByRole('button', { name: '到最底', exact: true }).click();
-  await expect.poll(() => outer.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
-  await expect.poll(() => body.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
-  await expect(body.locator('[data-row-key="status-24"]')).toBeInViewport();
+test('上方分頁固定可操作，底部沒有重複分頁', async ({ page }) => {
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1');
+  const pager = page.locator('.workspace-pager');
+  await pager.getByRole('button', { name: '下一頁' }).click();
+  await expect(pager).toContainText('第 2 頁');
+  await page.locator('.ragic-list-main').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await expect(pager).toBeInViewport();
+  await pager.getByRole('button', { name: '上一頁' }).click();
+  await expect(pager).toContainText('第 1 頁');
+  await expect(page.locator('.pager')).toHaveCount(0);
 });
 
 for (const size of [25, 100]) {
-  test(`${size} 筆進入明細再返回，恢復表格內捲動與原工令`, async ({ page }) => {
+  test(`${size} 筆返回明細後恢復外層位置與原工令`, async ({ page }) => {
     const document = TEST_DOCUMENT.replaceAll('mountWorkReportListVisualContract', 'mountWorkReportScrollNavigation')
       .replace('work-report-list-visual-contract-fixture.tsx', 'work-report-scroll-navigation-fixture.tsx');
     await page.route('**/__scroll-navigation__*', route => route.fulfill({ contentType: 'text/html', body: document }));
     await page.goto(`/__scroll-navigation__?pageSize=${size}`);
-    const body = page.locator(size < 40 ? '.ant-table-body' : '.ant-table-tbody-virtual-holder');
     const outer = page.locator('.ragic-list-main');
     await outer.evaluate(el => { el.scrollTop = el.scrollHeight; });
-    await expect(page.locator('.work-report-table-stage')).toHaveClass(/is-focus-docked/);
-    await body.evaluate(el => { el.scrollTop = el.scrollHeight; });
-    const outerScrollTop = await outer.evaluate(el => el.scrollTop);
+    const before = await outer.evaluate(el => el.scrollTop);
     const target = page.locator(`[data-row-key="${size - 1}"]`);
-    await expect(target).toBeVisible();
+    await expect(target).toBeInViewport();
     await target.click();
     await page.getByRole('button', { name: '返回列表', exact: true }).click();
     await expect(target).toBeInViewport();
     await expect(target).toHaveClass(/row-return-highlight/);
-    await expect.poll(() => body.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
-    await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeGreaterThanOrEqual(outerScrollTop - 2);
-    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeGreaterThanOrEqual(before - 2);
   });
 }
+
+for (const size of [25, 50, 100]) {
+  test(`${size} 筆底部水平捲軸與首末列按鈕不重疊`, async ({ page }) => {
+    await page.goto('/__work-report-list-visual-contract__?statusProbe=1&denseColumns=1&scrollHint=1');
+    await page.locator('.workspace-page-size .ant-select').click();
+    await page.locator('.ant-select-item-option').filter({ hasText: new RegExp(`^${size}$`) }).click();
+    await expect(page.locator('.ant-select-dropdown:visible')).toHaveCount(0);
+    const outer = page.locator('.ragic-list-main');
+    const bar = page.locator('.fixed-h-scrollbar-shell:not(.is-hidden)');
+    const hint = page.locator('.detail-scroll-top-btn');
+    await expect(bar).toBeVisible();
+    const [barBox, hintBox] = await Promise.all([bar.boundingBox(), hint.boundingBox()]);
+    expect(barBox!.x + barBox!.width).toBeLessThanOrEqual(hintBox!.x - 8);
+    const horizontal = page.locator('.ragic-table .ant-table-body');
+    await bar.locator('.fixed-h-scrollbar-viewport').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    await expect.poll(() => horizontal.evaluate(el => Math.abs(el.scrollWidth - el.clientWidth - el.scrollLeft))).toBeLessThanOrEqual(3);
+    await page.getByRole('button', { name: '到最底', exact: true }).click();
+    await expect.poll(() => outer.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+    await expect(page.locator(`[data-row-key="status-${size - 1}"]`)).toBeInViewport();
+    await page.getByRole('button', { name: '回到頂部', exact: true }).click();
+    await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeLessThanOrEqual(1);
+  });
+}
+
+test('100 筆完整欄位的連續手勢只移動外層容器', async ({ page }) => {
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&denseColumns=1');
+  await page.locator('.workspace-page-size .ant-select').click();
+  await page.locator('.ant-select-item-option[title="100"]').click();
+  await expect(page.locator('.ant-select-dropdown:visible')).toHaveCount(0);
+  const body = page.locator('.ragic-table .ant-table-body');
+  const rect = await body.boundingBox();
+  const session = await page.context().newCDPSession(page);
+  const gesture = { x: rect!.x + 150, y: Math.min(rect!.y + 100, 600), speed: 600, gestureSourceType: 'mouse' as const };
+  const outer = page.locator('.ragic-list-main');
+  await session.send('Input.synthesizeScrollGesture', { ...gesture, yDistance: -600 });
+  await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeGreaterThanOrEqual(590);
+  expect(await body.evaluate(el => el.scrollTop)).toBe(0);
+  await session.send('Input.synthesizeScrollGesture', { ...gesture, yDistance: 600 });
+  await expect.poll(() => outer.evaluate(el => el.scrollTop)).toBeLessThanOrEqual(2);
+});

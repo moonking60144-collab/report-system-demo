@@ -1273,8 +1273,9 @@ h1 {
   position: sticky;
   top: 0;
   z-index: 120;
-  box-shadow: 0 7px 16px rgba(31, 53, 73, 0.09);
-  backdrop-filter: blur(10px);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  background: #fafcfe;
 }
 
 .work-report-workspace-context {
@@ -1321,6 +1322,31 @@ h1 {
   font-variant-numeric: tabular-nums;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.workspace-marked-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: 168px;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #e8c58c;
+  background: #fff8ea;
+  color: #854d0e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex: none;
+}
+
+.workspace-marked-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-report-workspace-context .workspace-marked-row:hover {
+  background: #ffefcf;
 }
 
 .work-report-workspace-center {
@@ -1993,12 +2019,16 @@ h1 {
   justify-content: flex-end;
 }
 
-/* The right workspace scrolls until the table docks; the table body then owns row scrolling. */
+/* The right workspace owns the list's vertical scroll at every page size. */
 .page.work-report-viewport {
   height: 100dvh;
   overflow: hidden;
-  padding: 0.75rem 1rem;
+  padding: 0 1rem 0.75rem;
   box-sizing: border-box;
+}
+
+.work-report-viewport .ragic-list-main > .page-header {
+  margin-top: 0.75rem;
 }
 
 .work-report-viewport > .ragic-list-shell {
@@ -2051,31 +2081,29 @@ h1 {
   flex: none;
 }
 
+.work-report-viewport .work-report-workspace-toolbar {
+  margin-bottom: 0;
+}
+
 .work-report-viewport .work-report-list-workspace > :not(.work-report-table-stage),
 .work-report-viewport .ragic-list-main > :not(.work-report-list-workspace) {
   flex-shrink: 0;
 }
 
 .work-report-viewport .work-report-table-stage {
-  display: flex;
-  flex-direction: column;
-  min-height: var(--work-report-focus-height, calc(100dvh - 1.5rem));
   min-width: 0;
 }
 
 .work-report-viewport .work-report-cell-copy-surface {
-  flex: 1;
+  min-height: 0;
 }
 
 .work-report-viewport .table-wrap {
   position: relative;
-  flex: 1;
   min-height: 0;
-  overflow: hidden;
-}
-
-.work-report-viewport .work-report-workspace-toolbar.is-sticky {
-  position: static;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
 }
 
 .work-report-viewport .fixed-filter-sidebar-shell {
@@ -2090,19 +2118,6 @@ h1 {
   max-height: 100%;
 }
 
-.work-report-viewport .ant-table-body,
-.work-report-viewport .ant-table-tbody-virtual-holder {
-  overscroll-behavior-y: auto;
-}
-
-.work-report-viewport .ant-table-body {
-  height: var(--work-report-table-body-height);
-}
-
 .work-report-viewport .detail-scroll-top-btn {
   bottom: 0.75rem;
-}
-
-.work-report-viewport .pager-actions {
-  margin-inline-end: 4rem;
 }

@@ -548,18 +548,28 @@ export class WorkReportTaskRegistryService {
     return false;
   }
 
+  getUnresolvedScheduleMutationTaskIds(formId: string, entryId: string): string[] {
+    return Array.from(this.tasks.values())
+      .filter(task => task.formId === formId && task.entryId === entryId &&
+        task.status === "failed" && isBlockingScheduleMutationTask(task))
+      .map(task => task.taskId);
+  }
+
   acknowledgeScheduleMutationObservation(
     formId: string,
     entryId: string,
+    taskIds: readonly string[],
     observedAt = new Date().toISOString()
   ): number {
     const normalizedEntryId = normalizeOptionalString(entryId);
     if (!normalizedEntryId) {
       return 0;
     }
+    const observedTaskIds = new Set(taskIds);
     let acknowledgedCount = 0;
     for (const [taskId, task] of this.tasks.entries()) {
       if (
+        !observedTaskIds.has(taskId) ||
         task.formId !== formId ||
         task.entryId !== normalizedEntryId ||
         task.status !== "failed" ||

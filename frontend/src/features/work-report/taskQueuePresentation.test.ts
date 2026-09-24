@@ -3,6 +3,7 @@ import type { WorkReportQueueTask } from "../../api/workReport";
 import {
   getBatchTaskProgress,
   getTaskQueuePollIntervalMs,
+  isObservedTaskFailure,
   summarizeTaskQueue,
 } from "./taskQueuePresentation";
 
@@ -89,6 +90,21 @@ describe("taskQueuePresentation", () => {
         buildTask({ taskId: "success", status: "success" }),
         buildTask({ taskId: "failed", status: "failed" }),
       ])
-    ).toEqual({ activeCount: 2, successCount: 1, failedCount: 1 });
+    ).toEqual({ activeCount: 2, successCount: 1, failedCount: 1, observedCount: 0 });
+  });
+
+  it("keeps observed failures separate from successful writes and unresolved failures", () => {
+    const observed = buildTask({ status: "failed", scheduleMutationObservedAt: "2026-09-24T01:00:00Z", writeIndeterminate: false });
+    expect(isObservedTaskFailure(observed)).toBe(true);
+    const unresolved = [
+      buildTask({ status: "failed" }),
+      { ...observed, writeIndeterminate: true },
+      { ...observed, lifecycleState: "indeterminate" as const },
+      { ...observed, lifecycleState: "unknown" as const },
+    ];
+    for (const task of unresolved) expect(isObservedTaskFailure(task)).toBe(false);
+    expect(summarizeTaskQueue([observed, ...unresolved])).toEqual({
+      activeCount: 0, successCount: 0, failedCount: 4, observedCount: 1,
+    });
   });
 });

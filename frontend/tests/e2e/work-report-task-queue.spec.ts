@@ -48,6 +48,27 @@ test("結案任務顯示真正操作名稱，機台驗證失敗顯示目標與�
 });
 
 
+test("已重新確認的失敗保留歷史，但不列為成功或需處理", async ({ page }) => {
+  await mount(page, async (route) => reply(route, [
+    { ...task, taskId: "observed", taskType: "update-report", operationKind: "update-main-machine", status: "failed",
+      workOrderNo: "WO-OBSERVED", writeIndeterminate: false, lifecycleState: "failed",
+      scheduleMutationObservedAt: "2026-09-24T01:00:00Z", message: "原先回讀值不一致" },
+    { ...task, taskId: "unresolved", taskType: "update-report", status: "failed", writeIndeterminate: true },
+  ]));
+  const drawer = page.getByRole("dialog", { name: "任務中心" });
+  await expect(drawer.getByText("已重新確認 1", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("需處理 1", { exact: true })).toBeVisible();
+  await expect(drawer.getByText(/^已完成 /)).toHaveCount(0);
+  const observed = drawer.locator("article").filter({ hasText: "WO-OBSERVED" });
+  await expect(observed).toHaveClass(/is-observed/);
+  await expect(observed.getByText("先前失敗，已重新確認", { exact: true })).toBeVisible();
+  await expect(observed.getByText("原始失敗: 原先回讀值不一致", { exact: true })).toBeVisible();
+  await expect(observed.getByText(/^重新確認時間:/)).toBeVisible();
+  await expect(observed.getByRole("button", { name: "重送", exact: true })).toHaveCount(0);
+  await drawer.getByRole("checkbox", { name: "僅顯示失敗" }).check();
+  await expect(observed).toBeVisible();
+});
+
 test("SSE 合併完成事件立即刷新，連線正常時使用低頻補查，關閉後不查詢", async ({ page }) => {
   await mockTaskEvents(page);
   let reads = 0;

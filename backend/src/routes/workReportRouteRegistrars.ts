@@ -529,6 +529,9 @@ export function registerWorkReportReadRoutes(router: Router, deps: WorkReportRou
       assertRequiredPathValue(entryId, "entryId");
       const refresh = parseRefreshFlag(req.query as Record<string, unknown>);
       const strictRefresh = parseStrictRefreshFlag(req.query as Record<string, unknown>);
+      const observedTaskIds = refresh && strictRefresh
+        ? deps.getUnresolvedScheduleMutationTaskIds(formId, entryId)
+        : [];
 
       const result = await deps.getReportByEntryId(formId, entryId, {
         refresh,
@@ -542,7 +545,7 @@ export function registerWorkReportReadRoutes(router: Router, deps: WorkReportRou
         persistRefreshToSqlite: refresh,
       });
       if (refresh && strictRefresh) {
-        deps.acknowledgeScheduleMutationObservation(formId, entryId);
+        deps.acknowledgeScheduleMutationObservation(formId, entryId, observedTaskIds);
       }
       res.json(result);
     })

@@ -197,6 +197,7 @@ test("blocking schedule aggregate 與 entry guard 都保留 indeterminate mutati
     registry.acknowledgeScheduleMutationObservation(
       "901",
       "E-901",
+      registry.getUnresolvedScheduleMutationTaskIds("901", "E-901"),
       "2026-08-31T00:00:02.000Z"
     ),
     1

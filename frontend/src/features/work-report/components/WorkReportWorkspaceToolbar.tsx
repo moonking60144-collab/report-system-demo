@@ -5,6 +5,8 @@ import {
   LeftOutlined,
   LoadingOutlined,
   PrinterOutlined,
+  PushpinFilled,
+  CloseOutlined,
   ReloadOutlined,
   RightOutlined,
   SearchOutlined,
@@ -15,6 +17,7 @@ import { Modal } from "antd";
 import { useTranslation } from "react-i18next";
 import { SearchableSelect } from "../../../components/SearchableSelect";
 import type { ColumnDisplayMode } from "../types";
+import type { MarkedWorkOrder } from "../hooks/useWorkReportMarkedRow";
 
 interface SelectOption {
   value: string;
@@ -26,6 +29,8 @@ interface WorkReportWorkspaceToolbarProps {
   currentPageGroupLabel: string;
   currentPageContextLabel: string;
   matchedCount: number;
+  markedRow: MarkedWorkOrder | null;
+  onClearMarkedRow: () => void;
   searchValue: string;
   onSearchValueChange: (value: string) => void;
   onSearchSubmit: () => void;
@@ -58,6 +63,8 @@ export const WorkReportWorkspaceToolbar = memo(function WorkReportWorkspaceToolb
   currentPageGroupLabel,
   currentPageContextLabel,
   matchedCount,
+  markedRow,
+  onClearMarkedRow,
   searchValue,
   onSearchValueChange,
   onSearchSubmit,
@@ -139,6 +146,19 @@ export const WorkReportWorkspaceToolbar = memo(function WorkReportWorkspaceToolb
         <span className="work-report-workspace-count">
           {t("workReport:table.matchedOrders", { count: matchedCount })}
         </span>
+        {markedRow && (
+          <button
+            type="button"
+            className="workspace-marked-row"
+            onClick={onClearMarkedRow}
+            aria-label={t("workReport:cellCopy.clearMarkedRow", { workOrderNo: markedRow.workOrderNo })}
+            title={t("workReport:cellCopy.clearMarkedRow", { workOrderNo: markedRow.workOrderNo })}
+          >
+            <PushpinFilled aria-hidden="true" />
+            <span>{markedRow.workOrderNo}</span>
+            <CloseOutlined aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       <div className="work-report-workspace-center">

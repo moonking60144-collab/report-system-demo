@@ -281,6 +281,31 @@ async function installMockRealtimeBootReload(page: import("@playwright/test").Pa
   });
 }
 
+async function mockScrollableWorkReportList(page: import("@playwright/test").Page) {
+  await page.route(/\/api\/forms\/(901|902)\/reports\?/, async route => {
+    const url = new URL(route.request().url());
+    const formId = url.pathname.includes("/902/") ? "902" : "901";
+    const limit = Number(url.searchParams.get("limit") ?? 25);
+    const records = Array.from({ length: limit }, (_, index) => ({
+      id: `${formId}-${index}`,
+      workOrderNo: `WO-${formId}-${index}`,
+      prodType: formId === "901" ? "PA" : "PB",
+      status: "未結案",
+      customerPartNo: `PART-${index}`,
+      erpPartNo: `PART-${index}`,
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: records,
+        meta: { formId, count: records.length, totalCount: records.length, hasMore: false,
+          limit, offset: 0, keyword: url.searchParams.get("keyword") ?? "" },
+      }),
+    });
+  });
+}
+
 test.describe("work-report navigation stability", () => {
   test.beforeEach(async ({ page }) => {
     await mockEditableWorkOrderStatus(page);
@@ -370,7 +395,8 @@ test.describe("work-report navigation stability", () => {
     await expect(page.getByText(/後端尚未恢復|backend has not recovered/i)).toBeVisible();
   });
 
-  test("列表工作區可捲到工令專注狀態，Sidebar 固定且窄螢幕不溢位", async ({ page }) => {
+  test("列表由外層捲動，功能列與表頭固定，Sidebar 與窄螢幕保留操作", async ({ page }) => {
+    await mockScrollableWorkReportList(page);
     await page.setViewportSize({ width: 1440, height: 800 });
     await page.goto(
       "/?page=1&pageSize=25&landingPage=line-a-901&topView=report"
@@ -380,8 +406,8 @@ test.describe("work-report navigation stability", () => {
     const stickySearch = page.locator(".workspace-quick-search input");
     await expect(stickySearch).toBeVisible();
     await expect(page.locator(".filter-search-control input")).toHaveCount(0);
-    await stickySearch.fill("WO-DEMO");
-    await expect(stickySearch).toHaveValue("WO-DEMO");
+    await stickySearch.fill("WO-2605");
+    await expect(stickySearch).toHaveValue("WO-2605");
     await stickySearch.fill("");
     await expect(page.locator(".workspace-pager")).toContainText(/(第 1 頁|Page 1)/);
     await expect(page.locator(".workspace-pager button").first()).toBeDisabled();
@@ -435,7 +461,7 @@ test.describe("work-report navigation stability", () => {
         )
         .toBe(true);
     }
-    await expect(workspaceToolbar).toHaveCSS("position", "static");
+    await expect(workspaceToolbar).toHaveCSS("position", "sticky");
     await expect(page.locator(".fixed-filter-sidebar-shell.is-mobile")).toHaveCount(1);
     await page.setViewportSize({ width: 1440, height: 800 });
 
@@ -448,12 +474,14 @@ test.describe("work-report navigation stability", () => {
     await expect
       .poll(async () => {
         const outerBounds = await outerScroller.boundingBox();
-        const tableHeaderBounds = await page.locator(".ant-table-header").boundingBox();
+        const toolbarBounds = await workspaceToolbar.boundingBox();
+        const tableHeaderBounds = await page.locator(".ant-table-sticky-holder").boundingBox();
         return Boolean(
           outerBounds &&
+          toolbarBounds &&
           tableHeaderBounds &&
-          tableHeaderBounds.y >= outerBounds.y - 1 &&
-          tableHeaderBounds.y <= outerBounds.y + 2
+          Math.abs(toolbarBounds.y - outerBounds.y) <= 2 &&
+          Math.abs(tableHeaderBounds.y - toolbarBounds.y - toolbarBounds.height) <= 3
         );
       })
       .toBe(true);
@@ -474,10 +502,10 @@ test.describe("work-report navigation stability", () => {
 
     await page.setViewportSize({ width: 390, height: 800 });
     await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
-    await expect(workspaceToolbar).toHaveCSS("position", "static");
+    await expect(workspaceToolbar).toHaveCSS("position", "sticky");
     await expect(page.locator(".work-report-workspace-center")).toBeVisible();
     await expect(stickySearch).toBeVisible();
-    await expect(page.locator(".workspace-pager")).toBeHidden();
+    await expect(page.locator(".workspace-pager")).toBeVisible();
     await expect(workspaceFilterButton).toBeVisible();
     await expect
       .poll(() =>
@@ -496,6 +524,7 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("列表捲動提示可前往底部與返回頂部，並可由本機設定永久隱藏", async ({ page }) => {
+    await mockScrollableWorkReportList(page);
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(
       "/?page=1&pageSize=25&landingPage=line-a-901&topView=report"
@@ -504,9 +533,7 @@ test.describe("work-report navigation stability", () => {
 
     const hintButton = page.locator(".detail-scroll-top-btn");
     const outerScroller = page.locator(".ragic-list-main");
-    const tableScroller = page.locator(
-      ".ragic-table .ant-table-tbody-virtual-holder, .ragic-table .ant-table-body"
-    );
+    const tableScroller = page.locator(".ragic-table .ant-table-body");
     await expect(hintButton).toHaveAttribute(
       "aria-label",
       /到最底|Scroll to bottom/
@@ -517,18 +544,13 @@ test.describe("work-report navigation stability", () => {
     await expect(fixedHorizontalScrollbar).toBeVisible();
     await expect(hintButton).toHaveCSS("bottom", "12px");
     const hintBounds = await hintButton.boundingBox();
-    const nextPageBounds = await page.locator(".pager-actions button").last().boundingBox();
+    const nextPageBounds = await page.locator(".workspace-pager button").last().boundingBox();
     expect(hintBounds).not.toBeNull();
     expect(nextPageBounds).not.toBeNull();
-    expect(nextPageBounds!.x + nextPageBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
+    await expect(page.locator(".pager")).toHaveCount(0);
     const scrollbarBounds = await fixedHorizontalScrollbar.boundingBox();
     expect(scrollbarBounds).not.toBeNull();
     expect(scrollbarBounds!.x + scrollbarBounds!.width).toBeLessThanOrEqual(hintBounds!.x - 8);
-    const pagerBounds = await page.locator(".pager").boundingBox();
-    expect(pagerBounds).not.toBeNull();
-    const tableBounds = await page.locator(".table-wrap").boundingBox();
-    expect(tableBounds).not.toBeNull();
-    expect(pagerBounds!.y).toBeGreaterThanOrEqual(tableBounds!.y + tableBounds!.height);
     await expect
       .poll(() => tableScroller.evaluate(element => ({
         display: getComputedStyle(element, "::-webkit-scrollbar").display,
@@ -553,18 +575,7 @@ test.describe("work-report navigation stability", () => {
 
     await hintButton.click();
     await expect
-      .poll(async () => {
-        const outerTop = await outerScroller.evaluate((element) => element.scrollTop);
-        const tableTop = await tableScroller.evaluate((element) => element.scrollTop);
-        return outerTop + tableTop;
-      })
-      .toBeGreaterThan(0);
-    await expect
-      .poll(() =>
-        tableScroller.evaluate(
-          (element) => element.scrollHeight - element.clientHeight - element.scrollTop
-        )
-      )
+      .poll(() => outerScroller.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop))
       .toBeLessThanOrEqual(2);
     await expect
       .poll(() =>
@@ -578,11 +589,7 @@ test.describe("work-report navigation stability", () => {
 
     await hintButton.click();
     await expect
-      .poll(async () => {
-        const outerTop = await outerScroller.evaluate((element) => element.scrollTop);
-        const tableTop = await tableScroller.evaluate((element) => element.scrollTop);
-        return outerTop + tableTop;
-      })
+      .poll(() => outerScroller.evaluate(element => element.scrollTop))
       .toBeLessThanOrEqual(2);
 
     await page.getByRole("tab", { name: /本機設定|Local Settings/ }).click();
@@ -855,7 +862,7 @@ test.describe("work-report navigation stability", () => {
     ).toBeVisible();
   });
 
-  test("50 與 100 筆完整欄位列表只渲染視窗列且保留捲動與進入明細互動", async ({ page }) => {
+  test("50 與 100 筆完整欄位列表由外層捲動並可進入明細", async ({ page }) => {
     await page.addInitScript(() => {
       window.localStorage.setItem("work-reports:column-mode", "fit");
     });
@@ -905,89 +912,25 @@ test.describe("work-report navigation stability", () => {
     );
     await dismissSystemNoticeIfPresent(page);
 
-    const virtualBody = page.locator(".ragic-table .ant-table-tbody-virtual");
-    await expect(virtualBody).toHaveCount(0);
+    const outer = page.locator(".ragic-list-main");
+    const rows = page.locator(".ragic-table tbody tr.ant-table-row");
+    await expect(page.locator(".ant-table-tbody-virtual-holder")).toHaveCount(0);
     await page.setViewportSize({ width: 1280, height: 500 });
-    await page.locator(".workspace-page-size .ant-select").click();
-    await page.locator(".ant-select-item-option", { hasText: "50" }).click();
-    await expect(virtualBody).toBeVisible();
-    await expect(page.locator(".pager")).toContainText(/1-50/);
-    await expect
-      .poll(() => page.locator(".ragic-table .ant-table-row").count())
-      .toBeLessThan(50);
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const holder = document.querySelector<HTMLElement>(
-            ".ragic-table .ant-table-tbody-virtual-holder"
-          );
-          const wrapper = document.querySelector<HTMLElement>(".table-wrap");
-          const header = wrapper?.querySelector<HTMLElement>(".ant-table-header");
-          if (!holder || !wrapper || !header) return null;
-          return {
-            holderHeight: holder.clientHeight,
-            expectedHeight: wrapper.clientHeight - header.offsetHeight - 2,
-          };
-        })
-      )
-      .toEqual(expect.objectContaining({ holderHeight: expect.any(Number) }));
-    const dynamicHeight = await page.evaluate(() => {
-      const holder = document.querySelector<HTMLElement>(
-        ".ragic-table .ant-table-tbody-virtual-holder"
-      )!;
-      const wrapper = document.querySelector<HTMLElement>(".table-wrap")!;
-      const header = wrapper.querySelector<HTMLElement>(".ant-table-header")!;
-      return {
-        holderHeight: holder.clientHeight,
-        expectedHeight: wrapper.clientHeight - header.offsetHeight - 2,
-      };
-    });
-    expect(dynamicHeight.holderHeight).toBeGreaterThan(200);
-    expect(Math.abs(dynamicHeight.holderHeight - dynamicHeight.expectedHeight)).toBeLessThanOrEqual(2);
-
-    await page.locator(".workspace-page-size .ant-select").click();
-    await page.locator(".ant-select-item-option", { hasText: "100" }).click();
-    await expect(page.locator(".pager")).toContainText(/1-100/);
-    await expect
-      .poll(() => page.locator(".ragic-table .ant-table-row").count())
-      .toBeLessThan(100);
-
-    const virtualScroller = page.locator(".ragic-table .ant-table-tbody-virtual-holder");
-    const lastRow = page.locator(".ragic-table .ant-table-row", {
-      hasText: "WO-VIRTUAL-100",
-    });
-    await expect
-      .poll(async () => {
-        await virtualScroller.evaluate((element) => {
-          element.scrollTop = element.scrollHeight;
-          element.dispatchEvent(new Event("scroll", { bubbles: true }));
-        });
-        return lastRow.count();
-      })
-      .toBeGreaterThan(0);
-    await expect(lastRow).toBeVisible();
-
-    const horizontalScrollbar = page.locator(
-      ".ragic-table .ant-table-tbody-virtual-scrollbar-horizontal"
-    );
-    const horizontalThumb = horizontalScrollbar.locator(
-      ".ant-table-tbody-virtual-scrollbar-thumb"
-    );
-    await expect(horizontalScrollbar).toBeVisible();
-    const thumbBounds = await horizontalThumb.boundingBox();
-    expect(thumbBounds).not.toBeNull();
-    await virtualScroller.hover();
-    await page.mouse.wheel(300, 0);
-    await expect
-      .poll(async () => (await horizontalThumb.boundingBox())?.x ?? 0)
-      .toBeGreaterThan(thumbBounds?.x ?? 0);
-    await expect(page.locator(".fixed-h-scrollbar-shell")).toHaveCount(0);
-
-    await lastRow.click();
+    for (const size of [50, 100]) {
+      await page.locator(".workspace-page-size .ant-select").click();
+      await page.locator(`.ant-select-item-option[title="${size}"]`).click();
+      await expect(rows).toHaveCount(size);
+      await expect(page.locator(".pager")).toHaveCount(0);
+      await outer.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await expect.poll(() => outer.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+      await expect(rows.last()).toBeInViewport();
+      await expect(page.locator(".fixed-h-scrollbar-shell:not(.is-hidden)")).toBeVisible();
+    }
+    await rows.last().click();
     await expect(page).toHaveURL(/\/reports\/902\/virtual-100/);
   });
 
-  test("套用篩選等待新資料時保留既有表格並顯示忙碌遮罩", async ({ page }) => {
+  test("套用篩選等待新資料時保留既有表格並鎖定操作", async ({ page }) => {
     let shouldDelayNextListRequest = false;
     let releaseDelayedResponse: (() => void) | null = null;
     let markDelayedRequestStarted: (() => void) | null = null;
@@ -1000,18 +943,20 @@ test.describe("work-report navigation stability", () => {
 
     await page.route("**/api/forms/901/reports?**", async (route) => {
       const requestUrl = new URL(route.request().url());
-      if (
-        !shouldDelayNextListRequest ||
-        requestUrl.searchParams.get("keyword") !== "WO"
-      ) {
-        await route.fallback();
-        return;
+      if (shouldDelayNextListRequest && requestUrl.searchParams.get("keyword") === "WO") {
+        shouldDelayNextListRequest = false;
+        markDelayedRequestStarted?.();
+        await delayedResponseReleased;
       }
-      shouldDelayNextListRequest = false;
-      const response = await route.fetch();
-      markDelayedRequestStarted?.();
-      await delayedResponseReleased;
-      await route.fulfill({ response });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: [{ id: "filter-snapshot", workOrderNo: "WO-FILTER-SNAPSHOT", prodType: "PA", status: "未結案" }],
+          meta: { formId: "901", count: 1, totalCount: 1, hasMore: false, limit: 25,
+            offset: 0, keyword: requestUrl.searchParams.get("keyword") ?? "" },
+        }),
+      });
     });
 
     await page.goto(
@@ -1030,7 +975,7 @@ test.describe("work-report navigation stability", () => {
     await delayedRequestStarted;
 
     await expect(page.locator(".table-wrap.is-soft-busy")).toBeVisible();
-    await expect(page.locator(".table-soft-busy-overlay")).toBeVisible();
+    await expect(page.locator(".table-soft-busy-overlay")).toHaveCount(0);
     await expect(rows).toHaveCount(initialRowCount);
 
     releaseDelayedResponse?.();
@@ -1038,6 +983,7 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("切頁等待新資料時頁碼與保留中的表格維持同一份 snapshot", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 620 });
     let releaseSecondPage: (() => void) | null = null;
     let markSecondPageStarted: (() => void) | null = null;
     const secondPageStarted = new Promise<void>((resolve) => {
@@ -1054,27 +1000,27 @@ test.describe("work-report navigation stability", () => {
         markSecondPageStarted?.();
         await secondPageReleased;
       }
-      const recordId = offset === 25 ? "snapshot-page-2" : "snapshot-page-1";
+      const pageLabel = offset === 25 ? "PAGE-2" : "PAGE-1";
+      const limit = Number(requestUrl.searchParams.get("limit") ?? 25);
+      const records = Array.from({ length: limit }, (_, index) => ({
+        id: `snapshot-${offset + index}`,
+        workOrderNo: `WO-SNAPSHOT-${pageLabel}-${index}`,
+        prodType: "PA",
+        status: "未結案",
+        customerPartNo: "PART-001",
+        erpPartNo: "PART-001",
+      }));
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          data: [
-            {
-              id: recordId,
-              workOrderNo: offset === 25 ? "WO-SNAPSHOT-PAGE-2" : "WO-SNAPSHOT-PAGE-1",
-              prodType: "PA",
-              status: "未結案",
-              customerPartNo: "PART-001",
-              erpPartNo: "PART-001",
-            },
-          ],
+          data: records,
           meta: {
             formId: "901",
-            count: 1,
-            totalCount: 26,
+            count: records.length,
+            totalCount: 50,
             hasMore: offset === 0,
-            limit: 25,
+            limit,
             offset,
             keyword: "",
           },
@@ -1089,20 +1035,55 @@ test.describe("work-report navigation stability", () => {
 
     const rows = page.locator(".ragic-table tbody tr.ant-table-row");
     await expect(rows.first()).toContainText("WO-SNAPSHOT-PAGE-1");
+    const outerScroller = page.locator(".ragic-list-main");
+    await outerScroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    const firstPageBottom = await outerScroller.evaluate((element) => element.scrollTop);
+    expect(firstPageBottom).toBeGreaterThan(100);
     await page.locator(".workspace-pager button").last().click();
     await secondPageStarted;
 
-    await expect(page.locator(".table-soft-busy-overlay")).toBeVisible();
+    await expect(page.locator(".table-soft-busy-overlay")).toHaveCount(0);
     await expect(page.locator(".workspace-pager")).toContainText(/第 1 頁|Page 1/);
-    await expect(page.locator(".pager")).toContainText(/1-1/);
-    await expect(page.locator(".pager")).toContainText(/第 1 頁|Page 1/);
+    await expect(page.locator(".pager")).toHaveCount(0);
     await expect(rows.first()).toContainText("WO-SNAPSHOT-PAGE-1");
+    expect(await outerScroller.evaluate((element) => element.scrollTop)).toBe(firstPageBottom);
 
     releaseSecondPage?.();
     await expect(page.locator(".table-soft-busy-overlay")).toHaveCount(0);
     await expect(page.locator(".workspace-pager")).toContainText(/第 2 頁|Page 2/);
-    await expect(page.locator(".pager")).toContainText(/26-26/);
+    await expect(page.locator(".pager")).toHaveCount(0);
     await expect(rows.first()).toContainText("WO-SNAPSHOT-PAGE-2");
+    const firstRowOffset = () => page.evaluate(() => {
+      const row = document.querySelector(".ragic-table tbody tr.ant-table-row");
+      const header = document.querySelector(".ant-table-sticky-holder");
+      if (!row || !header) throw new Error("Missing list row or sticky header");
+      return row.getBoundingClientRect().top - header.getBoundingClientRect().bottom;
+    });
+    await expect.poll(firstRowOffset).toBeGreaterThanOrEqual(-2);
+    expect(await firstRowOffset()).toBeLessThan(30);
+
+    await outerScroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await page.locator(".workspace-pager button").first().click();
+    await expect(rows.first()).toContainText("WO-SNAPSHOT-PAGE-1");
+    await expect.poll(firstRowOffset).toBeGreaterThanOrEqual(-2);
+
+    await outerScroller.evaluate((element) => { element.scrollTop = 0; });
+    const tableTopOffset = await outerScroller.evaluate((element) => {
+      const table = element.querySelector(".work-report-table-stage");
+      const toolbar = element.querySelector(".work-report-workspace-toolbar");
+      if (!table || !toolbar) throw new Error("Missing list table or toolbar");
+      return table.getBoundingClientRect().top - element.getBoundingClientRect().top - toolbar.getBoundingClientRect().height;
+    });
+    expect(tableTopOffset).toBeGreaterThan(30);
+    await page.locator(".workspace-pager button").last().click();
+    await expect(rows.first()).toContainText("WO-SNAPSHOT-PAGE-2");
+    expect(await outerScroller.evaluate((element) => element.scrollTop)).toBe(0);
+
+    await outerScroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await page.locator(".workspace-page-size .ant-select").click();
+    await page.locator('.ant-select-item-option[title="50"]').click();
+    await expect(rows).toHaveCount(50);
+    await expect.poll(firstRowOffset).toBeGreaterThanOrEqual(-2);
   });
 
   test("精確欄位篩選與任意已知排序維持 paged query，不下載 full dataset", async ({ page }) => {
@@ -2855,6 +2836,7 @@ test.describe("work-report navigation stability", () => {
   });
 
   test("底部 inline 新增列 fill handle 往下拖會跟著 scroll 並延伸下方新增列", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 500 });
     await page.goto(INLINE_EDITABLE_DETAIL_URL);
     await scrollDetailTableToBottom(page);
 
@@ -2874,6 +2856,7 @@ test.describe("work-report navigation stability", () => {
       throw new Error("missing fill handle or table bounds");
     }
     const beforeScrollTop = await page.locator(".detail-table-scroll").evaluate((element) => element.scrollTop);
+    expect(await page.locator(".detail-table-scroll").evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
 
     await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
     await page.mouse.down();
@@ -2907,6 +2890,7 @@ test.describe("work-report navigation stability", () => {
 
     const handle = targetPlaceholderRow.locator("td[data-inline-cell-key='date'] .detail-inline-fill-handle");
     await expect(handle).toBeVisible();
+    await page.waitForTimeout(500);
     const handleBox = await handle.boundingBox();
     const tableBox = await page.locator(".detail-table-scroll").boundingBox();
     if (!handleBox || !tableBox) {
@@ -3049,7 +3033,7 @@ test.describe("work-report navigation stability", () => {
 
     const firstProcessCell = page.locator(".detail-subtable tbody tr[data-row-id]").nth(0).locator("td.col-process");
     await expect(firstProcessCell).toBeVisible();
-    await expect(firstProcessCell).toContainText(/PA\d+/);
+    await expect(firstProcessCell).toContainText(/A\d{2}-\d/);
     await expect(firstProcessCell).not.toContainText(/Process A/i);
   });
 
@@ -3496,7 +3480,7 @@ test.describe("work-report navigation stability", () => {
     await expect(dialog).toBeVisible();
 
     const searchInput = dialog.getByRole("textbox", { name: /(搜尋操作員|Search Operator)/ });
-    await searchInput.fill("FD00");
+    await searchInput.fill("E00");
 
     const nextOperatorValue = await dialog.locator(".detail-picker-option").evaluateAll((nodes, current) => {
       const currentValue = String(current ?? "").trim();
@@ -3534,7 +3518,7 @@ test.describe("work-report navigation stability", () => {
     await expect(dialog).toBeVisible();
 
     const searchInput = dialog.getByRole("textbox", { name: /(搜尋機台|Search Machine)/ });
-    await searchInput.fill("W");
+    await searchInput.fill("A0");
 
     const nextMachineValue = await dialog.locator(".detail-picker-option").evaluateAll((nodes, current) => {
       const currentValue = String(current ?? "").trim();
@@ -3571,7 +3555,7 @@ test.describe("work-report navigation stability", () => {
     await expect(dialog).toBeVisible();
 
     const searchInput = dialog.getByRole("textbox", { name: /(搜尋製程|Search Process)/ });
-    await searchInput.fill("PA");
+    await searchInput.fill("A0");
 
     const nextProcessValue = await dialog.locator(".detail-picker-option").evaluateAll((nodes, current) => {
       const currentValue = String(current ?? "").trim();
@@ -3608,7 +3592,7 @@ test.describe("work-report navigation stability", () => {
     await expect(dialog).toBeVisible();
 
     const searchInput = dialog.getByRole("textbox", { name: /(搜尋操作員|Search Operator)/ });
-    await searchInput.fill("FD00");
+    await searchInput.fill("E00");
 
     const nextOperatorValue = await dialog.locator(".detail-picker-option").evaluateAll((nodes, current) => {
       const currentValue = String(current ?? "").trim();
@@ -3841,9 +3825,7 @@ test.describe("work-report navigation stability", () => {
     const panel = page.locator(".detail-column-settings-panel");
     await expect(panel).toBeVisible();
 
-    const hiddenColumnCheckbox = panel.getByRole("checkbox", {
-      name: /^\[Assigned\]Efficiency Standard\[指定\]製程標準識別碼$/,
-    });
+    const hiddenColumnCheckbox = panel.locator('input[data-column-key="demo_efficiency_assigned_code"]');
     await hiddenColumnCheckbox.check();
 
     await expect

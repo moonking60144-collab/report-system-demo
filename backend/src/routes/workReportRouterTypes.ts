@@ -95,7 +95,8 @@ export interface WorkReportRouterDeps {
     hasBlockingScheduleMutation: boolean;
     count: number;
   };
-  acknowledgeScheduleMutationObservation(formId: string, entryId: string): number;
+  getUnresolvedScheduleMutationTaskIds(formId: string, entryId: string): string[];
+  acknowledgeScheduleMutationObservation(formId: string, entryId: string, taskIds: readonly string[]): number;
   getTaskRecord(taskId: string): WorkReportQueueTaskRecord | null;
   getSyncStatus(formId: string): Promise<unknown>;
   getReports(

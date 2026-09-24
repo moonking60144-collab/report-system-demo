@@ -125,10 +125,11 @@ export function useWorkReportListNavigation({
       openDetailLockUntilRef.current = now + 450;
 
       const listSearch = normalizeListSearch(buildListSearch());
+      const outerScrollY = document.querySelector<HTMLElement>(".ragic-list-main")?.scrollTop ?? window.scrollY;
       const listAnchor: WorkReportListAnchor = {
         entryId,
-        scrollY: document.querySelector<HTMLElement>(".ragic-table .ant-table-tbody-virtual-holder, .ragic-table .ant-table-body")?.scrollTop ?? window.scrollY,
-        outerScrollY: document.querySelector<HTMLElement>(".ragic-list-main")?.scrollTop ?? window.scrollY,
+        scrollY: outerScrollY,
+        outerScrollY,
         at: now,
       };
       const listViewState: WorkReportListViewState = {
@@ -211,28 +212,29 @@ export function useWorkReportListNavigation({
       }
     };
 
-    const safeScrollY = Math.max(0, anchorPayload.listAnchor.scrollY);
-    const safeOuterScrollY = Math.max(0, anchorPayload.listAnchor.outerScrollY ?? 0);
+    const safeOuterScrollY = Math.max(0, anchorPayload.listAnchor.outerScrollY ?? anchorPayload.listAnchor.scrollY);
     const targetEntryId = String(anchorPayload.listAnchor.entryId ?? "").trim();
     const tryRestoreToAnchorRow = (remainingRetry: number): void => {
       const outerScroller = document.querySelector<HTMLElement>(".ragic-list-main");
-      const scroller = document.querySelector<HTMLElement>(
-        ".ragic-table .ant-table-tbody-virtual-holder, .ragic-table .ant-table-body"
-      );
       if (outerScroller) outerScroller.scrollTop = safeOuterScrollY;
       else window.scrollTo({ top: safeOuterScrollY, behavior: "auto" });
-      if (scroller) scroller.scrollTop = safeScrollY;
       if (targetEntryId) {
         const escapedEntryId = escapeAttributeValue(targetEntryId);
         const row = document.querySelector<HTMLElement>(
           `.ragic-table [data-row-key="${escapedEntryId}"]`
         );
         if (row) {
-          if (scroller) {
-            scroller.scrollTop += row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 32;
+          if (outerScroller) {
+            const toolbarHeight = document.querySelector<HTMLElement>(".work-report-workspace-toolbar")?.offsetHeight ?? 0;
+            const headerHeight = document.querySelector<HTMLElement>(".ragic-table .ant-table-thead")?.offsetHeight ?? 0;
+            const visibleTop = outerScroller.getBoundingClientRect().top + toolbarHeight + headerHeight;
+            const visibleBottom = outerScroller.getBoundingClientRect().bottom - 14;
+            const rowRect = row.getBoundingClientRect();
+            if (rowRect.top < visibleTop || rowRect.bottom > visibleBottom) {
+              outerScroller.scrollTop += rowRect.top - visibleTop - 12;
+            }
           } else {
-            const rowTop = row.getBoundingClientRect().top + window.scrollY;
-            window.scrollTo({ top: Math.max(0, rowTop - 150), behavior: "auto" });
+            row.scrollIntoView({ block: "nearest" });
           }
           cleanupAnchor();
           return;
@@ -240,8 +242,6 @@ export function useWorkReportListNavigation({
       }
 
       if (remainingRetry <= 0) {
-        if (scroller) scroller.scrollTop = safeScrollY;
-        else window.scrollTo({ top: safeScrollY, behavior: "auto" });
         cleanupAnchor();
         return;
       }

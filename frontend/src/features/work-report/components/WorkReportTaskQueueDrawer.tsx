@@ -30,6 +30,7 @@ import { useTaskQueueQuery } from "../hooks/useTaskQueueQuery";
 import {
   getBatchTaskProgress,
   isMutationQueueTask,
+  isObservedTaskFailure,
   summarizeTaskQueue,
 } from "../taskQueuePresentation";
 
@@ -167,6 +168,7 @@ function getTaskStatusLabel(
   task: WorkReportQueueTask,
   t: (key: string) => string
 ): string {
+  if (isObservedTaskFailure(task)) return t("workReport:taskQueue.status.observedFailure");
   if (isMutationQueueTask(task)) {
     if (task.status === "pending") {
       return t("workReport:taskQueue.status.waitingWrite");
@@ -320,6 +322,7 @@ export function WorkReportTaskQueueDrawer({
 
   const canRetryTask = useCallback(
     (task: WorkReportQueueTask): boolean => {
+      if (isObservedTaskFailure(task)) return false;
       if (context === "list") {
         return false;
       }
@@ -356,6 +359,7 @@ export function WorkReportTaskQueueDrawer({
 
   const getTaskRetryHint = useCallback(
     (task: WorkReportQueueTask): string | null => {
+      if (isObservedTaskFailure(task)) return null;
       if (task.status !== "failed") {
         return null;
       }
@@ -642,6 +646,11 @@ export function WorkReportTaskQueueDrawer({
                 {t("workReport:taskQueue.summary.failed", { count: taskSummary.failedCount })}
               </span>
             ) : null}
+            {taskSummary.observedCount > 0 ? (
+              <span className="is-observed">
+                {t("workReport:taskQueue.summary.observed", { count: taskSummary.observedCount })}
+              </span>
+            ) : null}
           </div>
         ) : null}
 
@@ -666,10 +675,12 @@ export function WorkReportTaskQueueDrawer({
               const canRetry = canRetryTask(task);
               const retryHint = getTaskRetryHint(task);
               const batchProgress = getBatchTaskProgress(task);
+              const observedFailure = isObservedTaskFailure(task);
+              const presentationStatus = observedFailure ? "observed" : task.status;
               return (
                 <article
                   key={task.taskId}
-                  className={`detail-task-queue-item is-${task.status}`}
+                  className={`detail-task-queue-item is-${presentationStatus}`}
                   role="listitem"
                 >
                   <div className="detail-task-queue-item-head">
@@ -679,7 +690,7 @@ export function WorkReportTaskQueueDrawer({
                         {t("workReport:filters.workOrderNo")}: {task.workOrderNo ?? workOrderNo ?? "--"}
                       </span>
                     </div>
-                    <span className={`detail-task-queue-status-badge is-${task.status}`}>
+                    <span className={`detail-task-queue-status-badge is-${presentationStatus}`}>
                       {getTaskStatusLabel(task, t)}
                     </span>
                   </div>
@@ -700,6 +711,9 @@ export function WorkReportTaskQueueDrawer({
                     ) : null}
                     <span>{t("workReport:taskQueue.fields.createdAt")}: {formatStatusDateTime(task.createdAt)}</span>
                     <span>{t("workReport:taskQueue.fields.finishedAt")}: {formatStatusDateTime(task.finishedAt)}</span>
+                    {observedFailure ? (
+                      <span>{t("workReport:taskQueue.fields.observedAt")}: {formatStatusDateTime(task.scheduleMutationObservedAt)}</span>
+                    ) : null}
                     <span>{t("workReport:taskQueue.fields.actor")}: {formatTaskActor(task)}</span>
                     {task.source ? (
                       <span>{t("workReport:taskQueue.fields.eventSource")}: {task.source}</span>
@@ -707,6 +721,7 @@ export function WorkReportTaskQueueDrawer({
                   </div>
 
                   <div className="detail-task-queue-item-message">
+                    {observedFailure ? `${t("workReport:taskQueue.fields.originalFailure")}: ` : ""}
                     {getWorkReportTaskErrorMessage(task) || task.message || "--"}
                   </div>
                   {task.status === "failed" && task.operationKind === "update-main-machine" && task.mainMachineVerification ? (

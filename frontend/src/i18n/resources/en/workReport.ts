@@ -1,4 +1,9 @@
 const workReportEn = {
+  cellCopy: {
+    markRow: "Mark this work order",
+    unmarkRow: "Remove work order mark",
+    clearMarkedRow: "Clear mark for {{workOrderNo}}",
+  },
   page: {
     title: "Reporting System",
     groupLineA: "Process A Report",
@@ -938,6 +943,7 @@ const workReportEn = {
       active: "Processing {{count}}",
       success: "Completed {{count}}",
       failed: "Needs attention {{count}}",
+      observed: "Rechecked {{count}}",
     },
     progress: {
       label: "Progress {{processed}} / {{total}}",
@@ -975,6 +981,8 @@ const workReportEn = {
       targetMachine: "Target Machine",
       readBackMachine: "Read-back Machine",
       notReadBack: "Unavailable",
+      observedAt: "Rechecked",
+      originalFailure: "Original failure",
     },
     status: {
       pending: "Queued",
@@ -987,6 +995,7 @@ const workReportEn = {
       deleting: "Deleting",
       deleted: "Deleted",
       needsAttention: "Needs attention",
+      observedFailure: "Previously failed, rechecked",
     },
     taskTypes: {
       create: "Create Report",

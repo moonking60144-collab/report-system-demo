@@ -1096,6 +1096,17 @@
   min-width: 0;
 }
 
+.work-report-cell-copy-surface {
+  display: contents;
+}
+
+.work-report-cell-copy-anchor {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
 .ragic-table .ant-table-body,
 .ragic-table .ant-table-content {
   overflow-x: auto !important;

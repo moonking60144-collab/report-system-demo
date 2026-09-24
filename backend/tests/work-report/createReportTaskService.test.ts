@@ -560,7 +560,7 @@ test("同工令已有 indeterminate 排程 mutation 時阻擋不同 clientMutati
   );
 
   assert.equal(
-    createReportTaskService.acknowledgeScheduleMutationObservation("901", entryId),
+    createReportTaskService.acknowledgeScheduleMutationObservation("901", entryId, [firstTask.taskId]),
     1
   );
   assert.equal(
