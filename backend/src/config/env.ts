@@ -376,6 +376,7 @@ function resolveRagicApiKey(): string {
 export const env = {
   NODE_ENV: process.env.NODE_ENV ?? "development",
   DEMO_MODE: isDemoMode,
+  DEMO_FAULT_INJECTION_ENABLED: readBooleanEnv("DEMO_FAULT_INJECTION_ENABLED", false),
   DEMO_RESET_KEY: process.env.DEMO_RESET_KEY ?? "",
   PORT: readNumberEnv("PORT", 3000),
   TRUST_PROXY: readTrustProxyEnv(),

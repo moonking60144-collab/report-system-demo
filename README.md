@@ -38,7 +38,7 @@ npm run demo
 | Meeting | 瀏覽器錄音、分段上傳、背景音訊工作、逐字稿與會議記錄流程 |
 | Developer | 合成 Ragic Definitions、欄位搜尋、公式檢視與修改流程 |
 | Dev AI／RAG | Lexical、hybrid 或 vector retrieval、來源版本、context 與 citation 分離 |
-| 故障模擬 | 上游延遲、請求失敗與寫入掉欄位，用來觀察排程、重試及回復行為 |
+| 故障模擬（本機 Demo） | 上游延遲、請求失敗與寫入掉欄位，用來觀察排程、重試及回復行為 |
 
 ## 資料流
 

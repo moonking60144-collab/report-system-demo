@@ -110,6 +110,8 @@ async function main() {
   };
   if (mode === "demo") {
     backendEnv.DEMO_MODE = "true";
+    backendEnv.DEMO_FAULT_INJECTION_ENABLED =
+      process.env.DEMO_FAULT_INJECTION_ENABLED ?? "true";
     backendEnv.RAGIC_WRITE_TARGET = "test";
   }
 

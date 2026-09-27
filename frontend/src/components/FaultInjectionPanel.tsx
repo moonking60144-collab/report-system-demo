@@ -6,20 +6,15 @@ import { createApiClient } from "../api/apiClient";
  * Demo-only fault-injection control panel.
  *
  * 浮動在右下角，預設摺疊；展開後可即時調整三個參數，每次變更 debounce 300ms 後
- * PUT /api/__demo/fault-injection。需 X-Demo-Key header，key 從 sessionStorage 取，
- * 沒設定就在第一次展開時用 prompt 跟使用者要。
+ * PUT /api/__demo/fault-injection。Demo 模式下可直接操作。
  *
  * 設計目的：給面試官現場 toggle 故障，搭配畫面同步觀察：
  * - 失敗率 → circuit breaker 開啟
  * - 延遲   → token bucket 排隊
  * - 掉欄位 → activity log idempotency 自動 rollback
  *
- * 與 DemoBadge 同樣：先 GET /api/health 確認 demoMode=true 才掛上，否則不渲染。
+ * 讀取故障設定成功後才顯示；公開 Demo 未掛控制端點時不渲染。
  */
-
-interface HealthResponse {
-  demoMode?: boolean;
-}
 
 interface FaultInjectionState {
   enabled: boolean;
@@ -39,70 +34,22 @@ const DEFAULT_STATE: FaultInjectionState = {
   dropFieldRate: 0,
 };
 
-const DEMO_KEY_STORAGE = "ragic-demo-key";
 const DEBOUNCE_MS = 300;
-
-function readStoredDemoKey(): string {
-  try {
-    return sessionStorage.getItem(DEMO_KEY_STORAGE) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeStoredDemoKey(key: string): void {
-  try {
-    sessionStorage.setItem(DEMO_KEY_STORAGE, key);
-  } catch {
-    // sessionStorage 不可用就放棄，下次展開會再 prompt
-  }
-}
-
-function clearStoredDemoKey(): void {
-  try {
-    sessionStorage.removeItem(DEMO_KEY_STORAGE);
-  } catch {
-    // ignore
-  }
-}
 
 export function FaultInjectionPanel() {
   const [isDemo, setIsDemo] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [state, setState] = useState<FaultInjectionState>(DEFAULT_STATE);
-  const [demoKey, setDemoKey] = useState<string>(() => readStoredDemoKey());
-
   const apiClient = useMemo(() => createApiClient({ timeoutMs: 5000 }), []);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 初始 GET 完成前不要 PUT，避免把 DEFAULT_STATE 覆蓋上去
   const initialLoadedRef = useRef(false);
 
-  // 健康檢查 → 確認 demoMode
+  // 故障設定載入完成後才提供控制項，避免初次點擊被 GET 結果覆蓋。
   useEffect(() => {
     let cancelled = false;
     apiClient
-      .get<HealthResponse>("/health")
-      .then((res) => {
-        if (!cancelled && res.data?.demoMode) {
-          setIsDemo(true);
-        }
-      })
-      .catch(() => {
-        // 健康檢查失敗就不掛 panel
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiClient]);
-
-  // 展開後第一次 GET 當前 fault-injection state
-  useEffect(() => {
-    if (!isDemo || !expanded || !demoKey || initialLoadedRef.current) return;
-    let cancelled = false;
-    apiClient
-      .get<FaultInjectionApiResponse>("/__demo/fault-injection", {
-        headers: { "X-Demo-Key": demoKey },
-      })
+      .get<FaultInjectionApiResponse>("/__demo/fault-injection")
       .then((res) => {
         if (cancelled) return;
         const payload = res.data?.data ?? {};
@@ -113,47 +60,30 @@ export function FaultInjectionPanel() {
           dropFieldRate: payload.dropFieldRate ?? DEFAULT_STATE.dropFieldRate,
         });
         initialLoadedRef.current = true;
+        setIsDemo(true);
       })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const status = (err as { response?: { status?: number } })?.response?.status;
-        if (status === 403) {
-          message.error("X-Demo-Key 不正確，請重新輸入");
-          clearStoredDemoKey();
-          setDemoKey("");
-        } else {
-          message.error("讀取 fault-injection 狀態失敗");
-        }
+      .catch(() => {
+        // 公開 Demo 未提供控制端點，或讀取失敗時不顯示面板。
       });
     return () => {
       cancelled = true;
     };
-  }, [apiClient, demoKey, expanded, isDemo]);
+  }, [apiClient]);
 
   const pushUpdate = useCallback(
     (next: FaultInjectionState) => {
-      if (!demoKey) return;
       if (debounceTimer.current) {
         clearTimeout(debounceTimer.current);
       }
       debounceTimer.current = setTimeout(() => {
         apiClient
-          .put("/__demo/fault-injection", next, {
-            headers: { "X-Demo-Key": demoKey },
-          })
-          .catch((err: unknown) => {
-            const status = (err as { response?: { status?: number } })?.response?.status;
-            if (status === 403) {
-              message.error("X-Demo-Key 不正確，請重新輸入");
-              clearStoredDemoKey();
-              setDemoKey("");
-            } else {
-              message.error("更新 fault-injection 失敗");
-            }
+          .put("/__demo/fault-injection", next)
+          .catch(() => {
+            message.error("更新 fault-injection 失敗");
           });
       }, DEBOUNCE_MS);
     },
-    [apiClient, demoKey],
+    [apiClient],
   );
 
   // 元件卸載時清掉 pending timer
@@ -180,17 +110,8 @@ export function FaultInjectionPanel() {
   );
 
   const handleToggleExpand = useCallback(() => {
-    if (!expanded) {
-      // 第一次展開時若沒有 key，prompt 使用者
-      if (!demoKey) {
-        const input = window.prompt("請輸入 X-Demo-Key");
-        if (!input) return;
-        writeStoredDemoKey(input);
-        setDemoKey(input);
-      }
-    }
     setExpanded((v) => !v);
-  }, [demoKey, expanded]);
+  }, []);
 
   if (!isDemo) return null;
 

@@ -322,7 +322,9 @@ app.use("/api", debugClientsRouter);
 if (env.DEMO_MODE) {
   app.use(demoRateLimit);
   app.use("/api", demoResetRouter);
-  app.use("/api", demoFaultInjectionRouter);
+  if (env.DEMO_FAULT_INJECTION_ENABLED) {
+    app.use("/api", demoFaultInjectionRouter);
+  }
 }
 // activityLogDowntimeRouter 必須在 workReportRouter 之前 mount：
 // 前者負責 `/api/forms/903/ragic-callback`，後者通用 `/api/forms/:formId/ragic-callback`，

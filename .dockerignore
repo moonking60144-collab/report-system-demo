@@ -26,9 +26,8 @@ Thumbs.db
 
 # Logs / env / test scratch
 *.log
-.env
-.env.*
-!.env.demo
+**/.env
+**/.env.*
 coverage
 playwright-report
 test-results

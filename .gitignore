@@ -10,6 +10,7 @@ build/
 .env.bak
 *.env.bak
 backend/.env.server
+/backend/.env.demo
 
 # 日誌
 *.log

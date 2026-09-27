@@ -32,6 +32,6 @@ services:
       - key: TRUST_PROXY
         value: "1"
       # Render 會幫你產生並注入這個值；dashboard 可看
-      # 前端 FaultInjectionPanel 第一次展開會跟你要這個 key
+      # 只保護 Demo reset 端點；公開部署不掛載故障模擬控制端點
       - key: DEMO_RESET_KEY
         generateValue: true
