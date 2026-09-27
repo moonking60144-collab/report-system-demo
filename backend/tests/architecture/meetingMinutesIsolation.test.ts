@@ -57,10 +57,10 @@ test("Meeting 本機錄音 staging 初始化在 HTTP listen 後背景執行", as
   );
 });
 
-test("Windows 本機 backend 明確使用 development，避免 HTTP-IP Secure cookie 失效", async () => {
-  const source = await readFile(path.resolve("scripts/run-backend-local.cmd"), "utf8");
-  const environmentIndex = source.indexOf('set "NODE_ENV=development"');
-  const startIndex = source.indexOf("call npm run dev");
+test("本機啟動器明確使用 development，避免 HTTP-IP Secure cookie 失效", async () => {
+  const source = await readFile(path.resolve("../scripts/run-local.mjs"), "utf8");
+  const environmentIndex = source.indexOf('NODE_ENV: "development"');
+  const startIndex = source.indexOf('startServer(\n    "backend"');
 
   assert.notEqual(environmentIndex, -1);
   assert.notEqual(startIndex, -1);

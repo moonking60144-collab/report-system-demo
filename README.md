@@ -1,6 +1,6 @@
 # 企業報工工具系統 — Demo
 
-> 這是從實際內網產品架構整理出的公開技術展示版。保留正式資料流、背景任務、SQLite read model、SSE 即時更新與錯誤處理；上游資料、Definitions、會議內容與公司環境值則改用合成 fixture。
+> 本專案衍生自實際內網架構，完整保留正式資料流、背景任務、SQLite Read Model、SSE 即時更新與容錯機制；上游資料、Definitions、會議內容及企業環境值已以合成 Fixture 替代。
 
 ![報工主畫面：工令列表、任務中心與故障模擬](docs/demo-overview.jpg)
 
@@ -12,23 +12,22 @@ Demo 包含報工、停機、效率報表、會議錄音與 Developer／RAG 工�
 
 ## 開始
 
-請使用 Node.js **20.19.x 或 22.12+**。macOS／Linux 可直接執行下列指令；Windows 請使用 WSL。
+請使用 Node.js **20.19.x 或 22.12+**。macOS、Linux 與 Windows 都可在專案根目錄執行：
 
 ```bash
-npm install
 npm run demo
 ```
 
-首次啟動時，若 backend 或 frontend 尚未安裝依賴，啟動腳本會自動執行 `npm ci`。預設使用以下入口：
+首次啟動時，若 backend 或 frontend 尚未安裝依賴，啟動器會自動執行 `npm ci`，再同時啟動兩端；按 `Ctrl + C` 即可停止。預設使用以下入口：
 
 | 入口 | 內容 |
 |---|---|
-| [報工主畫面](http://localhost:5174) | 合成工令、報工與停機資料、任務中心 |
-| [Developer Mode](http://localhost:5174/dev) | 合成 Definitions、欄位、公式與 RAG 工具；預設帳密 `demo` / `demo` |
-| [Meeting](http://localhost:5174/meetings/audio-check) | 錄音檢查、分段上傳與錄音庫 |
-| `http://localhost:3300` | Backend API |
+| [報工主畫面](http://127.0.0.1:5174) | 合成工令、報工與停機資料、任務中心 |
+| [Developer Mode](http://127.0.0.1:5174/dev) | 合成 Definitions、欄位、公式與 RAG 工具；預設帳密 `demo` / `demo` |
+| [Meeting](http://127.0.0.1:5174/meetings/audio-check) | 錄音檢查、分段上傳與錄音庫 |
+| `http://127.0.0.1:3300` | Backend API |
 
-可用 `Ctrl + C` 同時停止 frontend 與 backend。一般 Demo 不需要 AI API key，也不會下載模型；Dev AI 回答、語音辨識與 AI 會議摘要需要另外啟用對應 provider。設定方式見 [AI 與 STT 設定](docs/ai-setup.md)。
+一般 Demo 不需要 AI API key，也不會下載模型；Dev AI 回答、語音辨識與 AI 會議摘要需要另外啟用對應 provider。設定方式見 [AI 與 STT 設定](docs/ai-setup.md)。
 
 ## 功能
 

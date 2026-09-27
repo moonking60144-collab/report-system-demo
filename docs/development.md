@@ -4,14 +4,21 @@
 
 ## 本機啟動與故障展示
 
-首頁啟動指令使用 Bash 腳本，適用 macOS／Linux；Windows 可在 WSL 的 Linux 環境內執行。需有 Node.js、npm 與 `lsof`。後端最低要求 Node 20.18.1，但目前前端 Vite 的 engine 要求為 `^20.19.0 || >=22.12.0`，因此完整 Demo 請使用 Node 20.19.x 或 22.12+。
+首頁啟動指令使用 Node.js 啟動器，適用 macOS、Linux 與 Windows。後端最低要求 Node 20.18.1，但目前前端 Vite 的 engine 要求為 `^20.19.0 || >=22.12.0`，因此完整 Demo 請使用 Node 20.19.x 或 22.12+。
 
-根目錄先執行 `npm install`，再執行 `npm run demo`。子專案缺少 `node_modules` 時，啟動腳本會執行 `npm ci`；第一次安裝所需時間依網路與環境而異。預設前端為 `5174`、後端為 `3300`。
+在根目錄執行 `npm run demo`。子專案缺少 `node_modules` 時，啟動器會執行 `npm ci`；第一次安裝所需時間依網路與環境而異。預設前端為 `5174`、後端為 `3300`，按 `Ctrl + C` 會停止兩端。
 
 要操作右下「故障模擬」，可在啟動時指定自己的本機展示密鑰：
 
 ```bash
 DEMO_RESET_KEY=local-interview-demo npm run demo
+```
+
+Windows PowerShell 使用：
+
+```powershell
+$env:DEMO_RESET_KEY = 'local-interview-demo'
+npm run demo
 ```
 
 展開面板並在 `X-Demo-Key` 提示中輸入同一值。上述值僅作本機範例。面板提供「啟用故障注入」、「上游失敗率」、「上游延遲」及「寫入時掉欄位機率」。每次只改一個條件，完成展示後關閉故障注入。
