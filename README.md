@@ -18,7 +18,7 @@ Demo 包含報工、停機、效率報表、會議錄音與 Developer／RAG 工�
 npm run demo
 ```
 
-首次啟動時，若 backend 或 frontend 尚未安裝依賴，啟動器會自動執行 `npm ci`，再同時啟動兩端；按 `Ctrl + C` 即可停止。預設使用以下入口：
+首次啟動時，若 backend 或 frontend 尚未安裝依賴，啟動器會自動執行 `npm ci`；Demo 會建置並啟動不監看檔案的 backend，再啟動前端。若本機已設定並安裝 Meeting STT，啟動器也會等待它就緒；按 `Ctrl + C` 即可停止。預設使用以下入口：
 
 | 入口 | 內容 |
 |---|---|

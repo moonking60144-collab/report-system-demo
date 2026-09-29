@@ -17,10 +17,13 @@ test("public retrieval Eval 不會讀取執行環境的 curated knowledge", asyn
   );
 
   try {
-    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const npmCli = process.env.npm_execpath ?? (process.platform === "win32"
+      ? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+      : null);
     const result = spawnSync(
-      npm,
+      npmCli ? process.execPath : "npm",
       [
+        ...(npmCli ? [npmCli] : []),
         "run",
         "eval:dev-ai-retrieval",
         "--",

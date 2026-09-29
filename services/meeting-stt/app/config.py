@@ -57,6 +57,7 @@ class Settings:
     diarization_enabled: bool
     diarization_model: str
     huggingface_token: str
+    beam_size: int = 1
 
     def __post_init__(self) -> None:
         if not _is_loopback_host(self.host) and not self.api_token:
@@ -89,4 +90,5 @@ class Settings:
             ).strip()
             or "pyannote/speaker-diarization-community-1",
             huggingface_token=os.getenv("HF_TOKEN", "").strip(),
+            beam_size=_read_int("MEETING_STT_BEAM_SIZE", 1, 1),
         )

@@ -238,7 +238,7 @@ test("local Whisper adapter rejects missing or changed effective beam instead of
   const fixture=await createAudioFixture();
   try{
     for(const beamSize of [undefined,5]){
-      const provider=new LocalWhisperMeetingTranscriptionProvider({url:"http://127.0.0.1:8010/v1/transcriptions",beamSize:1,
+      const provider=new LocalWhisperMeetingTranscriptionProvider({url:"http://127.0.0.1:8010/v1/transcriptions",model:"large-v3",beamSize:1,
         client:{request:async<T>()=>({status:200,headers:{},data:{model:"large-v3",beamSize,segments:[]} as T})}});
       await assert.rejects(provider.transcribe({audioPath:fixture.audioPath,mimeType:"audio/wav",sourceId:"room-mic",language:"zh-TW",durationMs:1000}),{code:"MEETING_TRANSCRIPTION_LOCAL_PROFILE_MISMATCH"});
     }

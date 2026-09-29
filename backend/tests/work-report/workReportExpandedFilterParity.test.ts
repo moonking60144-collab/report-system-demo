@@ -107,7 +107,8 @@ test(`擴充右鍵篩選由 API 到 SQLite 與 memory，支援資料欄位並排
     await workReportSqliteRepository.upsertSyncState({ formId: "901", status: "success", snapshotAt: "cross-zone", activeGenerationId: "cross-zone-901",
       readModelVersion: READ_MODEL_SCHEMA_VERSION, totalEntries: crossZoneRows.length, totalRows: 0 });
     const legacyLocalDay = await (await sqliteClient.getDb()).get<{ day: string }>("SELECT date('2026-09-17T20:00:00Z', 'localtime') AS day");
-    assert.equal(legacyLocalDay?.day, timezone === "Asia/Taipei" ? "2026-09-18" : "2026-09-17", "HOST_TIMEZONE_NEGATIVE_CONTROL");
+    // Windows SQLite uses the system timezone even when Node's TZ changes.
+    if (process.platform !== "win32") assert.equal(legacyLocalDay?.day, timezone === "Asia/Taipei" ? "2026-09-18" : "2026-09-17", "HOST_TIMEZONE_NEGATIVE_CONTROL");
     for (const field of ["plannedEndDate", "prevPlanEndDate", "plannedStartDate", "lastUpdatedAt"]) for (const [operator, values, expected] of [
       ["between", ["2026-09-18", "2026-09-18"], ["0", "1", "2", "3", "4", "5", "8", "9", "10"]],
       ["before", ["2026-09-18"], ["0", "1", "2", "3", "4", "5", "6", "8", "9", "10"]],

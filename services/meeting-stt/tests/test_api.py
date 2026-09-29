@@ -66,6 +66,7 @@ def request_data(**overrides: str) -> dict[str, str]:
         "sourceId": "room-mic",
         "durationMs": "1000",
         "model": "large-v3",
+        "expectedBeamSize": "1",
         "phrases": '["螺帽", "DemoCo"]',
     }
     values.update(overrides)
@@ -97,6 +98,7 @@ def test_health_and_transcription_match_node_contract() -> None:
     assert health.json() == {
         "status": "ok",
         "model": "large-v3",
+        "beamSize": 1,
         "device": "cpu",
         "computeType": "int8",
         "diarizationEnabled": False,
@@ -104,6 +106,7 @@ def test_health_and_transcription_match_node_contract() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "model": "large-v3",
+        "beamSize": 1,
         "segments": [
             {
                 "startMs": 100,
@@ -141,6 +144,12 @@ def test_auth_model_and_source_are_fail_closed() -> None:
             data=request_data(model="large-v3-turbo"),
             files=audio_file(),
         )
+        wrong_beam = client.post(
+            "/v1/transcriptions",
+            headers=auth_headers(),
+            data=request_data(expectedBeamSize="2"),
+            files=audio_file(),
+        )
         wrong_source = client.post(
             "/v1/transcriptions",
             headers=auth_headers(),
@@ -154,6 +163,8 @@ def test_auth_model_and_source_are_fail_closed() -> None:
     assert wrong_token.json()["detail"] == "STT_TOKEN_INVALID"
     assert wrong_model.status_code == 409
     assert wrong_model.json()["detail"] == "STT_MODEL_MISMATCH"
+    assert wrong_beam.status_code == 409
+    assert wrong_beam.json()["detail"] == "STT_BEAM_SIZE_MISMATCH"
     assert wrong_source.status_code == 422
     assert wrong_source.json()["detail"] == "STT_SOURCE_INVALID"
 

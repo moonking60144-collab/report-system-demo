@@ -141,12 +141,14 @@ export function MeetingOneShotPage({ availability: initialAvailability }: { avai
     let active = true;
     let inFlight = false;
     let pending = false;
+    let busy = true;
     const poll = async () => {
       if (inFlight) { pending = true; return; }
       inFlight = true;
       try {
         const result = await fetchMeetingOneShotStatus(sessionId);
         if (!active) return;
+        busy = isMeetingOneShotPipelineBusy(result.phase);
         setState(result);
         if (result.admission) setAvailability(current => current ? { ...current, admission: result.admission! } : current);
         setPollError(null);
@@ -167,10 +169,12 @@ export function MeetingOneShotPage({ availability: initialAvailability }: { avai
     };
     refreshStatus.current = () => { void poll(); };
     const unsubscribe = subscribeMeetingStateEvents(() => { void poll(); });
+    const interval = setInterval(() => { if (busy && !document.hidden) void poll(); }, 3_000);
     void poll();
     return () => {
       active = false;
       refreshStatus.current = () => undefined;
+      clearInterval(interval);
       unsubscribe();
     };
   }, [sessionId, t]);

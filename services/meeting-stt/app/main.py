@@ -25,12 +25,14 @@ class SegmentResponse(BaseModel):
 
 class TranscriptionResponse(BaseModel):
     model: str
+    beamSize: int
     segments: list[SegmentResponse]
 
 
 class HealthResponse(BaseModel):
     status: str
     model: str
+    beamSize: int
     device: str
     computeType: str
     diarizationEnabled: bool
@@ -112,6 +114,7 @@ def create_app(
         return HealthResponse(
             status="ok",
             model=engine.model_name,
+            beamSize=config.beam_size,
             device=config.device,
             computeType=config.compute_type,
             diarizationEnabled=config.diarization_enabled,
@@ -124,6 +127,7 @@ def create_app(
         sourceId: str = Form(...),
         durationMs: int = Form(...),
         model: str = Form(...),
+        expectedBeamSize: int = Form(...),
         phrases: str = Form("[]"),
         authorization: str | None = Header(default=None),
     ) -> TranscriptionResponse:
@@ -147,6 +151,9 @@ def create_app(
         if model != engine.model_name:
             await audio.close()
             raise HTTPException(status_code=409, detail="STT_MODEL_MISMATCH")
+        if expectedBeamSize != config.beam_size:
+            await audio.close()
+            raise HTTPException(status_code=409, detail="STT_BEAM_SIZE_MISMATCH")
         try:
             parsed_phrases = _read_phrases(phrases)
         except HTTPException:
@@ -170,6 +177,7 @@ def create_app(
             )
             return TranscriptionResponse(
                 model=engine.model_name,
+                beamSize=config.beam_size,
                 segments=[
                     SegmentResponse(
                         startMs=segment.start_ms,

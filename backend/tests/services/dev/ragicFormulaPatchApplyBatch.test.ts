@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import iconv from "iconv-lite";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRagicDefinitionsReadService } from "../../../src/services/dev/ragicDefinitionsReadService";
@@ -581,34 +581,26 @@ test("rollback latest：備份缺失時不覆寫 live .nui", async () => {
 
 test("rollback latest：回復中途失敗時會用已建立的 safety backup 還原", async () => {
   const fixture = await buildFixture();
-  let unreadableBackupFilePath: string | null = null;
   try {
-    const { applyService } = buildServices(fixture);
+    let exports = 0;
+    const { applyService } = buildServices(fixture, async () => {
+      if (++exports === 2) throw new Error("rollback re-export failure");
+      return reexportFromNui(fixture);
+    });
     const applied = await applyService.applyFormulaPatchBatch(
       batchTargets(["A1+10", "A1+20"])
     );
     assert.equal(applied.applied, true);
-    const audit = await readFile(join(fixture.root, "audit.jsonl"), "utf-8");
-    unreadableBackupFilePath =
-      audit
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as { backupFilePath?: string })
-        .find((entry) => entry.backupFilePath)?.backupFilePath ?? null;
-    assert.ok(unreadableBackupFilePath);
-    await chmod(unreadableBackupFilePath, 0o000);
 
     const rollback = await applyService.rollbackLatestFormulaPatch();
 
+    assert.equal(exports, 3);
     assert.equal(rollback.rolledBack, false);
     assert.equal(rollback.restoredCount, 0);
     assert.ok(rollback.targets[0]?.warnings.includes("回復失敗後已還原 safety backup"));
     const nui51 = await readFile(join(fixture.nuiDir, "51_Sheet51_index.nui"), "utf-8");
     assert.ok(nui51.includes("f=A1+10"));
   } finally {
-    if (unreadableBackupFilePath) {
-      await chmod(unreadableBackupFilePath, 0o600).catch(() => undefined);
-    }
     await rm(fixture.root, { recursive: true, force: true });
   }
 });

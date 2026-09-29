@@ -42,7 +42,7 @@ export const MINIMAX_MEETING_RECORD_JSON_SCHEMA = {
 export function prepareMiniMaxMeetingMinutesRequest(input: MeetingMinutesProviderInput, selection?: {
   segmentIds: ReadonlySet<string>;
   overviews: Array<Record<string, unknown>>;
-}) {
+}, providerLabel = "MiniMax") {
   // Keep the source used for validation identical to the one sent before awaiting the provider.
   const captured = {
     human: { ...input.human },
@@ -130,13 +130,13 @@ export function prepareMiniMaxMeetingMinutesRequest(input: MeetingMinutesProvide
       serializedCharacters: serializedInput.length,
     },
     resolve(value: unknown) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new MeetingMinutesValidationError("MiniMax 紀錄必須是物件");
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new MeetingMinutesValidationError(`${providerLabel} 紀錄必須是物件`);
       const raw = value as Record<string, unknown>;
       for (const key of Object.keys(raw)) {
-        if (!Object.hasOwn(schema.properties, key)) throw new MeetingMinutesValidationError(`MiniMax.${key} 不是允許的生成欄位`);
+        if (!Object.hasOwn(schema.properties, key)) throw new MeetingMinutesValidationError(`${providerLabel}.${key} 不是允許的生成欄位`);
       }
       for (const key of schema.required) {
-        if (!Object.hasOwn(raw, key)) throw new MeetingMinutesValidationError(`MiniMax.${key} 為必填欄位`);
+        if (!Object.hasOwn(raw, key)) throw new MeetingMinutesValidationError(`${providerLabel}.${key} 為必填欄位`);
       }
       const content = { ...raw };
       const sourceEvidence: MeetingMinutesSourceEvidence[] = [];
@@ -144,15 +144,15 @@ export function prepareMiniMaxMeetingMinutesRequest(input: MeetingMinutesProvide
         : ["confirmedDecisions", "followUpActions"] as const;
       for (const section of sections) {
         const items = raw[section];
-        if (!Array.isArray(items) || items.length > 100) throw new MeetingMinutesValidationError(`MiniMax.${section} 必須是最多100項的陣列`);
+        if (!Array.isArray(items) || items.length > 100) throw new MeetingMinutesValidationError(`${providerLabel}.${section} 必須是最多100項的陣列`);
         content[section] = items.map((value, itemIndex) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) throw new MeetingMinutesValidationError(`MiniMax.${section}[${itemIndex}] 必須是物件`);
+          if (!value || typeof value !== "object" || Array.isArray(value)) throw new MeetingMinutesValidationError(`${providerLabel}.${section}[${itemIndex}] 必須是物件`);
           const { sourceSpanIds, ...item } = value as Record<string, unknown>;
           if (!Array.isArray(sourceSpanIds) || sourceSpanIds.length === 0) throw new MeetingMinutesValidationError(`record.${section}[${itemIndex}] 缺少原文引用`);
-          if (sourceSpanIds.length > 10 || sourceEvidence.length + sourceSpanIds.length > 300) throw new MeetingMinutesValidationError("MiniMax.sourceSpanIds 超過引用數量上限");
+          if (sourceSpanIds.length > 10 || sourceEvidence.length + sourceSpanIds.length > 300) throw new MeetingMinutesValidationError(`${providerLabel}.sourceSpanIds 超過引用數量上限`);
           for (const spanId of sourceSpanIds) {
             const span = typeof spanId === "string" ? spans.get(spanId) : undefined;
-            if (!span) throw new MeetingMinutesValidationError("MiniMax.sourceSpanIds 含不存在於本次原文的片段");
+            if (!span) throw new MeetingMinutesValidationError(`${providerLabel}.sourceSpanIds 含不存在於本次原文的片段`);
             sourceEvidence.push({
               section,
               itemIndex,

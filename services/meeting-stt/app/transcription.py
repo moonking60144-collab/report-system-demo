@@ -60,6 +60,7 @@ class FasterWhisperEngine:
         import opencc
 
         self._model_name = settings.model
+        self._beam_size = settings.beam_size
         self._model = WhisperModel(
             settings.model,
             device=settings.device,
@@ -86,7 +87,7 @@ class FasterWhisperEngine:
             str(audio_path),
             language=_whisper_language(language),
             task="transcribe",
-            beam_size=5,
+            beam_size=self._beam_size,
             vad_filter=True,
             condition_on_previous_text=False,
             initial_prompt=initial_prompt,

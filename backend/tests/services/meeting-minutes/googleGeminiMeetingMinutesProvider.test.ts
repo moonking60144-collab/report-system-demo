@@ -34,8 +34,14 @@ function record(): MeetingRecord {
     pendingItems: [],
     followUpActions: [],
     uncertainTerms: [],
+    additionalSections: [],
     sourceEvidence: [],
   };
+}
+
+function modelRecord(revision = false) {
+  const { version, title, date, attendees, confirmedFacts, sourceEvidence, ...content } = record();
+  return revision ? { ...content, title, date, confirmedFacts } : content;
 }
 
 function input() {
@@ -73,15 +79,31 @@ function input() {
 
 test("Google 正式入口拒絕 schema 合法但沒有來源引用的決議", async () => {
   const provider = new GoogleGeminiMeetingMinutesProvider({ apiKey: "test", client: {
-    async request<T>() { return { status: 200, headers: {}, data: { output_text: JSON.stringify({ ...record(), confirmedDecisions: [{ content: "已定案", sourceBasis: null }], sourceEvidence: [] }) } as T }; },
+    async request<T>() { return { status: 200, headers: {}, data: { output_text: JSON.stringify({ ...modelRecord(), confirmedDecisions: [{ content: "已定案", sourceBasis: null, sourceSpanIds: [] }] }) } as T }; },
   } });
   await assert.rejects(() => provider.summarize(input()), { code: "MEETING_MINUTES_GOOGLE_FAILED", message: "record.confirmedDecisions[0] 缺少原文引用" }, "ADAPTER_SOURCE_GATE");
+});
+
+test("Google 來源片段由後端還原原句，偽造編號仍拒絕", async () => {
+  let spanId = "b1.s1";
+  const provider = new GoogleGeminiMeetingMinutesProvider({ apiKey: "test", client: {
+    async request<T>(config: AxiosRequestConfig) {
+      const payload = JSON.parse(config.data.input[0].text);
+      assert.equal(payload.sourceBlocks[0].spans[0][0], "b1.s1");
+      return { status: 200, headers: {}, data: { output_text: JSON.stringify({ ...modelRecord(), confirmedDecisions: [{ content: "門檻是五趴", sourceBasis: null, sourceSpanIds: [spanId] }] }) } as T };
+    },
+  } });
+  const output = await provider.summarize(input());
+  assert.equal(output.sourceEvidence?.[0]?.quote, "門檻是五趴");
+  assert.equal(output.sourceEvidence?.[0]?.blockId, "b1");
+  spanId = "b999.s1";
+  await assert.rejects(() => provider.summarize(input()), { code: "MEETING_MINUTES_GOOGLE_FAILED", message: "Google.sourceSpanIds 含不存在於本次原文的片段" });
 });
 
 test("Google 修訂正式入口切換 prompt、分離指令並拒絕無法再次修訂的 metadata", async () => {
   const source = input();
   const revisionInput = { ...source, human: { ...source.human, revisionRequest: "只改標題。", revisionConfirmedFacts: "人工確認模具已交付。", previousSummary: "舊草稿" } };
-  let generated = record();
+  let generated: Record<string, unknown> = modelRecord(true);
   const provider = new GoogleGeminiMeetingMinutesProvider({ apiKey: "test", client: {
     async request<T>(config: AxiosRequestConfig) {
       const sent = config.data;
@@ -95,7 +117,7 @@ test("Google 修訂正式入口切換 prompt、分離指令並拒絕無法再次
   } });
   assert.equal((await provider.summarize(revisionInput)).title, generated.title);
   for (const metadata of [{ title: "模".repeat(201) }, { date: "2".repeat(41) }]) {
-    generated = { ...record(), ...metadata };
+    generated = { ...modelRecord(true), ...metadata };
     await assert.rejects(() => provider.summarize(revisionInput), error => error instanceof Error && /超過修訂上限/.test(error.message), "GOOGLE_REVISION_METADATA_LIMIT");
   }
 });
@@ -108,7 +130,7 @@ test("provider 使用 current Interactions structured output 並只回傳已驗�
       return {
         status: 200,
         headers: {},
-        data: { output_text: JSON.stringify(record()) } as T,
+        data: { output_text: JSON.stringify(modelRecord()) } as T,
       };
     },
   };
@@ -135,18 +157,19 @@ test("provider 使用 current Interactions structured output 並只回傳已驗�
   assert.equal(googleSchemaKeys.includes("pattern"), false);
   assert.equal(googleSchemaKeys.includes("description"), true);
   assert.equal(googleSchemaKeys.includes("maxItems"), false);
+  assert.equal(googleSchemaKeys.includes("minItems"), false);
   assert.equal(googleSchemaKeys.includes("additionalProperties"), true);
   assert.equal(collectObjectKeys(MEETING_RECORD_JSON_SCHEMA).includes("maxLength"), true);
   assert.equal(collectObjectKeys(MEETING_RECORD_JSON_SCHEMA).includes("maxItems"), true);
-  assert.equal(output.title, "模型標題");
-  assert.deepEqual(output.confirmedFacts, []);
+  assert.equal(output.title, "品管會議");
+  assert.deepEqual(output.confirmedFacts, [{ content: "不良率門檻是 3%", sourceBasis: "使用者確認" }]);
   assert.deepEqual(output.confirmedDecisions, []);
 });
 
 test("Google schema 不帶數量上限時，正式入口仍拒絕超量結果", async () => {
   const provider = new GoogleGeminiMeetingMinutesProvider({ apiKey: "test", client: {
     async request<T>() {
-      return { status: 200, headers: {}, data: { output_text: JSON.stringify({ ...record(), uncertainTerms: Array.from({ length: 101 }, () => "待確認") }) } as T };
+      return { status: 200, headers: {}, data: { output_text: JSON.stringify({ ...modelRecord(), uncertainTerms: Array.from({ length: 101 }, () => "待確認") }) } as T };
     },
   } });
   await assert.rejects(() => provider.summarize(input()), { code: "MEETING_MINUTES_GOOGLE_FAILED", message: "record.uncertainTerms 項目數超過上限" });

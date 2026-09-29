@@ -1,19 +1,12 @@
 import axios, { type AxiosRequestConfig } from "axios";
 import { env } from "../../config/env";
-import {
-  MEETING_RECORD_JSON_SCHEMA,
-  type MeetingMinutesProviderInput,
-  type MeetingRecord,
-} from "./meetingMinutesSchema";
-import { validateMeetingMinutesProviderRecord } from "./meetingMinutesSources";
+import { type MeetingMinutesProviderInput, type MeetingRecord } from "./meetingMinutesSchema";
+import { prepareMiniMaxMeetingMinutesRequest } from "./minimaxMeetingMinutesContract";
 import {
   MeetingMinutesProviderError,
   type MeetingMinutesProviderLike,
 } from "./meetingMinutesProvider";
-import {
-  buildMeetingMinutesProviderInput,
-  buildMeetingMinutesSystemInstruction,
-} from "./meetingMinutesProviderPrompt";
+import { buildMeetingMinutesSystemInstruction } from "./meetingMinutesProviderPrompt";
 
 interface GoogleInteractionResponse {
   output_text?: unknown;
@@ -48,15 +41,10 @@ function buildGoogleStructuredOutputSchema(value: unknown): unknown {
   }
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !["minLength", "maxLength", "pattern", "maxItems"].includes(key))
+      .filter(([key]) => !["minLength", "maxLength", "pattern", "minItems", "maxItems"].includes(key))
       .map(([key, child]) => [key, buildGoogleStructuredOutputSchema(child)])
   );
 }
-
-// 這組巢狀 schema 含 maxItems 時會被 Interactions 拒絕；長度與數量限制仍由本地 validator 執行。
-const GOOGLE_MEETING_RECORD_JSON_SCHEMA = buildGoogleStructuredOutputSchema(
-  MEETING_RECORD_JSON_SCHEMA
-);
 
 function extractOutputText(value: GoogleInteractionResponse): string {
   if (typeof value.output_text === "string" && value.output_text.trim()) {
@@ -155,8 +143,8 @@ export class GoogleGeminiMeetingMinutesProvider implements MeetingMinutesProvide
         "MEETING_MINUTES_GOOGLE_KEY_MISSING"
       );
     }
-    const serializedInput = buildMeetingMinutesProviderInput(input);
-    if (serializedInput.length > this.maxInputCharacters) {
+    const request = prepareMiniMaxMeetingMinutesRequest(input, undefined, "Google");
+    if (request.serializedInput.length > this.maxInputCharacters) {
       throw new MeetingMinutesProviderError(
         `逐字稿與補充資料總長度超過 ${this.maxInputCharacters} 字元。`,
         "MEETING_MINUTES_INPUT_TOO_LARGE"
@@ -175,18 +163,18 @@ export class GoogleGeminiMeetingMinutesProvider implements MeetingMinutesProvide
         data: {
           model: this.model,
           store: false,
-          system_instruction: buildMeetingMinutesSystemInstruction(false, Boolean(input.human.revisionRequest)),
-          input: [{ type: "text", text: serializedInput }],
+          system_instruction: buildMeetingMinutesSystemInstruction(true, request.revision),
+          input: [{ type: "text", text: request.serializedInput }],
           generation_config: { temperature: 0 },
           response_format: {
             type: "text",
             mime_type: "application/json",
-            schema: GOOGLE_MEETING_RECORD_JSON_SCHEMA,
+            schema: buildGoogleStructuredOutputSchema(request.schema),
           },
         },
       });
       const parsed = JSON.parse(extractOutputText(response.data)) as unknown;
-      return validateMeetingMinutesProviderRecord(parsed, input);
+      return request.resolve(parsed);
     } catch (error) {
       throw mapGoogleError(error);
     }

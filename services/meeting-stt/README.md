@@ -85,11 +85,12 @@ MEETING_TRANSCRIPTION_PROVIDER=local-whisper
 MEETING_TRANSCRIPTION_LOCAL_URL=http://127.0.0.1:8010/v1/transcriptions
 MEETING_TRANSCRIPTION_LOCAL_TOKEN=<與 STT service 相同；loopback 可留空>
 MEETING_TRANSCRIPTION_LOCAL_MODEL=large-v3
+MEETING_TRANSCRIPTION_BEAM_SIZE=1
 MEETING_TRANSCRIPTION_LANGUAGE=zh-TW
 MEETING_TRANSCRIPTION_CHUNK_MS=600000
 ```
 
-`MEETING_TRANSCRIPTION_LOCAL_URL` 是完整 endpoint。Backend model 必須與 STT service model 完全一致，避免部署切換時把不同模型的 checkpoint 混在同一個 job。
+`MEETING_TRANSCRIPTION_LOCAL_URL` 是完整 endpoint。Backend 的 model 與 beam size 必須和 STT service 的 `MEETING_STT_MODEL`、`MEETING_STT_BEAM_SIZE` 一致，避免部署切換時把不同推論設定的 checkpoint 混在同一個 job。
 
 ## 驗證
 

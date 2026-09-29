@@ -50,6 +50,7 @@ def test_faster_whisper_output_is_converted_without_fake_confidence() -> None:
 
     engine = FasterWhisperEngine.__new__(FasterWhisperEngine)
     engine._model_name = "large-v3"
+    engine._beam_size = 1
     engine._model = FakeModel()
     engine._converter = opencc.OpenCC("s2twp")
     engine._diarizer = None
@@ -57,6 +58,7 @@ def test_faster_whisper_output_is_converted_without_fake_confidence() -> None:
     result = engine.transcribe(Path("audio.wav"), "zh-TW", ["螺帽"], 1_000)
 
     assert captured["language"] == "zh"
+    assert captured["beam_size"] == 1
     assert captured["initial_prompt"] == "螺帽"
     assert result == [
         TranscriptSegment(
