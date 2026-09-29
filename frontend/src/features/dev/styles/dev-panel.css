@@ -7238,20 +7238,21 @@
   --dev-ai-bg-soft: #0b171c;
   --dev-ai-surface: rgba(10, 18, 24, 0.78);
   --dev-ai-surface-raised: rgba(14, 24, 31, 0.94);
-  --dev-ai-line: rgba(132, 180, 176, 0.13);
-  --dev-ai-line-strong: rgba(154, 205, 199, 0.22);
+  --dev-ai-line: rgba(180, 190, 200, 0.14);
+  --dev-ai-line-strong: rgba(180, 190, 200, 0.26);
   --dev-ai-text: #e9f1ee;
   --dev-ai-muted: rgba(220, 235, 230, 0.63);
-  --dev-ai-faint: rgba(220, 235, 230, 0.38);
+  --dev-ai-faint: #92a4ab;
   --dev-ai-copper: #d98255;
   --dev-ai-copper-soft: rgba(217, 130, 85, 0.14);
   --dev-ai-teal: #67d2c2;
   --dev-ai-radius: 24px;
   position: relative;
   display: grid;
-  gap: 18px;
-  min-height: calc(100vh - 34px);
-  padding: clamp(14px, 2vw, 24px);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  height: max(560px, calc(100dvh - 34px));
+  padding: clamp(12px, 1.5vw, 20px);
   color: var(--dev-ai-text);
   isolation: isolate;
 }
@@ -7262,13 +7263,7 @@
   inset: 0;
   z-index: -1;
   border-radius: 28px;
-  background:
-    linear-gradient(rgba(103, 210, 194, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(103, 210, 194, 0.035) 1px, transparent 1px),
-    radial-gradient(circle at 18% 0%, rgba(217, 130, 85, 0.12), transparent 28%),
-    radial-gradient(circle at 86% 28%, rgba(103, 210, 194, 0.11), transparent 28%),
-    linear-gradient(180deg, rgba(7, 16, 20, 0.98), rgba(2, 8, 12, 0.99));
-  background-size: 42px 42px, 42px 42px, auto, auto, auto;
+  background: var(--dev-ai-bg);
 }
 
 .dev-ai-workspace__hero {
@@ -7312,9 +7307,8 @@
   color: var(--dev-ai-text);
 }
 
-.dev-ai-workspace__brand span:not(.dev-ai-workspace__orb),
-.dev-ai-workspace__eyebrow,
-.dev-ai-workspace__thread-kicker {
+.dev-ai-workspace__brand > div > span,
+.dev-ai-workspace__eyebrow {
   color: var(--dev-ai-faint);
   font-size: 11px;
   font-weight: 850;
@@ -7325,7 +7319,7 @@
 .dev-ai-workspace__hero h1 {
   margin: 2px 0 4px;
   color: var(--dev-ai-text);
-  font-size: clamp(24px, 2.4vw, 36px);
+  font-size: clamp(22px, 2vw, 28px);
   font-weight: 820;
   letter-spacing: -0.03em;
   line-height: 1.12;
@@ -7334,8 +7328,7 @@
 .dev-ai-workspace__hero p,
 .dev-ai-workspace__muted,
 .dev-ai-workspace__empty p,
-.dev-ai-workspace__chat-head p,
-.dev-ai-workspace__thinking p {
+.dev-ai-workspace__chat-head p {
   margin: 0;
   color: var(--dev-ai-muted);
   line-height: 1.65;
@@ -7362,11 +7355,11 @@
 .dev-ai-workspace__grid {
   width: 100%;
   max-width: 1260px;
-  min-height: calc(100vh - 124px);
+  min-height: 0;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(248px, 300px) minmax(0, 1fr);
-  gap: clamp(16px, 2vw, 28px);
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  gap: 16px;
   align-items: stretch;
 }
 
@@ -7374,19 +7367,16 @@
 .dev-ai-workspace__panel {
   border: 1px solid var(--dev-ai-line);
   background: rgba(7, 10, 14, 0.42);
-  backdrop-filter: blur(18px);
 }
 
 .dev-ai-workspace__threads {
-  position: sticky;
-  top: 14px;
   display: grid;
   align-content: start;
   gap: 14px;
-  max-height: calc(100vh - 132px);
-  padding: 16px;
+  min-height: 0;
+  padding: 12px;
   overflow: auto;
-  border-radius: 24px;
+  border-radius: 16px;
   scrollbar-color: rgba(103, 210, 194, 0.36) rgba(5, 12, 16, 0.42);
   scrollbar-width: thin;
 }
@@ -7394,7 +7384,7 @@
 .dev-ai-workspace__section-head {
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 14px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--dev-ai-line);
 }
 
@@ -7406,8 +7396,7 @@
 .dev-ai-workspace__section-head strong,
 .dev-ai-workspace__chat-head strong,
 .dev-ai-workspace__summary strong,
-.dev-ai-workspace__empty strong,
-.dev-ai-workspace__thinking strong {
+.dev-ai-workspace__empty strong {
   color: var(--dev-ai-text);
 }
 
@@ -7440,42 +7429,30 @@
 
 .dev-ai-workspace__thread-list {
   display: grid;
-  gap: 10px;
+  gap: 4px;
 }
 
 .dev-ai-workspace__thread {
   position: relative;
   display: grid;
-  gap: 6px;
-  padding: 13px;
+  gap: 4px;
+  padding: 10px;
   border: 1px solid transparent;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.025);
+  border-radius: 10px;
+  background: transparent;
   color: inherit;
   text-decoration: none;
-  transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease;
+  transition: border-color 180ms ease, background-color 180ms ease;
 }
 
 .dev-ai-workspace__thread:hover,
 .dev-ai-workspace__thread.is-active {
   border-color: var(--dev-ai-line-strong);
   background: rgba(255, 255, 255, 0.06);
-  transform: translateY(-1px);
-}
-
-.dev-ai-workspace__thread.is-active::before {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  top: -1px;
-  height: 2px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--dev-ai-copper), transparent);
 }
 
 .dev-ai-workspace__thread strong,
-.dev-ai-workspace__thread span:not(.dev-ai-workspace__thread-kicker),
+.dev-ai-workspace__thread span,
 .dev-ai-workspace__thread small {
   min-width: 0;
   overflow: hidden;
@@ -7488,21 +7465,20 @@
   font-size: 13px;
 }
 
-.dev-ai-workspace__thread span:not(.dev-ai-workspace__thread-kicker) {
+.dev-ai-workspace__thread span {
   color: var(--dev-ai-muted);
   font-size: 12px;
 }
 
 .dev-ai-workspace__panel {
-  min-height: calc(100vh - 132px);
-  display: grid;
-  grid-template-rows: auto auto minmax(260px, 1fr) auto;
-  gap: 16px;
-  padding: clamp(16px, 2.4vw, 28px);
-  border-radius: 30px;
-  box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: clamp(14px, 2vw, 24px);
+  border-radius: 18px;
+  overflow-y: auto;
 }
 
 .dev-ai-workspace__chat-head {
@@ -7511,7 +7487,7 @@
   max-width: 900px;
   width: 100%;
   margin: 0 auto;
-  padding: 14px 2px;
+  padding: 0 0 12px;
   border-bottom: 1px solid var(--dev-ai-line);
 }
 
@@ -7519,6 +7495,10 @@
   min-width: 0;
   display: grid;
   gap: 4px;
+}
+
+.dev-ai-workspace__chat-head p:empty {
+  display: none;
 }
 
 .dev-ai-workspace__chat-head strong {
@@ -7548,58 +7528,70 @@
   padding: 6px 10px;
 }
 
-.dev-ai-workspace__summary,
-.dev-ai-workspace__thinking {
+.dev-ai-workspace__summary {
   max-width: 900px;
   width: 100%;
   margin: 0 auto;
-  padding: 14px;
-  border: 1px solid rgba(125, 211, 199, 0.18);
-  border-radius: 18px;
-  background: rgba(125, 211, 199, 0.05);
+  flex-shrink: 0;
+  color: var(--dev-ai-muted);
+  font-size: 12px;
+}
+
+.dev-ai-workspace__summary summary {
+  cursor: pointer;
+  padding: 4px 0;
 }
 
 .dev-ai-workspace__summary p {
   margin: 6px 0 0;
+  max-height: min(120px, 15dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   color: var(--dev-ai-muted);
   white-space: pre-wrap;
 }
 
 .dev-ai-workspace__messages {
-  min-height: 0;
+  flex: 1;
+  min-height: 120px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 24px;
   max-width: 900px;
   width: 100%;
   margin: 0 auto;
-  padding: 10px 0;
+  padding: 8px 6px;
   overflow: auto;
   scrollbar-color: rgba(103, 210, 194, 0.34) transparent;
   scrollbar-width: thin;
 }
 
 .dev-ai-workspace__message {
-  max-width: min(780px, 92%);
+  flex-shrink: 0;
+  min-width: 0;
+  max-width: min(780px, 100%);
   display: grid;
   gap: 8px;
   padding: 15px 16px;
   border: 1px solid var(--dev-ai-line);
-  border-radius: 20px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.035);
 }
 
 .dev-ai-workspace__message.is-user {
   justify-self: end;
   align-self: flex-end;
-  border-color: rgba(125, 211, 199, 0.2);
-  background: rgba(125, 211, 199, 0.08);
+  max-width: 88%;
+  border-color: var(--dev-ai-line);
+  background: rgba(180, 190, 200, 0.08);
 }
 
 .dev-ai-workspace__message.is-assistant {
   align-self: flex-start;
-  border-color: rgba(229, 121, 78, 0.14);
-  background: rgba(255, 255, 255, 0.032);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .dev-ai-workspace__message > span {
@@ -7663,8 +7655,7 @@
 }
 
 .dev-ai-workspace__empty {
-  align-self: end;
-  justify-self: center;
+  margin: auto;
   max-width: 760px;
   width: 100%;
   display: grid;
@@ -7675,7 +7666,7 @@
 }
 
 .dev-ai-workspace__empty strong {
-  font-size: clamp(34px, 4.8vw, 56px);
+  font-size: clamp(26px, 3vw, 36px);
   font-weight: 860;
   letter-spacing: -0.055em;
   line-height: 1.02;
@@ -7714,14 +7705,28 @@
 }
 
 .dev-ai-workspace__thinking {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-shrink: 0;
+  padding: 4px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dev-ai-workspace__thinking > span {
+  color: #a6b9cc;
+  background: linear-gradient(100deg, #a6b9cc 20%, #85e0d0 40%, #bedaff 50%, #a6b9cc 70%);
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: dev-ai-thinking-shimmer 2.4s linear infinite;
+}
+
+@keyframes dev-ai-thinking-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
 }
 
 .dev-ai-workspace__composer {
-  position: sticky;
-  bottom: 0;
+  flex-shrink: 0;
   display: grid;
   gap: 8px;
   max-width: 760px;
@@ -7730,17 +7735,11 @@
   padding: 12px 14px;
   border: 1px solid var(--dev-ai-line-strong);
   border-radius: var(--dev-ai-radius);
-  background:
-    linear-gradient(90deg, rgba(217, 130, 85, 0.18), transparent 28%) top left / 100% 1px no-repeat,
-    var(--dev-ai-surface-raised);
-  box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(20px);
+  background: var(--dev-ai-surface-raised);
 }
 
 .dev-ai-workspace__composer textarea {
-  min-height: 72px;
+  min-height: 52px;
   max-height: 132px;
   padding: 6px 4px;
   border: 0;
@@ -7761,11 +7760,7 @@
 }
 
 .dev-ai-workspace__composer:focus-within {
-  border-color: rgba(229, 121, 78, 0.34);
-  box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.38),
-    0 0 0 3px rgba(229, 121, 78, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border-color: #799eb8;
 }
 
 .dev-ai-workspace__composer-bar {
@@ -7775,13 +7770,15 @@
 }
 
 .dev-ai-workspace__advanced {
-  min-width: min(100%, 420px);
+  min-width: 0;
+  flex: 1;
   color: var(--dev-ai-muted);
 }
 
 .dev-ai-workspace__advanced summary {
   display: inline-flex;
   align-items: center;
+  gap: 8px;
   min-height: 32px;
   padding: 5px 12px;
   border: 1px solid var(--dev-ai-line);
@@ -7814,39 +7811,43 @@
 .dev-ai-workspace__options select {
   min-height: 30px;
   padding: 0 12px;
+  color-scheme: dark;
+}
+
+.dev-ai-workspace__shortcut {
+  color: var(--dev-ai-faint);
+  font-size: 11px;
 }
 
 .dev-ai-workspace__send {
-  min-height: 34px;
+  min-height: 40px;
+  min-width: 76px;
   padding-inline: 16px;
   border-radius: 999px;
 }
 
 .dev-ai-workspace__send.is-loading {
-  width: 44px;
-  min-width: 44px;
-  height: 44px;
-  min-height: 44px;
   justify-content: center;
-  padding: 0;
-  border-radius: 10px;
 }
 
-.dev-ai-workspace__pending-mark {
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
-  background: currentColor;
+.dev-ai-workspace :is(button, a, summary, select, input):focus-visible,
+.dev-ai-workspace__summary p:focus-visible {
+  outline: 2px solid #91caff;
+  outline-offset: 3px;
+}
+
+.dev-ai-workspace__panel > :not(.dev-ai-workspace__messages) {
+  flex-shrink: 0;
 }
 
 @media (max-width: 980px) {
   .dev-ai-workspace {
     padding: 12px;
+    height: auto;
   }
 
   .dev-ai-workspace__hero,
-  .dev-ai-workspace__chat-head,
-  .dev-ai-workspace__composer-bar {
+  .dev-ai-workspace__chat-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -7856,19 +7857,27 @@
   }
 
   .dev-ai-workspace__threads {
-    position: static;
-    max-height: 280px;
+    max-height: 180px;
+  }
+
+  .dev-ai-workspace__thread-list {
+    grid-auto-flow: column;
+    grid-auto-columns: 190px;
+    overflow-x: auto;
   }
 
   .dev-ai-workspace__panel {
-    min-height: 640px;
+    height: max(500px, calc(100dvh - 40px));
+  }
+
+  .dev-ai-workspace__shortcut {
+    display: none;
   }
 }
 
 @media (max-width: 640px) {
-  .dev-ai-workspace__hero-actions,
-  .dev-ai-workspace__chips {
-    display: none;
+  .dev-ai-workspace__hero-actions {
+    justify-content: flex-start;
   }
 
   .dev-ai-workspace__panel {
@@ -7877,7 +7886,7 @@
   }
 
   .dev-ai-workspace__empty strong {
-    font-size: clamp(30px, 11vw, 42px);
+    font-size: 28px;
   }
 
   .dev-ai-workspace__composer {
@@ -7889,6 +7898,8 @@
   .dev-ai-workspace__thread,
   .dev-ai-workspace__icon-btn,
   .dev-ai-workspace__prompt-grid button,
+  .dev-ai-workspace__thinking > span,
+  .dev-ai-workspace__send .anticon-spin,
   .dev-ai-thinking-signal,
   .dev-ai-thinking-signal i {
     animation: none;
@@ -8243,29 +8254,53 @@
 }
 
 /* Public Dev AI knowledge governance */
-.dev-ai-workspace__supporting-details {
-  margin-top: 4px;
-  padding: 10px 12px;
-  border: 1px solid rgba(139, 148, 158, 0.2);
-  border-radius: 8px;
-  background: rgba(3, 7, 18, 0.35);
+.dev-ai-workspace__evidence-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  margin: auto;
+  padding: 20px;
+  border: 1px solid var(--dev-ai-line-strong);
+  border-radius: 16px;
+  background: #111b22;
   color: var(--dev-ai-muted);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
 }
 
-.dev-ai-workspace__supporting-details summary {
-  color: #b8dcff;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
+.dev-ai-workspace__evidence-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
 }
 
-.dev-ai-workspace__supporting-details section {
-  margin-top: 10px;
+.dev-ai-workspace__evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
-.dev-ai-workspace__supporting-details ul {
+.dev-ai-workspace__evidence-head h2 {
+  margin: 0;
+  color: var(--dev-ai-text);
+  font-size: 17px;
+}
+
+.dev-ai-workspace__evidence-dialog section {
+  margin-top: 18px;
+}
+
+.dev-ai-workspace__evidence-dialog section strong {
+  color: var(--dev-ai-text);
+}
+
+.dev-ai-workspace__evidence-dialog ul {
   margin: 6px 0 0;
   padding-left: 20px;
+}
+
+.dev-ai-workspace__evidence-dialog li + li {
+  margin-top: 8px;
 }
 
 .dev-ai-workspace__message-actions button {

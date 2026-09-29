@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import {
   AuditOutlined,
   BookOutlined,
+  CloseOutlined,
   CopyOutlined,
+  DownOutlined,
   FileSearchOutlined,
   InboxOutlined,
+  LoadingOutlined,
   PlusOutlined,
   RobotOutlined,
   SendOutlined,
@@ -45,7 +48,6 @@ import {
   type DevAiMessageSubmission,
 } from "../../utils/devAiClientMessageId";
 import { DevAiMessageContent } from "../../components/DevAiMessageContent";
-import { DevAiThinkingSignal } from "../../components/DevAiThinkingSignal";
 import { useDevAiAutoScroll } from "../../utils/useDevAiAutoScroll";
 
 export function DevAiView() {
@@ -308,7 +310,7 @@ export function DevAiView() {
           <div>
             <span>DemoCo Dev AI</span>
             <h1>AI 對話工作台</h1>
-            <p>延續左下 bot 的對話脈絡；thread memory 只屬於本對話，不會自動進入 RAG。</p>
+            <p>詢問 Ragic、整理知識，或一起檢查公式。</p>
           </div>
         </div>
         <div className="dev-ai-workspace__hero-actions">
@@ -335,7 +337,7 @@ export function DevAiView() {
           <div className="dev-ai-workspace__section-head">
             <div>
               <strong>我的對話</strong>
-              <span>{loading ? "讀取中…" : `${threads.length} 筆 active`}</span>
+              <span>{loading ? "讀取中…" : `${threads.length} 則對話`}</span>
             </div>
             <button
               type="button"
@@ -357,10 +359,11 @@ export function DevAiView() {
                     `dev-ai-workspace__thread${isActive ? " is-active" : ""}`
                   }
                 >
-                  <span className="dev-ai-workspace__thread-kicker">{thread.mode}</span>
                   <strong>{thread.title}</strong>
                   <span>{thread.lastMessagePreview || "尚無訊息"}</span>
-                  <small>{new Date(thread.updatedAt).toLocaleString()}</small>
+                  <small title={new Date(thread.updatedAt).toLocaleString()}>
+                    {new Date(thread.updatedAt).toLocaleDateString("zh-TW", { month: "short", day: "numeric" })}
+                  </small>
                 </NavLink>
               ))}
             </div>
@@ -380,10 +383,10 @@ export function DevAiView() {
           ) : null}
           {error ? <p className="dev-mode-error">{error}</p> : null}
           {activeThread?.summary ? (
-            <section className="dev-ai-workspace__summary">
-              <strong>Thread-local summary</strong>
-              <p>{activeThread.summary}</p>
-            </section>
+            <details className="dev-ai-workspace__summary">
+              <summary>對話摘要</summary>
+              <p tabIndex={0} role="region" aria-label="對話摘要內容">{activeThread.summary}</p>
+            </details>
           ) : null}
           <div {...autoScroll} className="dev-ai-workspace__messages" aria-label="對話內容">
             {detail?.messages.length ? (
@@ -447,24 +450,21 @@ function ChatHeader({
     <div className="dev-ai-workspace__chat-head">
       <div>
         <span className="dev-ai-workspace__eyebrow">
-          {thread ? "Thread" : unavailableMessage ? "Configuration required" : "Ready"}
+          {loading ? "同步中…" : thread ? "目前對話" : "Dev AI"}
         </span>
         <strong>{thread?.title ?? (unavailableMessage ? "AI 對話尚未開放" : "開始一段對話")}</strong>
         <p>
           {thread
-            ? `${thread.context.formPath ?? "general"} · ${thread.mode}`
+            ? thread.context.formPath ?? ""
             : unavailableMessage ??
-              "直接問 DemoCo、Ragic、definitions 或公式；需要改公式時仍只會產草案並 dry-run。"}
+              "輸入問題，或選一個話題開始。"}
         </p>
       </div>
-      <div className="dev-ai-workspace__chips" aria-label="AI guardrails">
-        <NavLink className="dev-ai-workspace__knowledge-link" to="/dev/knowledge">
+      <div className="dev-ai-workspace__chips">
+        <NavLink className="dev-ai-workspace__knowledge-link" to="/dev/knowledge" aria-label="知識庫">
           <BookOutlined />
-          知識治理
+          知識庫
         </NavLink>
-        <span>{loading ? "同步中" : "本地 thread"}</span>
-        <span>不自動進 RAG</span>
-        <span>公式 dry-run only</span>
       </div>
     </div>
   );
@@ -484,6 +484,8 @@ export function ConversationMessage({
   onSubmitKnowledgeCandidate: () => Promise<void>;
 }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const evidenceDialogRef = useRef<HTMLDialogElement>(null);
+  const evidenceTitleId = useId();
   const chatArtifact = artifacts.find((artifact) => artifact.type === "chat-result");
   const chatPayload = objectValue(chatArtifact?.payload);
   const citedSources = devAiKnowledgeSourcesFromUnknown(
@@ -516,8 +518,28 @@ export function ConversationMessage({
       {message.role === "assistant" ? (
         <>
           {hasSupportingDetails ? (
-            <details className="dev-ai-workspace__supporting-details">
-              <summary>查看回答依據</summary>
+            <dialog
+              ref={evidenceDialogRef}
+              className="dev-ai-workspace__evidence-dialog"
+              aria-labelledby={evidenceTitleId}
+              onClick={(event) => {
+                if (event.target !== event.currentTarget) return;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                if (event.clientX < bounds.left || event.clientX > bounds.right ||
+                    event.clientY < bounds.top || event.clientY > bounds.bottom) {
+                  event.currentTarget.close();
+                }
+              }}
+            >
+              <div className="dev-ai-workspace__evidence-head">
+                <h2 id={evidenceTitleId}>回答依據</h2>
+                <button
+                  type="button"
+                  className="dev-ai-workspace__icon-btn"
+                  aria-label="關閉回答依據"
+                  onClick={() => evidenceDialogRef.current?.close()}
+                ><CloseOutlined /></button>
+              </div>
               {citedSources.length ? (
                 <section>
                   <strong>實際引用</strong>
@@ -530,10 +552,19 @@ export function ConversationMessage({
               {followUps.length ? (
                 <section><strong>建議補充</strong><ul>{followUps.map((item) => <li key={item}>{item}</li>)}</ul></section>
               ) : null}
-            </details>
+            </dialog>
           ) : null}
           <div className="dev-ai-workspace__message-actions" aria-label="回答操作">
             <button type="button" title="複製回答" aria-label="複製回答" onClick={() => void handleCopy()}><CopyOutlined /></button>
+            {hasSupportingDetails ? (
+              <button
+                type="button"
+                title="查看回答依據"
+                aria-label="查看回答依據"
+                aria-haspopup="dialog"
+                onClick={() => evidenceDialogRef.current?.showModal()}
+              ><FileSearchOutlined /></button>
+            ) : null}
             {question ? (
               <button
                 type="button"
@@ -570,10 +601,10 @@ function EmptyConversation({
 
   return (
     <div className="dev-ai-workspace__empty">
-      <strong>{unavailableMessage ? "AI 對話尚未開放" : "DemoCo Dev AI 就緒"}</strong>
+      <strong>{unavailableMessage ? "AI 對話尚未開放" : "今天想了解什麼？"}</strong>
       <p>
         {unavailableMessage ??
-          "把現場流程、Ragic definitions 或公式需求丟進來；回答會先整理內部脈絡，再回到可驗證的來源與 dry-run 結果。"}
+          "從流程、表單或公式開始，隨時接著追問。"}
       </p>
       {!unavailableMessage ? (
         <div className="dev-ai-workspace__prompt-grid">
@@ -591,11 +622,7 @@ function EmptyConversation({
 function ThinkingCard() {
   return (
     <div className="dev-ai-workspace__thinking" role="status" aria-live="polite">
-      <DevAiThinkingSignal />
-      <div>
-        <strong>AI 正在判斷、檢索與整理</strong>
-        <p>依速度模式控制 context，必要時查本地 knowledge / definitions，再把結果寫回本 thread。</p>
-      </div>
+      <span>思考中</span>
     </div>
   );
 }
@@ -639,10 +666,12 @@ function Composer({
         value={draft}
         rows={2}
         disabled={Boolean(disabledReason)}
+        readOnly={sending}
+        aria-label="訊息"
         onChange={(event) => onDraftChange(event.target.value)}
-        placeholder="想問什麼？例如：幫我確認這個公式哪裡有風險，或整理 DemoCo / Ragic 流程。"
+        placeholder="輸入問題，或接著追問…"
         onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          if (!event.nativeEvent.isComposing && (event.metaKey || event.ctrlKey) && event.key === "Enter") {
             event.preventDefault();
             onSend();
           }
@@ -650,7 +679,10 @@ function Composer({
       />
       <div className="dev-ai-workspace__composer-bar">
         <details className="dev-ai-workspace__advanced">
-          <summary>{contextStatus}</summary>
+          <summary title={contextStatus}>
+            {speedMode === "fast" ? "快速" : speedMode === "balanced" ? "標準" : "深入"}
+            <span>回答設定</span><DownOutlined />
+          </summary>
           <div className="dev-ai-workspace__options">
             <label>
               <input
@@ -667,7 +699,7 @@ function Composer({
                 checked={includeDefinitions}
                 onChange={(event) => onIncludeDefinitionsChange(event.target.checked)}
               />
-              表單問題優先查詢 Demo 設定
+              查詢表單設定
             </label>
             <select
               value={speedMode}
@@ -680,6 +712,7 @@ function Composer({
             </select>
           </div>
         </details>
+        <small className="dev-ai-workspace__shortcut">Ctrl / ⌘ + Enter 送出</small>
         <button
           type="button"
           className={`dev-mode-btn dev-mode-btn--primary dev-ai-workspace__send${
@@ -690,7 +723,7 @@ function Composer({
           aria-label={sending ? "思考中" : "送出"}
         >
           {sending ? (
-            <span className="dev-ai-workspace__pending-mark" aria-hidden="true" />
+            <LoadingOutlined spin />
           ) : (
             <><SendOutlined />送出</>
           )}
