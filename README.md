@@ -107,7 +107,7 @@ flowchart LR
 
 **Developer：** 合成 Definitions、欄位公式與 Dev AI。
 
-![Developer Definitions](docs/dev-ai-definitions.jpg)
+![Developer 模式登入入口](docs/dev-ai-definitions.jpg)
 
 </details>
 
