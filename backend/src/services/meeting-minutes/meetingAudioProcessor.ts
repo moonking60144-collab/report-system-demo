@@ -13,6 +13,7 @@ import type {
   MeetingAudioSourceId,
   MeetingRecordingProcessingInput,
 } from "./meetingRecordingStorageService";
+import { toPortableRelativePath } from "./meetingArtifactPath";
 
 interface CommandResult {
   stdout: string;
@@ -52,7 +53,7 @@ interface MeetingAudioProcessorDeps {
 }
 
 interface ProbePayload {
-  streams?: Array<{ codec_type?: string }>;
+  streams?: Array<{ codec_type?: string; codec_name?: string }>;
 }
 
 export class MeetingAudioProcessingError extends Error {
@@ -173,8 +174,9 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
 
     try {
       await onPhase("validating-audio");
+      const codecs: Array<string | undefined> = [];
       for (const track of input.tracks) {
-        await this.assertAudioTrack(track.filePath, options.signal);
+        codecs.push(await this.assertAudioTrack(track.filePath, options.signal));
       }
 
       const canonicalFiles: Array<{
@@ -215,10 +217,12 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
       }
 
       await onPhase("generating-playback");
-      const playbackFile = "playback.m4a";
+      const copyAudio = input.tracks.length === 1 && ["opus", "aac"].includes(codecs[0] ?? "");
+      const webm = copyAudio && codecs[0] === "opus";
+      const playbackFile = webm ? "playback.webm" : "playback.m4a";
       const playbackPath = path.join(tempDir, playbackFile);
       const playbackArgs = ["-nostdin", "-v", "error"];
-      for (const canonical of canonicalFiles) {
+      for (const canonical of copyAudio ? input.tracks : canonicalFiles) {
         playbackArgs.push("-i", canonical.filePath);
       }
       if (canonicalFiles.length > 1) {
@@ -229,16 +233,11 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
           "[a]"
         );
       }
-      playbackArgs.push(
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        "-y",
-        playbackPath
-      );
+      playbackArgs.push("-vn", "-c:a", copyAudio ? "copy" : "aac");
+      if (copyAudio) playbackArgs.push("-map", "0:a:0");
+      else playbackArgs.push("-b:a", "128k");
+      if (!webm) playbackArgs.push("-movflags", "+faststart");
+      playbackArgs.push("-y", playbackPath);
       await this.runCommand(this.ffmpegPath, playbackArgs, {
         timeoutMs: this.timeoutMs,
         signal: options.signal,
@@ -261,7 +260,7 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
           mimeType: "audio/wav",
           filename: item.filename,
         })),
-        { type: "playback" as const, mimeType: "audio/mp4", filename: playbackFile },
+        { type: "playback" as const, mimeType: webm ? "audio/webm" : "audio/mp4", filename: playbackFile },
       ];
       const artifacts: MeetingProcessingArtifactRecord[] = [];
       for (const artifact of artifactInputs) {
@@ -273,7 +272,7 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
           sessionId: input.sessionId,
           type: artifact.type,
           mimeType: artifact.mimeType,
-          relativePath: path.relative(this.processingDir, filePath),
+          relativePath: toPortableRelativePath(path.relative(this.processingDir, filePath)),
           sizeBytes: fileStat.size,
           sha256: await sha256File(filePath, options.signal),
           createdAt,
@@ -334,7 +333,7 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
       if (isErrno(error, "ENOENT")) return false;
       throw error;
     }
-    const ownedFiles = new Set(["room-mic.wav", "remote-tab.wav", "playback.m4a"]);
+    const ownedFiles = new Set(["room-mic.wav", "remote-tab.wav", "playback.m4a", "playback.webm"]);
     const removable = entries.filter((entry) => ownedFiles.has(entry));
     await Promise.all(
       removable.map((entry) => rm(path.join(sessionDir, entry), { force: true }))
@@ -342,14 +341,14 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
     return removable.length > 0;
   }
 
-  private async assertAudioTrack(filePath: string, signal?: AbortSignal): Promise<void> {
+  private async assertAudioTrack(filePath: string, signal?: AbortSignal): Promise<string | undefined> {
     const result = await this.runCommand(
       this.ffprobePath,
       [
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type",
+        "stream=codec_type,codec_name",
         "-of",
         "json",
         filePath,
@@ -371,6 +370,7 @@ export class MeetingAudioProcessor implements MeetingAudioProcessorLike {
         "MEETING_PROCESSING_AUDIO_INVALID"
       );
     }
+    return payload.streams.find(stream => stream.codec_type === "audio")?.codec_name;
   }
 
   private async assertOutput(filePath: string): Promise<void> {

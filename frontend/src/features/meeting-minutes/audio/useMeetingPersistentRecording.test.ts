@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   isMeetingSessionCapabilityTerminalErrorCode,
-  mergeMeetingLibraryAccessAfterCreate,
   uploadMeetingChunkWithRetry,
 } from "./useMeetingPersistentRecording";
 
@@ -50,89 +49,21 @@ describe("meeting persistent chunk upload", () => {
     ).rejects.toBe(finalError);
     expect(upload).toHaveBeenCalledTimes(3);
   });
-});
 
-describe("meeting recording library access merge", () => {
-  const readyLibraryFields = {
-    displayName: "品管錄音庫",
-    codeHint: "A**-**4",
-    setupState: "ready" as const,
-    missingFields: [],
-  };
-
-  it("同一錄音庫建立 session 回 code null 時保留尚未確認的一次性 Code", () => {
-    const library = {
-      ...readyLibraryFields,
-      libraryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      accessVersion: 1,
-      createdAt: "2026-07-17T00:00:00.000Z",
-      codeRotatedAt: "2026-07-17T00:00:00.000Z",
-    };
-    expect(
-      mergeMeetingLibraryAccessAfterCreate(
-        { enabled: true, library, code: "ABC-234", accessMode: "owner" },
-        { enabled: true, library, code: null, accessMode: "owner" }
-      ).code
-    ).toBe("ABC-234");
-  });
-
-  it("切換到不同錄音庫時不攜帶上一庫的一次性 Code", () => {
-    expect(
-      mergeMeetingLibraryAccessAfterCreate(
-        {
-          enabled: true,
-          library: {
-            ...readyLibraryFields,
-            libraryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            accessVersion: 1,
-            createdAt: "2026-07-17T00:00:00.000Z",
-            codeRotatedAt: "2026-07-17T00:00:00.000Z",
-          },
-          code: "ABC-234",
-        },
-        {
-          enabled: true,
-          library: {
-            ...readyLibraryFields,
-            libraryId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-            accessVersion: 1,
-            createdAt: "2026-07-17T00:00:00.000Z",
-            codeRotatedAt: "2026-07-17T00:00:00.000Z",
-          },
-          code: null,
-        }
-      ).code
-    ).toBeNull();
-  });
-
-  it("同一錄音庫 accessVersion 已變更時不保留舊的一次性 Code", () => {
-    const libraryId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    expect(
-      mergeMeetingLibraryAccessAfterCreate(
-        {
-          enabled: true,
-          library: {
-            ...readyLibraryFields,
-            libraryId,
-            accessVersion: 1,
-            createdAt: "2026-07-17T00:00:00.000Z",
-            codeRotatedAt: "2026-07-17T00:00:00.000Z",
-          },
-          code: "ABC-234",
-        },
-        {
-          enabled: true,
-          library: {
-            ...readyLibraryFields,
-            libraryId,
-            accessVersion: 2,
-            createdAt: "2026-07-17T00:00:00.000Z",
-            codeRotatedAt: "2026-07-17T01:00:00.000Z",
-          },
-          code: null,
-        }
-      ).code
-    ).toBeNull();
+  it("連線中斷停止傳輸後不再發出上傳或重送請求", async () => {
+    const controller = new AbortController();
+    const upload = vi.fn(async () => {
+      controller.abort();
+      throw new Error("connection lost");
+    });
+    const wait = vi.fn(async () => undefined);
+    const input = { sessionId: "11111111-1111-4111-8111-111111111111", sourceId: "room-mic" as const,
+      sequence: 0, blob: new Blob(["audio"]), mimeType: "audio/webm", signal: controller.signal };
+    await expect(uploadMeetingChunkWithRetry(input, { upload, wait })).rejects.toMatchObject({ name: "AbortError" });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+    await expect(uploadMeetingChunkWithRetry(input, { upload, wait })).rejects.toMatchObject({ name: "AbortError" });
+    expect(upload).toHaveBeenCalledTimes(1);
   });
 });
 

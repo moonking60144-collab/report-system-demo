@@ -301,6 +301,16 @@ export class MeetingTranscriptionJobRepository {
     return row ? this.attachArtifacts(mapJob(row)) : null;
   }
 
+  async listJobStatesBySessionIds(sessionIds: string[]): Promise<MeetingTranscriptionJobRecord[]> {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = await (await this.getDb()).all<JobRow[]>(
+      `SELECT * FROM meeting_transcription_jobs WHERE session_id IN (${placeholders})`,
+      ...sessionIds
+    );
+    return rows.map(row => mapJob(row));
+  }
+
   async listActiveSessionIds(input: {
     provider: string;
     model: string;
@@ -435,6 +445,7 @@ export class MeetingTranscriptionJobRepository {
     endMs: number;
     audioSha256: string;
     segments: MeetingTranscriptSegment[];
+    decoderProfile?: string;
     now: string;
   }): Promise<MeetingTranscriptionChunkCheckpoint> {
     const db = await this.getDb();
@@ -448,14 +459,15 @@ export class MeetingTranscriptionJobRepository {
     await db.run(
       `INSERT INTO meeting_transcription_chunks (
         job_id, session_id, source_id, chunk_index, start_ms, end_ms,
-        audio_sha256, segments_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        audio_sha256, segments_json, created_at, updated_at, decoder_profile
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(job_id, source_id, chunk_index) DO UPDATE SET
         session_id = excluded.session_id,
         start_ms = excluded.start_ms,
         end_ms = excluded.end_ms,
         audio_sha256 = excluded.audio_sha256,
         segments_json = excluded.segments_json,
+        decoder_profile = excluded.decoder_profile,
         updated_at = excluded.updated_at`,
       input.jobId,
       input.sessionId,
@@ -466,13 +478,15 @@ export class MeetingTranscriptionJobRepository {
       input.audioSha256,
       JSON.stringify(input.segments),
       input.now,
-      input.now
+      input.now,
+      input.decoderProfile ?? ""
     );
     const checkpoint = await this.getChunkCheckpoint(
       input.jobId,
       input.sourceId,
       input.chunkIndex,
-      input.audioSha256
+      input.audioSha256,
+      input.decoderProfile
     );
     if (!checkpoint) throw new Error("meeting transcription chunk checkpoint failed");
     return checkpoint;
@@ -482,16 +496,18 @@ export class MeetingTranscriptionJobRepository {
     jobId: string,
     sourceId: MeetingTranscriptSourceId,
     chunkIndex: number,
-    audioSha256: string
+    audioSha256: string,
+    decoderProfile = ""
   ): Promise<MeetingTranscriptionChunkCheckpoint | null> {
     const db = await this.getDb();
     const row = await db.get<ChunkRow>(
       `SELECT * FROM meeting_transcription_chunks
-       WHERE job_id = ? AND source_id = ? AND chunk_index = ? AND audio_sha256 = ?`,
+       WHERE job_id = ? AND source_id = ? AND chunk_index = ? AND audio_sha256 = ? AND decoder_profile = ?`,
       jobId,
       sourceId,
       Math.max(0, Math.trunc(chunkIndex)),
-      audioSha256
+      audioSha256,
+      decoderProfile
     );
     return row ? mapChunk(row) : null;
   }
@@ -634,6 +650,7 @@ export class MeetingTranscriptionJobRepository {
     model: string;
     now: string;
     providerChangedAfter: string;
+    force?: boolean;
   }): Promise<MeetingTranscriptionJobRecord | null> {
     const db = await this.getDb();
     await db.exec("BEGIN IMMEDIATE");
@@ -648,15 +665,13 @@ export class MeetingTranscriptionJobRepository {
         await db.exec("ROLLBACK");
         return null;
       }
-      const providerChanged =
-        current.provider !== input.provider || current.model !== input.model;
-      if (
+      const providerChanged = current.provider !== input.provider || current.model !== input.model;
+      if (!input.force && (
         (!providerChanged && current.attempt_count >= current.max_attempts) ||
         (providerChanged &&
           (current.updated_at <= input.providerChangedAfter ||
-            current.error_code ===
-              'MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED'))
-      ) {
+            current.error_code === 'MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED'))
+      )) {
         await db.exec("ROLLBACK");
         return null;
       }
@@ -669,13 +684,14 @@ export class MeetingTranscriptionJobRepository {
       const row = await db.get<JobRow>(
         `UPDATE meeting_transcription_jobs
          SET provider = ?, model = ?, status = 'pending', phase = 'queued',
-             attempt_count = CASE WHEN provider != ? OR model != ? THEN 0 ELSE attempt_count END,
+             attempt_count = CASE WHEN ? OR provider != ? OR model != ? THEN 0 ELSE attempt_count END,
              error_code = NULL, error_message = NULL, started_at = NULL,
              updated_at = ?, completed_at = NULL, worker_id = NULL, lease_expires_at = NULL
          WHERE job_id = ? AND owner_id = ? AND status = 'failed'
          RETURNING *`,
         input.provider,
         input.model,
+        input.force ? 1 : 0,
         input.provider,
         input.model,
         input.now,
@@ -688,6 +704,14 @@ export class MeetingTranscriptionJobRepository {
       await db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  async cancelPendingForSession(sessionId: string, now: string): Promise<boolean> {
+    const result = await (await this.getDb()).run(`UPDATE meeting_transcription_jobs
+      SET status='failed', attempt_count=max_attempts, error_code='MEETING_CANCELLED',
+        error_message=NULL, updated_at=?, completed_at=?, worker_id=NULL, lease_expires_at=NULL
+      WHERE session_id=? AND status='pending'`, now, now, sessionId);
+    return (result.changes ?? 0) > 0;
   }
 
   async requeueRetryableFailed(now: string, retryBefore: string): Promise<string[]> {
@@ -861,6 +885,7 @@ export class MeetingTranscriptionJobRepository {
           start_ms INTEGER NOT NULL CHECK (start_ms >= 0),
           end_ms INTEGER NOT NULL CHECK (end_ms >= start_ms),
           audio_sha256 TEXT NOT NULL,
+          decoder_profile TEXT NOT NULL DEFAULT '',
           segments_json TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -891,6 +916,14 @@ export class MeetingTranscriptionJobRepository {
          ON meeting_transcription_jobs(status, lease_expires_at);`,
       ].join("\n")
     );
+    await db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = await db.all<Array<{ name: string }>>("PRAGMA table_info(meeting_transcription_chunks)");
+      if (!columns.some(column => column.name === "decoder_profile")) {
+        await db.exec("ALTER TABLE meeting_transcription_chunks ADD COLUMN decoder_profile TEXT NOT NULL DEFAULT ''");
+      }
+      await db.exec("COMMIT");
+    } catch (error) { await db.exec("ROLLBACK"); await db.close(); throw error; }
     return db;
   }
 }

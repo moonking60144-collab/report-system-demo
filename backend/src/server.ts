@@ -1,3 +1,5 @@
+import { realtimeEventBus as meetingRealtimeBus } from "./events/realtimeEventBus";
+import { MEETING_STATE_CHANGED, notifyMeetingStateChanged, subscribeMeetingStateChanges } from "./events/meetingStateEvents";
 import type { Server } from "http";
 import compression from "compression";
 import cors from "cors";
@@ -79,6 +81,7 @@ import activityLogEfficiencyReportsRouter from "./routes/activityLogEfficiencyRe
 import itDutyRouter from "./routes/itDuty";
 import itSopRouter from "./routes/itSop";
 import meetingRecordingsRouter from "./routes/meetingRecordings";
+import meetingDemoLibraryRecordingsRouter from "./routes/meetingDemoLibraryRecordings";
 import realtimeEventsRouter, {
   closeRealtimeSseConnections,
   getRealtimeSseStats,
@@ -93,6 +96,7 @@ import { activityLogDowntimeCallbackRefreshService } from "./services/activityLo
 import { activityLogEfficiencyReportArchiveService } from "./services/activityLog/activityLogEfficiencyReportArchiveService";
 import { meetingRecordingStorageService } from "./services/meeting-minutes/meetingRecordingStorageService";
 import { meetingLibraryAccessService } from "./services/meeting-minutes/meetingLibraryAccessService";
+import { meetingLegacyRecordingAccess } from "./services/meeting-minutes/meetingLegacyRecordingAccess";
 import { meetingProcessingService } from "./services/meeting-minutes/meetingProcessingService";
 import { ragicCallbackRefreshService } from "./services/ragicCallbackRefreshService";
 import {
@@ -336,6 +340,19 @@ app.use("/api", systemNoticeRouter);
 app.use("/api", realtimeEventsRouter);
 app.use("/api", itDutyRouter);
 app.use("/api", itSopRouter);
+// NOTE: Demo 既有錄音庫保留原權限入口，僅轉送錄音庫路徑，避免攔截新版 one-shot API。
+app.use("/api", (req, res, next) => {
+  const path = req.path;
+  if (
+    path.startsWith("/meetings/library") ||
+    path.startsWith("/meetings/recordings/library") ||
+    path.startsWith("/meetings/admin/libraries")
+  ) {
+    meetingDemoLibraryRecordingsRouter(req, res, next);
+    return;
+  }
+  next();
+});
 app.use("/api", meetingRecordingsRouter);
 // devRagicFieldIndexRouter 內部有 admin auth middleware：
 // 一定要 mount 在精確 prefix，避免污染其他 /api/* 路由（曾因 mount 在 /api 全打 401）
@@ -506,6 +523,7 @@ function registerGracefulShutdown(server: Server): void {
       await activityLogEfficiencyReportArchiveService.close();
       await meetingProcessingService.close();
       await meetingLibraryAccessService.close();
+      await meetingLegacyRecordingAccess.close();
     },
     closeSqlite: () => sqliteClient.close(),
     getMutationQueueStats: getWorkReportEntryMutationQueueStats,
@@ -529,6 +547,12 @@ function registerGracefulShutdown(server: Server): void {
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+  subscribeMeetingStateChanges(() => meetingRealtimeBus.publish({ type: MEETING_STATE_CHANGED }));
+  process.on("message", (message) => {
+    if (message && typeof message === "object" && "type" in message && message.type === MEETING_STATE_CHANGED) {
+      notifyMeetingStateChanged();
+    }
+  });
 }
 
 if (require.main === module) {

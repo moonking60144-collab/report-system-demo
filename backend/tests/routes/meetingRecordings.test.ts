@@ -8,7 +8,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { errorHandler } from "../../src/middleware/errorHandler";
-import { createMeetingRecordingsRouter } from "../../src/routes/meetingRecordings";
+import { createMeetingRecordingsRouter } from "../../src/routes/meetingDemoLibraryRecordings";
 import { createMeetingRecordingOwnerAuth } from "../../src/services/meeting-minutes/meetingRecordingOwnerAuth";
 import { MeetingLibraryAccessService } from "../../src/services/meeting-minutes/meetingLibraryAccessService";
 import { MeetingLibraryAccessAttemptGuard } from "../../src/services/meeting-minutes/meetingLibraryAccessAttemptGuard";
@@ -175,6 +175,7 @@ async function withTestServer(
         pendingItems: [],
         followUpActions: [],
         uncertainTerms: [],
+        sourceEvidence: [],
       };
     },
   };
@@ -2005,7 +2006,7 @@ async function createReadyTranscriptionJob(
     provider: "fake",
     model: "fake-model",
     generatedAt: "2026-07-16T08:03:00.000Z",
-    segments: [],
+    segments: [{ segmentId: "merged:0", startMs: 0, endMs: 1000, text: "測試逐字稿", primarySourceId: "room-mic", sourceSegmentIds: ["room-mic:0"], speakerLabel: null }],
   });
   const transcriptText = "[00:00:00] 測試逐字稿\n";
   await Promise.all([

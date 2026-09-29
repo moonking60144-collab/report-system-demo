@@ -62,6 +62,13 @@ export const DEV_TOOLS: DevTool[] = [
     group: "data",
   },
   {
+    id: "meeting-summaries",
+    path: "/dev/meeting-summaries",
+    label: "會議摘要庫",
+    desc: "查看新版會議摘要、處理狀態與既有錄音",
+    group: "data",
+  },
+  {
     id: "settings",
     path: "/dev/settings",
     label: "帳號設定",

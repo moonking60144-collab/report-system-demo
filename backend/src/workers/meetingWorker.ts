@@ -1,3 +1,4 @@
+import { MEETING_STATE_CHANGED, subscribeMeetingStateChanges } from "../events/meetingStateEvents";
 import { env } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { meetingProcessingService } from "../services/meeting-minutes/meetingProcessingService";
@@ -7,6 +8,12 @@ import { meetingTranscriptionJobRepository } from "../storage/meeting-minutes/me
 import { meetingMinutesService } from "../services/meeting-minutes/meetingMinutesService";
 import { meetingMinutesJobRepository } from "../storage/meeting-minutes/meetingMinutesJobRepository";
 import { MeetingWorkerRuntime } from "./meetingWorkerRuntime";
+import { meetingOneShotService } from "../services/meeting-minutes/meetingOneShotService";
+import { meetingLiveTranscriptionService } from "../services/meeting-minutes/meetingLiveTranscriptionService";
+
+subscribeMeetingStateChanges(() => {
+  if (process.connected && process.send) process.send({ type: MEETING_STATE_CHANGED }, () => {});
+});
 
 const log = createLogger("meeting-worker-entry");
 
@@ -16,6 +23,8 @@ if (!env.MEETING_WORKER_ENABLED) {
 }
 
 const runtime = new MeetingWorkerRuntime({
+  liveTranscriptionService: meetingLiveTranscriptionService,
+  oneShotService: meetingOneShotService,
   repository: meetingProcessingJobRepository,
   processingService: meetingProcessingService,
   transcriptionRepository: meetingTranscriptionJobRepository,
@@ -43,7 +52,6 @@ async function shutdown(signal: string, exitCode = 0): Promise<void> {
 
 process.on("SIGINT", () => void shutdown("SIGINT", 0));
 process.on("SIGTERM", () => void shutdown("SIGTERM", 0));
-
 runtime.start().catch((error) => {
   log.fatal({
     event: "startup-failed",

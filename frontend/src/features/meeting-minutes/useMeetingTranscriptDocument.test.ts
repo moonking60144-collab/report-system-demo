@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type {
   MeetingMergedTranscriptDocument,
   MeetingTranscriptionArtifact,
-} from "./api/meetingRecordingApi";
+} from "./api/meetingLegacyRecordingApi";
 import {
   cacheMeetingTranscriptDocument,
   clearMeetingTranscriptDocumentCache,

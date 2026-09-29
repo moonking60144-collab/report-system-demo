@@ -8,6 +8,11 @@ export const MEETING_MINUTES_INPUT_LIMITS = {
   confirmedDecisions: 20_000,
   termCorrections: 12_000,
   otherNotes: 30_000,
+  revisionRequest: 2_000,
+  revisionConfirmedFacts: 2_000,
+  revisionHistory: 30_000,
+  previousSummary: 100_000,
+  additionalSectionRequest: 2_000,
 } as const;
 
 const RECORD_LIMITS = {
@@ -26,6 +31,11 @@ export interface MeetingMinutesHumanInput {
   confirmedDecisions: string;
   termCorrections: string;
   otherNotes: string;
+  revisionRequest?: string;
+  revisionConfirmedFacts?: string;
+  revisionHistory?: string;
+  previousSummary?: string;
+  additionalSectionRequest?: string;
 }
 
 export interface MeetingMinutesProviderInput {
@@ -66,6 +76,20 @@ export interface MeetingMinutesFollowUpAction {
   dueDate: string | null;
 }
 
+export interface MeetingMinutesSourceEvidence {
+  section: "confirmedFacts" | "confirmedDecisions" | "followUpActions";
+  itemIndex: number;
+  blockId: string;
+  quote: string;
+  sourceId?: string;
+  segmentIds?: string[];
+  sourceSegmentIds?: string[];
+  startMs?: number | null;
+  endMs?: number | null;
+  blockStart?: number;
+  blockEnd?: number;
+}
+
 export interface MeetingRecord {
   version: 1;
   title: string;
@@ -80,6 +104,8 @@ export interface MeetingRecord {
   pendingItems: MeetingMinutesPendingItem[];
   followUpActions: MeetingMinutesFollowUpAction[];
   uncertainTerms: string[];
+  additionalSections?: Array<{ title: string; content: string }>;
+  sourceEvidence?: MeetingMinutesSourceEvidence[];
 }
 
 export class MeetingMinutesValidationError extends Error {
@@ -93,12 +119,16 @@ export class MeetingMinutesValidationError extends Error {
 
 type JsonSchema = Record<string, unknown>;
 
-const nullableStringSchema = (maxLength: number): JsonSchema => ({
-  type: ["string", "null"],
-  maxLength,
+const stringSchema = (maxLength: number): JsonSchema => ({
+  type: "string", minLength: 1, maxLength, pattern: "\\S",
+  description: "必須包含非空白文字，不可使用空字串。",
 });
 
-const stringSchema = (maxLength: number): JsonSchema => ({ type: "string", maxLength });
+const nullableStringSchema = (maxLength: number): JsonSchema => ({
+  ...stringSchema(maxLength),
+  type: ["string", "null"],
+  description: "資料未知時填 null；有資料時必須包含非空白文字，不可使用空字串。",
+});
 
 export const MEETING_RECORD_JSON_SCHEMA: JsonSchema = {
   type: "object",
@@ -143,6 +173,7 @@ export const MEETING_RECORD_JSON_SCHEMA: JsonSchema = {
     },
     confirmedFacts: {
       type: "array",
+      description: "僅列 confirmedFacts 或獨立 revisionConfirmedFacts 明確確認的事實；不得引用一般 otherNotes、修訂指令或舊草稿。首次產出未提供 confirmedFacts 時填 []；修訂每項只接受 human.confirmedFacts 或 human.revisionConfirmedFacts 引用。必須是真正陣列，不能把 JSON 序列化成字串。",
       maxItems: RECORD_LIMITS.list,
       items: {
         type: "object",
@@ -212,6 +243,41 @@ export const MEETING_RECORD_JSON_SCHEMA: JsonSchema = {
       maxItems: RECORD_LIMITS.list,
       items: stringSchema(RECORD_LIMITS.shortText),
     },
+    additionalSections: {
+      type: "array",
+      maxItems: 6,
+      description: "僅依 additionalSectionRequest 新增段落；沒有要求時填 []。保留所有固定章節。",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: { title: stringSchema(RECORD_LIMITS.shortText), content: stringSchema(RECORD_LIMITS.paragraph) },
+        required: ["title", "content"],
+      },
+    },
+    sourceEvidence: {
+      type: "array", maxItems: 300,
+      description: "每一項 confirmedDecisions 與 followUpActions 至少一筆引用；修訂 confirmedFacts 只可引用 human.confirmedFacts 或 human.revisionConfirmedFacts。quote 必須逐字複製指定 sourceBlocks 區塊中連續的短句，不能改字或加省略號。",
+      items: {
+        type: "object", additionalProperties: false,
+        properties: {
+          section: { ...stringSchema(40), enum: ["confirmedFacts", "confirmedDecisions", "followUpActions"] },
+          itemIndex: { type: "integer", minimum: 0, maximum: 99 },
+          blockId: stringSchema(40), quote: stringSchema(200),
+          sourceId: stringSchema(100),
+          segmentIds: {
+            type: "array", maxItems: 256, items: stringSchema(200),
+          },
+          sourceSegmentIds: {
+            type: "array", maxItems: 512, items: stringSchema(200),
+          },
+          startMs: { type: ["integer", "null"], minimum: 0 },
+          endMs: { type: ["integer", "null"], minimum: 0 },
+          blockStart: { type: "integer", minimum: 0 },
+          blockEnd: { type: "integer", minimum: 0 },
+        },
+        required: ["section", "itemIndex", "blockId", "quote"],
+      },
+    },
   },
   required: [
     "version",
@@ -227,6 +293,8 @@ export const MEETING_RECORD_JSON_SCHEMA: JsonSchema = {
     "pendingItems",
     "followUpActions",
     "uncertainTerms",
+    "additionalSections",
+    "sourceEvidence",
   ],
 };
 
@@ -323,6 +391,9 @@ export function validateMeetingRecord(value: unknown): MeetingRecord {
     "followUpActions",
     "uncertainTerms",
   ];
+  // 已保存的 v1 紀錄沒有額外章節，仍沿用原有格式讀取。
+  if ("additionalSections" in object) keys.push("additionalSections");
+  if ("sourceEvidence" in object) keys.push("sourceEvidence");
   exactKeys(object, keys, "record");
   if (object.version !== 1) validationError("record.version", "必須為 1");
 
@@ -400,6 +471,46 @@ export function validateMeetingRecord(value: unknown): MeetingRecord {
     systemRequirements,
     pendingItems,
     followUpActions,
+    ...(object.sourceEvidence === undefined ? {} : {
+      sourceEvidence: asArray(object.sourceEvidence, "record.sourceEvidence", 300).map((item, index) => {
+        const path = `record.sourceEvidence[${index}]`;
+        const row = asObject(item, path);
+        const keys = ["section", "itemIndex", "blockId", "quote"];
+        for (const key of ["sourceId", "segmentIds", "sourceSegmentIds", "startMs", "endMs", "blockStart", "blockEnd"]) {
+          if (key in row) keys.push(key);
+        }
+        exactKeys(row, keys, path);
+        if (row.section !== "confirmedFacts" && row.section !== "confirmedDecisions" && row.section !== "followUpActions") validationError(`${path}.section`, "不是允許的引用章節");
+        if (!Number.isInteger(row.itemIndex) || Number(row.itemIndex) < 0 || Number(row.itemIndex) > 99) validationError(`${path}.itemIndex`, "必須是 0 到 99 的整數");
+        for (const key of ["startMs", "endMs"] as const) {
+          if (row[key] !== undefined && row[key] !== null && (!Number.isInteger(row[key]) || Number(row[key]) < 0)) {
+            validationError(`${path}.${key}`, "必須是非負整數或 null");
+          }
+        }
+        for (const key of ["blockStart", "blockEnd"] as const) {
+          if (row[key] !== undefined && (!Number.isInteger(row[key]) || Number(row[key]) < 0)) {
+            validationError(`${path}.${key}`, "必須是非負整數");
+          }
+        }
+        return { section: row.section as "confirmedFacts" | "confirmedDecisions" | "followUpActions", itemIndex: row.itemIndex as number,
+          blockId: asString(row.blockId, `${path}.blockId`, 40), quote: asString(row.quote, `${path}.quote`, 200),
+          ...(row.sourceId === undefined ? {} : { sourceId: asString(row.sourceId, `${path}.sourceId`, 100) }),
+          ...(row.segmentIds === undefined ? {} : { segmentIds: asArray(row.segmentIds, `${path}.segmentIds`, 256).map((value, valueIndex) => asString(value, `${path}.segmentIds[${valueIndex}]`, 200)) }),
+          ...(row.sourceSegmentIds === undefined ? {} : { sourceSegmentIds: asArray(row.sourceSegmentIds, `${path}.sourceSegmentIds`, 512).map((value, valueIndex) => asString(value, `${path}.sourceSegmentIds[${valueIndex}]`, 200)) }),
+          ...(row.startMs === undefined ? {} : { startMs: row.startMs === null ? null : Number(row.startMs) }),
+          ...(row.endMs === undefined ? {} : { endMs: row.endMs === null ? null : Number(row.endMs) }),
+          ...(row.blockStart === undefined ? {} : { blockStart: Number(row.blockStart) }),
+          ...(row.blockEnd === undefined ? {} : { blockEnd: Number(row.blockEnd) }) };
+      }),
+    }),
+    ...(object.additionalSections === undefined ? {} : {
+      additionalSections: asArray(object.additionalSections, "record.additionalSections", 6).map((item, index) => {
+        const path = `record.additionalSections[${index}]`;
+        const row = asObject(item, path);
+        exactKeys(row, ["title", "content"], path);
+        return { title: asString(row.title, `${path}.title`, RECORD_LIMITS.shortText), content: asString(row.content, `${path}.content`) };
+      }),
+    }),
     uncertainTerms: asArray(object.uncertainTerms, "record.uncertainTerms").map(
       (item, index) =>
         asString(item, `record.uncertainTerms[${index}]`, RECORD_LIMITS.shortText)
@@ -479,24 +590,42 @@ function overrideConfirmedItems(
   });
 }
 
+export function buildMeetingMinutesHumanFields(human: MeetingMinutesHumanInput) {
+  return {
+    version: 1 as const,
+    title: human.title.trim(),
+    date: human.date?.trim() || null,
+    attendees: parseAttendees(human.attendees),
+    confirmedFacts: overrideConfirmedItems([], splitHumanLines(human.confirmedFacts)),
+  };
+}
+
 export function applyMeetingMinutesHumanOverrides(
   record: MeetingRecord,
   human: MeetingMinutesHumanInput
 ): MeetingRecord {
-  const corrected = applyCorrectionsToValue(record, parseCorrections(human.termCorrections));
+  if (human.revisionRequest) return validateMeetingRecord({ ...record, attendees: parseAttendees(human.attendees) });
+  const { sourceEvidence, ...content } = record;
+  const corrected = applyCorrectionsToValue(content, parseCorrections(human.termCorrections));
   const attendees = parseAttendees(human.attendees);
+  const confirmedDecisions = splitHumanLines(human.confirmedDecisions);
+  if (human.additionalSectionRequest?.trim() && !corrected.additionalSections?.length) {
+    throw new MeetingMinutesValidationError("未產生要求的額外段落。");
+  }
   return validateMeetingRecord({
     ...corrected,
+    ...(sourceEvidence ? { sourceEvidence: sourceEvidence.filter(evidence => evidence.section !== "confirmedDecisions" || confirmedDecisions.length === 0) } : {}),
     title: human.title.trim(),
     date: human.date?.trim() || null,
     attendees,
+    ...(human.additionalSectionRequest?.trim() ? {} : { additionalSections: [] }),
     confirmedFacts: overrideConfirmedItems(
       corrected.confirmedFacts,
       splitHumanLines(human.confirmedFacts)
     ),
     confirmedDecisions: overrideConfirmedItems(
       corrected.confirmedDecisions,
-      splitHumanLines(human.confirmedDecisions)
+      confirmedDecisions
     ),
   });
 }
@@ -523,6 +652,11 @@ export function normalizeMeetingMinutesHumanInput(
     confirmedDecisions: read("confirmedDecisions"),
     termCorrections: read("termCorrections"),
     otherNotes: read("otherNotes"),
+    ...(read("revisionRequest") ? { revisionRequest: read("revisionRequest") } : {}),
+    ...(read("revisionConfirmedFacts") ? { revisionConfirmedFacts: read("revisionConfirmedFacts") } : {}),
+    ...(read("revisionHistory") ? { revisionHistory: read("revisionHistory") } : {}),
+    ...(read("previousSummary") ? { previousSummary: read("previousSummary") } : {}),
+    ...(read("additionalSectionRequest") ? { additionalSectionRequest: read("additionalSectionRequest") } : {}),
   };
   for (const [key, maxLength] of Object.entries(MEETING_MINUTES_INPUT_LIMITS) as Array<
     [keyof typeof MEETING_MINUTES_INPUT_LIMITS, number]

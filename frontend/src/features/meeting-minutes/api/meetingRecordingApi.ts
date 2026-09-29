@@ -1,6 +1,6 @@
 import axios from "axios";
 import { createApiClient } from "../../../api/apiClient";
-import { getOrCreateClientId } from "../../../utils/clientIdentity";
+import { getOrCreateClientId, getOrCreateTabId } from "../../../utils/clientIdentity";
 import type { MeetingAudioSourceId } from "../audio/useMeetingAudioCheck";
 
 export interface MeetingRecordingTrack {
@@ -12,6 +12,7 @@ export interface MeetingRecordingTrack {
 }
 
 export interface MeetingRecordingSession {
+  deliveryMode?: "one-shot";
   sessionId: string;
   title: string;
   status: "recording" | "finalized";
@@ -21,48 +22,19 @@ export interface MeetingRecordingSession {
   durationMs: number | null;
   totalSizeBytes: number;
   tracks: MeetingRecordingTrack[];
+  recoveryUntil?: string | null;
 }
 
-export interface MeetingLibraryInfo {
-  libraryId: string;
-  displayName: string | null;
-  codeHint: string | null;
-  setupState: "incomplete" | "ready";
-  missingFields: Array<"displayName" | "codeHint">;
-  accessVersion: number;
-  createdAt: string;
-  codeRotatedAt: string;
-}
 
-export interface MeetingLibraryOwnerState {
-  enabled: boolean;
-  library: MeetingLibraryInfo | null;
-  ownedLibrary?: MeetingLibraryInfo | null;
-  accessMode?: "owner" | "recorder" | "selection";
-}
 
-export interface MeetingLibraryCodeResult extends MeetingLibraryOwnerState {
-  code: string | null;
-}
 
 export interface MeetingRecordingCreateResult {
   session: MeetingRecordingSession;
-  libraryAccess: MeetingLibraryCodeResult;
   sessionCapability: string | null;
+  reusedSession: boolean;
 }
 
-export interface MeetingLibraryRecordingDetail {
-  session: MeetingRecordingSession;
-  processingJob: MeetingProcessingJob | null;
-  transcriptionJob: MeetingTranscriptionJob | null;
-  minutesVersions: MeetingMinutesVersion[];
-}
 
-export interface MeetingCursorPage<T> {
-  items: T[];
-  nextCursor: string | null;
-  hasMore: boolean;
-}
 
 export type MeetingProcessingStatus = "pending" | "running" | "ready" | "failed";
 
@@ -107,10 +79,6 @@ export interface MeetingProcessingJob {
   artifacts: MeetingProcessingArtifact[];
 }
 
-export interface MeetingProcessingAcceptedResult {
-  job: MeetingProcessingJob;
-  reused: boolean;
-}
 
 export type MeetingTranscriptionStatus = "pending" | "running" | "ready" | "failed";
 
@@ -159,30 +127,8 @@ export interface MeetingTranscriptionJob {
   artifacts: MeetingTranscriptionArtifact[];
 }
 
-export interface MeetingTranscriptionAcceptedResult {
-  job: MeetingTranscriptionJob;
-  reused: boolean;
-}
 
-export interface MeetingMergedTranscriptSegment {
-  segmentId: string;
-  startMs: number;
-  endMs: number;
-  text: string;
-  primarySourceId: MeetingAudioSourceId;
-  sourceSegmentIds: string[];
-  speakerLabel: string | null;
-}
 
-export interface MeetingMergedTranscriptDocument {
-  version: 1;
-  sessionId: string;
-  language: string;
-  provider: string;
-  model: string;
-  generatedAt: string;
-  segments: MeetingMergedTranscriptSegment[];
-}
 
 export interface MeetingMinutesHumanInput {
   title: string;
@@ -192,6 +138,8 @@ export interface MeetingMinutesHumanInput {
   confirmedDecisions: string;
   termCorrections: string;
   otherNotes: string;
+  revisionRequest?: string;
+  revisionConfirmedFacts?: string;
 }
 
 export interface MeetingMinutesRecord {
@@ -213,6 +161,7 @@ export interface MeetingMinutesRecord {
   pendingItems: Array<{ content: string; requiredConfirmation: string | null }>;
   followUpActions: Array<{ content: string; owner: string | null; dueDate: string | null }>;
   uncertainTerms: string[];
+  additionalSections?: Array<{ title: string; content: string }>;
 }
 
 export type MeetingMinutesStatus = "pending" | "running" | "ready" | "failed";
@@ -267,18 +216,23 @@ export interface MeetingMinutesJob {
   updatedAt: string;
   completedAt: string | null;
   version: MeetingMinutesVersion | null;
+  revisionChanges?: {
+    baseVersionId: string;
+    candidateVersionId: string;
+    entries: Array<{ field: string; removed: string[]; added: string[]; requiresAcknowledgement: boolean }>;
+    requiresAcknowledgement: boolean;
+    acknowledgementToken: string;
+  } | null;
+  revisionComparisonError?: string;
 }
 
-export interface MeetingMinutesAcceptedResult {
-  job: MeetingMinutesJob;
-  reused: boolean;
-}
 
 const api = createApiClient({ withCredentials: true });
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
 const MEETING_MUTATION_HEADERS = {
   "X-Meeting-Request": "1",
   "x-debug-client-id": getOrCreateClientId(),
+  "X-Meeting-Recorder-Id": getOrCreateTabId(),
 };
 const MEETING_SESSION_CAPABILITY_HEADER = "X-Meeting-Session-Capability";
 const MEETING_SESSION_CAPABILITY_STORAGE_PREFIX =
@@ -292,11 +246,6 @@ const TERMINAL_MEETING_SESSION_ACCESS_ERROR_CODES = new Set([
   "MEETING_RECORDING_SESSION_CAPABILITY_REQUIRED",
   "MEETING_LIBRARY_RECORDER_EXPIRED",
   "MEETING_LIBRARY_RECORDER_REQUIRED",
-]);
-const TERMINAL_MEETING_LIBRARY_VIEWER_ERROR_CODES = new Set([
-  "MEETING_LIBRARY_VIEWER_REQUIRED",
-  "MEETING_LIBRARY_VIEWER_EXPIRED",
-  "MEETING_LIBRARY_ACCESS_NOT_CONFIGURED",
 ]);
 
 type MeetingSessionCapabilityStorage = Pick<
@@ -360,11 +309,6 @@ export function isMeetingSessionAccessTerminalErrorCode(
   return code !== null && TERMINAL_MEETING_SESSION_ACCESS_ERROR_CODES.has(code);
 }
 
-export function isMeetingLibraryViewerAccessTerminalErrorCode(
-  code: string | null
-): boolean {
-  return code !== null && TERMINAL_MEETING_LIBRARY_VIEWER_ERROR_CODES.has(code);
-}
 
 function meetingSessionHeaders(
   sessionId: string,
@@ -380,18 +324,16 @@ function meetingSessionHeaders(
 }
 
 export async function createMeetingRecordingSession(input: {
+  deliveryMode?: "one-shot";
+  additionalSectionRequest?: string;
   title: string;
   sourceIds: MeetingAudioSourceId[];
-  libraryId?: string | null;
 }): Promise<MeetingRecordingCreateResult> {
   const response = await api.post<{
     data: MeetingRecordingSession;
     meta?: {
-      libraryAccessEnabled?: boolean;
-      library?: MeetingLibraryInfo | null;
-      libraryCode?: string | null;
       sessionCapability?: string | null;
-      accessMode?: "owner" | "recorder";
+      reusedSession?: boolean;
     };
   }>(
     "/meetings/recordings",
@@ -399,124 +341,135 @@ export async function createMeetingRecordingSession(input: {
     { headers: MEETING_MUTATION_HEADERS }
   );
   const sessionCapability = response.data.meta?.sessionCapability ?? null;
+  if (input.deliveryMode === "one-shot") {
+    try { sessionStorage.setItem("meeting-one-shot-session", response.data.data.sessionId); } catch { /* Recording recovery remains in IndexedDB. */ }
+  }
   persistMeetingSessionCapability(response.data.data.sessionId, sessionCapability);
   return {
     session: response.data.data,
     sessionCapability,
-    libraryAccess: {
-      enabled: response.data.meta?.libraryAccessEnabled ?? false,
-      library: response.data.meta?.library ?? null,
-      code: response.data.meta?.libraryCode ?? null,
-      accessMode: response.data.meta?.accessMode,
-    },
+    reusedSession: response.data.meta?.reusedSession === true,
   };
 }
 
-export async function fetchOwnerMeetingLibrary(): Promise<MeetingLibraryOwnerState> {
-  const response = await api.get<{ data: MeetingLibraryOwnerState }>(
-    "/meetings/recordings/library"
-  );
-  return response.data.data;
-}
-
-export async function createOwnerMeetingLibrary(
-  displayName: string
-): Promise<MeetingLibraryCodeResult> {
-  const response = await api.post<{ data: MeetingLibraryCodeResult }>(
-    "/meetings/recordings/library",
-    { displayName },
-    { headers: MEETING_MUTATION_HEADERS }
-  );
-  return response.data.data;
-}
-
-export async function renameOwnerMeetingLibrary(
-  displayName: string
-): Promise<MeetingLibraryCodeResult> {
-  const response = await api.patch<{ data: MeetingLibraryCodeResult }>(
-    "/meetings/recordings/library",
-    { displayName },
-    { headers: MEETING_MUTATION_HEADERS }
-  );
-  return response.data.data;
-}
-
-export async function confirmOwnerMeetingLibraryCode(
-  code: string
-): Promise<MeetingLibraryCodeResult> {
-  const response = await api.post<{ data: MeetingLibraryCodeResult }>(
-    "/meetings/recordings/library/confirm-code",
-    { code },
-    { headers: MEETING_MUTATION_HEADERS }
-  );
-  return response.data.data;
-}
-
-export async function authorizeMeetingRecordingLibrary(
-  code: string
-): Promise<MeetingLibraryCodeResult> {
-  const response = await api.post<{ data: MeetingLibraryCodeResult }>(
-    "/meetings/recordings/library-access",
-    { code },
-    { headers: MEETING_MUTATION_HEADERS }
-  );
-  return response.data.data;
-}
-
-export async function rotateOwnerMeetingLibraryCode(): Promise<MeetingLibraryCodeResult> {
-  const response = await api.post<{ data: MeetingLibraryCodeResult }>(
-    "/meetings/recordings/library/rotate-code",
+export async function heartbeatMeetingRecordingSession(sessionId: string): Promise<void> {
+  await api.post(
+    `/meetings/recordings/${encodeURIComponent(sessionId)}/heartbeat`,
     undefined,
-    {
-    headers: MEETING_MUTATION_HEADERS,
-    }
-  );
-  return response.data.data;
-}
-
-export async function authorizeMeetingLibrary(code: string): Promise<MeetingLibraryInfo> {
-  const response = await api.post<{ data: MeetingLibraryInfo }>(
-    "/meetings/library-access",
-    { code },
     { headers: MEETING_MUTATION_HEADERS }
   );
-  return response.data.data;
 }
 
-export async function logoutMeetingLibrary(): Promise<void> {
-  await api.post("/meetings/library/logout", undefined, {
+export interface MeetingCurrentSource {
+  displayName: string;
+  lastSeenAt: string;
+}
+
+export interface MeetingCurrentContext {
+  source: MeetingCurrentSource | null;
+  sessionId: string | null;
+}
+
+export async function fetchCurrentMeetingContext(): Promise<MeetingCurrentContext> {
+  return (await api.get<{ data: MeetingCurrentContext }>("/meetings/recordings/current", {
+    headers: { "X-Meeting-Recorder-Id": MEETING_MUTATION_HEADERS["X-Meeting-Recorder-Id"] },
+  })).data.data;
+}
+
+export async function releaseCurrentMeeting(sessionId: string): Promise<void> {
+  await api.post(`/meetings/recordings/${encodeURIComponent(sessionId)}/release-current`, undefined, {
     headers: MEETING_MUTATION_HEADERS,
   });
 }
 
-export async function fetchMeetingLibrary(): Promise<MeetingLibraryInfo> {
-  const response = await api.get<{ data: MeetingLibraryInfo }>("/meetings/library");
-  return response.data.data;
+export interface MeetingOneShotAvailability {
+  mode: "one-shot";
+  available: boolean;
+  reason: string | null;
+  deliveryMs: number;
+  admission: { activeMeetings: number; maxMeetings: number };
 }
 
-export async function fetchMeetingLibraryRecordings(
-  limit = 50,
-  cursor: string | null = null
-): Promise<MeetingCursorPage<MeetingRecordingSession>> {
-  const response = await api.get<{
-    data: MeetingRecordingSession[];
-    meta: { nextCursor: string | null; hasMore: boolean };
-  }>(
-    "/meetings/library/recordings",
-    { params: { limit, ...(cursor ? { cursor } : {}) } }
-  );
-  return {
-    items: response.data.data,
-    nextCursor: response.data.meta.nextCursor,
-    hasMore: response.data.meta.hasMore,
-  };
+export interface MeetingOneShotStatus {
+  admission?: { activeMeetings: number; maxMeetings: number };
+  liveTranscription?: Array<{ sourceId: string; decodedMs: number; processedMs: number; complete: boolean; failed: boolean; deferred?: boolean }>;
+  additionalSectionRequest?: string;
+  phase: "recording" | "interrupted" | "finalizing" | "processing" | "transcribing" | "summarizing" | "cancelling" | "cancelled" | "ready" | "failed" | "expired" | "legacy-saved";
+  retryAvailable?: boolean;
+  session?: MeetingRecordingSession;
+  expiresAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  processing: MeetingProcessingJob | null;
+  transcription: MeetingTranscriptionJob | null;
+  minutes: MeetingMinutesJob | null;
+  revision?: MeetingMinutesJob | null;
 }
 
-export async function fetchMeetingLibraryRecording(
-  sessionId: string
-): Promise<MeetingLibraryRecordingDetail> {
-  const response = await api.get<{ data: MeetingLibraryRecordingDetail }>(
-    `/meetings/library/recordings/${encodeURIComponent(sessionId)}`
+export async function requestMeetingSummaryRevision(sessionId: string, baseVersionId: string, request: string, clientRequestKey: string, confirmedFacts = ""): Promise<MeetingMinutesJob> {
+  return (await api.post<{ data: MeetingMinutesJob }>(`/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/revisions`,
+    { baseVersionId, request, clientRequestKey, confirmedFacts }, { headers: meetingSessionHeaders(sessionId, true) })).data.data;
+}
+
+export async function adoptMeetingSummaryRevision(sessionId: string, jobId: string, expectedVersionId: string, acknowledgementToken?: string): Promise<void> {
+  await api.post(`/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/revisions/${encodeURIComponent(jobId)}/adopt`,
+    { expectedVersionId, acknowledgementToken }, { headers: meetingSessionHeaders(sessionId, true) });
+}
+
+export async function discardMeetingSummaryRevision(sessionId: string, jobId: string): Promise<void> {
+  await api.post(`/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/revisions/${encodeURIComponent(jobId)}/discard`, {},
+    { headers: meetingSessionHeaders(sessionId, true) });
+}
+
+export function meetingRevisionHtmlUrl(sessionId: string, jobId: string): string {
+  return `${api.defaults.baseURL}/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/revisions/${encodeURIComponent(jobId)}/html`;
+}
+
+export async function fetchMeetingOneShotAvailability(): Promise<MeetingOneShotAvailability | null> {
+  try { return (await api.get<{ data: MeetingOneShotAvailability }>("/meetings/one-shot")).data.data; }
+  catch (error) { if (axios.isAxiosError(error) && error.response?.status === 404) return null; throw error; }
+}
+
+export async function fetchMeetingOneShotStatus(sessionId: string): Promise<MeetingOneShotStatus> {
+  return (await api.get<{ data: MeetingOneShotStatus }>(`/meetings/recordings/${encodeURIComponent(sessionId)}/delivery`, { headers: meetingSessionHeaders(sessionId) })).data.data;
+}
+
+export async function downloadMeetingRecordingTrack(sessionId: string, sourceId: MeetingAudioSourceId): Promise<void> {
+  const response = await api.get<Blob>(`/meetings/recordings/${encodeURIComponent(sessionId)}/tracks/${sourceId}`, {
+    headers: meetingSessionHeaders(sessionId), responseType: "blob",
+  });
+  const url = URL.createObjectURL(response.data);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${sessionId}-${sourceId}.${response.data.type.includes("ogg") ? "ogg" : "webm"}`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+export function meetingOneShotHtmlUrl(sessionId: string, download = false): string {
+  return `${api.defaults.baseURL}/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/html${download ? "?download=1" : ""}`;
+}
+
+export async function fetchMeetingOneShotHtml(sessionId: string, signal: AbortSignal): Promise<string> {
+  const response = await api.get<string>(`/meetings/recordings/${encodeURIComponent(sessionId)}/delivery/html`, { responseType: "text", signal });
+  return response.data;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+export async function fetchMeetingRecordingSession(sessionId: string): Promise<MeetingRecordingSession> {
+  const response = await api.get<{ data: MeetingRecordingSession }>(
+    `/meetings/recordings/${encodeURIComponent(sessionId)}`,
+    { headers: meetingSessionHeaders(sessionId), timeout: 20_000 }
   );
   return response.data.data;
 }
@@ -527,6 +480,7 @@ export async function uploadMeetingRecordingChunk(input: {
   sequence: number;
   blob: Blob;
   mimeType: string;
+  signal?: AbortSignal;
 }): Promise<void> {
   await api.put(
     `/meetings/recordings/${encodeURIComponent(input.sessionId)}/tracks/${encodeURIComponent(
@@ -539,6 +493,7 @@ export async function uploadMeetingRecordingChunk(input: {
         "Content-Type": input.mimeType,
       },
       timeout: 60_000,
+      signal: input.signal,
     }
   );
 }
@@ -563,32 +518,7 @@ export async function abortMeetingRecordingSession(sessionId: string): Promise<v
   });
 }
 
-export async function enqueueMeetingRecordingProcessing(
-  sessionId: string
-): Promise<MeetingProcessingAcceptedResult> {
-  const response = await api.post<{
-    data: MeetingProcessingJob;
-    meta: { accepted: boolean; reused: boolean };
-  }>(
-    `/meetings/recordings/${encodeURIComponent(sessionId)}/process`,
-    undefined,
-    { headers: meetingSessionHeaders(sessionId, true) }
-  );
-  return { job: response.data.data, reused: response.data.meta.reused };
-}
 
-export async function fetchMeetingProcessingJob(
-  sessionId: string,
-  jobId: string
-): Promise<MeetingProcessingJob> {
-  const response = await api.get<{ data: MeetingProcessingJob }>(
-    `/meetings/recordings/${encodeURIComponent(
-      sessionId
-    )}/processing-jobs/${encodeURIComponent(jobId)}`,
-    { headers: meetingSessionHeaders(sessionId), timeout: 20_000 }
-  );
-  return response.data.data;
-}
 
 export async function retryMeetingProcessingJob(
   sessionId: string,
@@ -604,32 +534,7 @@ export async function retryMeetingProcessingJob(
   return response.data.data;
 }
 
-export async function enqueueMeetingTranscription(
-  sessionId: string
-): Promise<MeetingTranscriptionAcceptedResult> {
-  const response = await api.post<{
-    data: MeetingTranscriptionJob;
-    meta: { accepted: boolean; reused: boolean };
-  }>(
-    `/meetings/recordings/${encodeURIComponent(sessionId)}/transcriptions`,
-    undefined,
-    { headers: meetingSessionHeaders(sessionId, true) }
-  );
-  return { job: response.data.data, reused: response.data.meta.reused };
-}
 
-export async function fetchMeetingTranscriptionJob(
-  sessionId: string,
-  jobId: string
-): Promise<MeetingTranscriptionJob> {
-  const response = await api.get<{ data: MeetingTranscriptionJob }>(
-    `/meetings/recordings/${encodeURIComponent(
-      sessionId
-    )}/transcription-jobs/${encodeURIComponent(jobId)}`,
-    { headers: meetingSessionHeaders(sessionId), timeout: 20_000 }
-  );
-  return response.data.data;
-}
 
 export async function retryMeetingTranscriptionJob(
   sessionId: string,
@@ -645,128 +550,18 @@ export async function retryMeetingTranscriptionJob(
   return response.data.data;
 }
 
-export function meetingRecordingTrackUrl(
-  sessionId: string,
-  sourceId: MeetingAudioSourceId
-): string {
-  return `${API_BASE_URL}/meetings/recordings/${encodeURIComponent(
-    sessionId
-  )}/tracks/${encodeURIComponent(sourceId)}`;
-}
 
-export function meetingRecordingDownloadUrl(
-  sessionId: string,
-  sourceId: MeetingAudioSourceId
-): string {
-  return `${meetingRecordingTrackUrl(sessionId, sourceId)}?download=1`;
-}
 
-export function meetingLibraryTrackUrl(
-  sessionId: string,
-  sourceId: MeetingAudioSourceId,
-  download = false
-): string {
-  const url = `${API_BASE_URL}/meetings/library/recordings/${encodeURIComponent(
-    sessionId
-  )}/tracks/${encodeURIComponent(sourceId)}`;
-  return download ? `${url}?download=1` : url;
-}
 
-export function meetingProcessingArtifactUrl(
-  artifact: Pick<MeetingProcessingArtifact, "downloadUrl">,
-  download = false
-): string {
-  const rawUrl = artifact.downloadUrl;
-  const url = rawUrl.startsWith("/api/")
-    ? `${API_BASE_URL}${rawUrl.slice(4)}`
-    : rawUrl;
-  if (!download) return url;
-  return `${url}${url.includes("?") ? "&" : "?"}download=1`;
-}
 
-export function meetingTranscriptionArtifactUrl(
-  artifact: Pick<MeetingTranscriptionArtifact, "downloadUrl">,
-  download = false
-): string {
-  const rawUrl = artifact.downloadUrl;
-  const url = rawUrl.startsWith("/api/")
-    ? `${API_BASE_URL}${rawUrl.slice(4)}`
-    : rawUrl;
-  if (!download) return url;
-  return `${url}${url.includes("?") ? "&" : "?"}download=1`;
-}
 
 export function resolveMeetingArtifactRequestUrl(rawUrl: string): string {
   return rawUrl.startsWith("/api/") ? rawUrl.slice(4) : rawUrl;
 }
 
-export async function fetchMeetingMergedTranscript(
-  artifact: Pick<MeetingTranscriptionArtifact, "downloadUrl" | "sessionId">,
-  options: { signal?: AbortSignal } = {}
-): Promise<MeetingMergedTranscriptDocument> {
-  const response = await api.get<MeetingMergedTranscriptDocument>(
-    resolveMeetingArtifactRequestUrl(artifact.downloadUrl),
-    {
-      headers: meetingSessionHeaders(artifact.sessionId),
-      signal: options.signal,
-      timeout: 30_000,
-    }
-  );
-  return response.data;
-}
 
-export async function downloadMeetingTranscriptionArtifact(
-  artifact: Pick<MeetingTranscriptionArtifact, "downloadUrl" | "sessionId">,
-  filename: string
-): Promise<void> {
-  const response = await api.get<Blob>(
-    resolveMeetingArtifactRequestUrl(artifact.downloadUrl),
-    {
-      headers: meetingSessionHeaders(artifact.sessionId),
-      params: { download: 1 },
-      responseType: "blob",
-      timeout: 30_000,
-    }
-  );
-  const blobUrl = URL.createObjectURL(response.data);
-  const anchor = document.createElement("a");
-  anchor.href = blobUrl;
-  anchor.download = filename;
-  anchor.style.display = "none";
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
-}
 
-export async function enqueueMeetingMinutes(input: {
-  sessionId: string;
-  clientRequestKey: string;
-  humanInput: MeetingMinutesHumanInput;
-}): Promise<MeetingMinutesAcceptedResult> {
-  const response = await api.post<{
-    data: MeetingMinutesJob;
-    meta: { accepted: boolean; reused: boolean };
-  }>(
-    `/meetings/recordings/${encodeURIComponent(input.sessionId)}/minutes`,
-    { clientRequestKey: input.clientRequestKey, ...input.humanInput },
-    { headers: meetingSessionHeaders(input.sessionId, true) }
-  );
-  return { job: response.data.data, reused: response.data.meta.reused };
-}
 
-export async function fetchMeetingMinutesJob(
-  sessionId: string,
-  jobId: string
-): Promise<MeetingMinutesJob> {
-  const response = await api.get<{ data: MeetingMinutesJob }>(
-    `/meetings/recordings/${encodeURIComponent(
-      sessionId
-    )}/minutes-jobs/${encodeURIComponent(jobId)}`,
-    { headers: meetingSessionHeaders(sessionId), timeout: 20_000 }
-  );
-  return response.data.data;
-}
 
 export async function retryMeetingMinutesJob(
   sessionId: string,
@@ -782,15 +577,6 @@ export async function retryMeetingMinutesJob(
   return response.data.data;
 }
 
-export async function fetchMeetingMinutesVersions(
-  sessionId: string
-): Promise<MeetingMinutesVersion[]> {
-  const response = await api.get<{ data: MeetingMinutesVersion[] }>(
-    `/meetings/recordings/${encodeURIComponent(sessionId)}/minutes/versions`,
-    { headers: meetingSessionHeaders(sessionId), timeout: 20_000 }
-  );
-  return response.data.data;
-}
 
 function resolveMeetingDownloadUrl(rawUrl: string): string {
   return rawUrl.startsWith("/api/") ? `${API_BASE_URL}${rawUrl.slice(4)}` : rawUrl;

@@ -13,6 +13,7 @@ import {
 
 interface LocalWhisperResponse {
   model?: unknown;
+  beamSize?: unknown;
   segments?: unknown;
 }
 
@@ -27,6 +28,7 @@ export interface MeetingLocalWhisperHttpClient {
 }
 
 interface LocalWhisperMeetingTranscriptionProviderDeps {
+  beamSize?: number;
   url?: string;
   token?: string;
   model?: string;
@@ -50,6 +52,12 @@ function mapLocalWhisperError(error: unknown): MeetingTranscriptionError {
         "MEETING_TRANSCRIPTION_LOCAL_TIMEOUT"
       );
     }
+    if (["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "ECONNRESET"].includes(error.code ?? "")) {
+      return new MeetingTranscriptionError(
+        "語音轉文字服務暫時無法連線。",
+        "MEETING_TRANSCRIPTION_LOCAL_UNAVAILABLE"
+      );
+    }
     const status = error.response?.status;
     if (status === 401 || status === 403) {
       return new MeetingTranscriptionError(
@@ -58,6 +66,9 @@ function mapLocalWhisperError(error: unknown): MeetingTranscriptionError {
       );
     }
     if (status === 409) {
+      if (error.response?.data?.detail === "STT_BEAM_SIZE_MISMATCH") {
+        return new MeetingTranscriptionError("Whisper 解碼設定與 Backend 不一致，請同步設定 beam。", "MEETING_TRANSCRIPTION_LOCAL_PROFILE_MISMATCH");
+      }
       return new MeetingTranscriptionError(
         "本機 Whisper service model 與 Backend 設定不一致。",
         "MEETING_TRANSCRIPTION_LOCAL_MODEL_MISMATCH"
@@ -100,6 +111,8 @@ export class LocalWhisperMeetingTranscriptionProvider
   readonly enabled: boolean;
   readonly name = "local-whisper";
   readonly model: string;
+  readonly inferenceProfile: string;
+  private readonly beamSize: number;
   private readonly url: string;
   private readonly token: string;
   private readonly timeoutMs: number;
@@ -107,6 +120,8 @@ export class LocalWhisperMeetingTranscriptionProvider
   private readonly client: MeetingLocalWhisperHttpClient;
 
   constructor(deps: LocalWhisperMeetingTranscriptionProviderDeps = {}) {
+    this.beamSize = deps.beamSize ?? env.MEETING_TRANSCRIPTION_BEAM_SIZE;
+    this.inferenceProfile = `whisper-decoder-v1:beam=${this.beamSize}`;
     this.url = (deps.url ?? env.MEETING_TRANSCRIPTION_LOCAL_URL).trim();
     this.token = deps.token ?? env.MEETING_TRANSCRIPTION_LOCAL_TOKEN;
     this.model = (deps.model ?? env.MEETING_TRANSCRIPTION_LOCAL_MODEL).trim();
@@ -124,6 +139,21 @@ export class LocalWhisperMeetingTranscriptionProvider
     );
   }
 
+  async checkReady(): Promise<boolean> {
+    if (!this.enabled) return false;
+    try {
+      const url = new URL(this.url);
+      url.pathname = "/health";
+      url.search = "";
+      const response = await this.client.request<{ status?: string; model?: string; beamSize?: number }>({
+        method: "GET", url: url.toString(), timeout: 1_500,
+        headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+      });
+      return response.status === 200 && response.data.status === "ok" &&
+        response.data.model === this.model && response.data.beamSize === this.beamSize;
+    } catch { return false; }
+  }
+
   async transcribe(
     input: MeetingTranscriptionProviderInput
   ): Promise<MeetingProviderTranscriptSegment[]> {
@@ -139,8 +169,9 @@ export class LocalWhisperMeetingTranscriptionProvider
       form.append("audio", new Blob([audio], { type: input.mimeType }), path.basename(input.audioPath));
       form.append("language", input.language);
       form.append("sourceId", input.sourceId);
-      form.append("durationMs", String(input.durationMs));
+      form.append("durationMs", String(Math.ceil(input.durationMs)));
       form.append("model", this.model);
+      form.append("expectedBeamSize", String(this.beamSize));
       form.append("phrases", JSON.stringify(this.phrases));
       const headers: Record<string, string> = {};
       if (this.token) headers.Authorization = `Bearer ${this.token}`;
@@ -159,6 +190,9 @@ export class LocalWhisperMeetingTranscriptionProvider
           "本機 Whisper service 回傳的 model 與 Backend 設定不一致。",
           "MEETING_TRANSCRIPTION_LOCAL_MODEL_MISMATCH"
         );
+      }
+      if (response.data.beamSize !== this.beamSize) {
+        throw new MeetingTranscriptionError("Whisper 解碼設定與 Backend 不一致，請同步更新 STT service。", "MEETING_TRANSCRIPTION_LOCAL_PROFILE_MISMATCH");
       }
       return validateMeetingProviderTranscriptSegments(
         response.data.segments,

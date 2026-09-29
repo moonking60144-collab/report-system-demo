@@ -73,6 +73,11 @@ const DevMeetingLibrariesView = lazy(() =>
     default: m.DevMeetingLibrariesView,
   }))
 );
+const DevMeetingSummaryArchive = lazy(() =>
+  import("./features/dev/pages/views/DevMeetingSummaryArchive").then((m) => ({
+    default: m.DevMeetingSummaryArchive,
+  }))
+);
 const MeetingAudioCheckPage = lazy(() =>
   import("./features/meeting-minutes/pages/MeetingAudioCheckPage").then((m) => ({
     default: m.MeetingAudioCheckPage,
@@ -139,6 +144,7 @@ export function AppRouter() {
           <Route path="ai/threads/:threadId" element={<DevAiView />} />
           <Route path="knowledge" element={<DevKnowledgeView />} />
           <Route path="meeting-libraries" element={<DevMeetingLibrariesView />} />
+          <Route path="meeting-summaries" element={<DevMeetingSummaryArchive />} />
           <Route path="settings" element={<DevSettingsView />} />
         </Route>
 

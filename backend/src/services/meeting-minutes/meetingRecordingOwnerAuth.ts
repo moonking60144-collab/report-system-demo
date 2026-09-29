@@ -106,7 +106,7 @@ export function createMeetingRecordingOwnerAuth(options: {
       if (!ownerId) {
         throw new HttpError(
           401,
-          "缺少有效的會議錄音裝置憑證。",
+          "缺少有效的會議歸屬憑證。",
           "MEETING_RECORDING_OWNER_REQUIRED"
         );
       }

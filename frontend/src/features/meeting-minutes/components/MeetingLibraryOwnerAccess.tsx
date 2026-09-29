@@ -22,7 +22,7 @@ import {
   rotateOwnerMeetingLibraryCode,
   type MeetingLibraryCodeResult,
   type MeetingLibraryOwnerState,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 
 interface MeetingLibraryOwnerAccessProps {
   initialAccess: MeetingLibraryCodeResult;

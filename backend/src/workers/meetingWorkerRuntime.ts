@@ -1,3 +1,4 @@
+import { notifyMeetingStateChanged } from "../events/meetingStateEvents";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env";
 import { createLogger } from "../observability/logger";
@@ -12,12 +13,16 @@ import {
   type MeetingTranscriptionJobRepository,
 } from "../storage/meeting-minutes/meetingTranscriptionJobRepository";
 import { type MeetingMinutesService } from "../services/meeting-minutes/meetingMinutesService";
+import type { MeetingOneShotService } from "../services/meeting-minutes/meetingOneShotService";
+import type { MeetingLiveTranscriptionService } from "../services/meeting-minutes/meetingLiveTranscriptionService";
 import {
   type MeetingMinutesJobRecord,
   type MeetingMinutesJobRepository,
 } from "../storage/meeting-minutes/meetingMinutesJobRepository";
 
 interface MeetingWorkerRuntimeDeps {
+  liveTranscriptionService?: MeetingLiveTranscriptionService;
+  oneShotService?: MeetingOneShotService;
   repository: MeetingProcessingJobRepository;
   processingService: MeetingProcessingService;
   transcriptionRepository?: MeetingTranscriptionJobRepository;
@@ -35,6 +40,8 @@ interface MeetingWorkerRuntimeDeps {
 const log = createLogger("meeting-worker");
 
 export class MeetingWorkerRuntime {
+  private readonly liveTranscriptionService;
+  private readonly oneShotService: MeetingOneShotService | null;
   private readonly repository: MeetingProcessingJobRepository;
   private readonly processingService: MeetingProcessingService;
   private readonly transcriptionRepository: MeetingTranscriptionJobRepository | null;
@@ -50,12 +57,17 @@ export class MeetingWorkerRuntime {
   private readonly now: () => Date;
   private stopping = false;
   private pollTimer: NodeJS.Timeout | null = null;
+  private readinessTimer: NodeJS.Timeout | null = null;
   private runOncePromise: Promise<boolean> | null = null;
   private nextRecoveryAtMs: number;
   private nextCleanupAtMs: number;
   private currentAbortController: AbortController | null = null;
+  private minutesAbortController: AbortController | null = null;
+  private minutesPromise: Promise<void> | null = null;
 
   constructor(deps: MeetingWorkerRuntimeDeps) {
+    this.liveTranscriptionService = deps.liveTranscriptionService;
+    this.oneShotService = deps.oneShotService ?? null;
     this.repository = deps.repository;
     this.processingService = deps.processingService;
     this.transcriptionRepository = deps.transcriptionRepository ?? null;
@@ -89,6 +101,7 @@ export class MeetingWorkerRuntime {
       this.transcriptionService?.recoverExpiredJobs(),
       this.minutesService?.recoverExpiredJobs(),
     ]);
+    await this.oneShotService?.settleTerminalFailures();
     await this.cleanupArtifactsSafely();
     this.nextRecoveryAtMs = this.now().getTime() + this.recoveryIntervalMs;
     this.nextCleanupAtMs = this.now().getTime() + this.cleanupIntervalMs;
@@ -99,7 +112,15 @@ export class MeetingWorkerRuntime {
       transcription: transcriptionRecovered ?? null,
       minutes: minutesRecovered ?? null,
     });
+    await this.oneShotService?.heartbeatWorker(this.workerId);
+    notifyMeetingStateChanged();
+    this.readinessTimer = setInterval(() => {
+      if (this.stopping) return;
+      void this.oneShotService?.heartbeatWorker(this.workerId).catch(error => log.warn({event:"readiness-heartbeat-failed",error:String(error)}));
+    },5_000);
+    this.readinessTimer.unref();
     this.schedule(0);
+    this.liveTranscriptionService?.start();
   }
 
   runOnce(): Promise<boolean> {
@@ -112,22 +133,29 @@ export class MeetingWorkerRuntime {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.readinessTimer) clearInterval(this.readinessTimer);
+    this.currentAbortController?.abort();
+    this.minutesAbortController?.abort();
+    await this.oneShotService?.releaseWorker(this.workerId).catch(error => log.warn({event:"readiness-release-failed",error:String(error)}));
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
-    this.currentAbortController?.abort();
+    await this.liveTranscriptionService?.stop();
     await this.runOncePromise?.catch(() => undefined);
+    await this.minutesPromise;
     await Promise.all([
       this.processingService.close(),
       this.transcriptionService?.close(),
       this.minutesService?.close(),
+      this.liveTranscriptionService?.close(),
     ]);
     log.info({ event: "stopped", workerId: this.workerId });
   }
 
   private async runOnceInternal(): Promise<boolean> {
     if (this.stopping) return false;
+    await this.oneShotService?.advance().catch(error => log.warn({ event: "one-shot-reconcile-failed", error: String(error) }));
     const now = this.now();
     if (now.getTime() >= this.nextRecoveryAtMs) {
       const recovered = await this.processingService.recoverExpiredJobs({
@@ -151,6 +179,7 @@ export class MeetingWorkerRuntime {
           transcriptionRecovered.providerMigrationsDetected > 0 ||
           transcriptionRecovered.providerMigrationsExpired > 0
         ) {
+          notifyMeetingStateChanged();
           log.info({
             event: "lease-recovered",
             workerId: this.workerId,
@@ -168,6 +197,7 @@ export class MeetingWorkerRuntime {
           minutesRecovered.providerMigrationsDetected > 0 ||
           minutesRecovered.providerMigrationsExpired > 0
         ) {
+          notifyMeetingStateChanged();
           log.info({
             event: "lease-recovered",
             workerId: this.workerId,
@@ -176,10 +206,26 @@ export class MeetingWorkerRuntime {
           });
         }
       }
+      await this.oneShotService?.settleTerminalFailures();
     }
     if (now.getTime() >= this.nextCleanupAtMs) {
       await this.cleanupArtifactsSafely();
       this.nextCleanupAtMs = now.getTime() + this.cleanupIntervalMs;
+    }
+    let minutesClaimed = false;
+    if (!this.minutesPromise && this.minutesRepository && this.minutesService?.providerEnabled) {
+      const minutesJob = await this.minutesRepository.claimNext({
+        workerId: this.workerId,
+        now: now.toISOString(),
+        leaseExpiresAt: new Date(now.getTime() + this.leaseMs).toISOString(),
+      });
+      if (minutesJob) {
+        notifyMeetingStateChanged();
+        minutesClaimed = true;
+        this.minutesPromise = this.processMinutesJob(minutesJob)
+          .catch(error => log.error({ event: "minutes-job-failed", jobId: minutesJob.jobId, error: String(error) }))
+          .finally(() => { this.minutesPromise = null; });
+      }
     }
     const job = await this.repository.claimNext({
       workerId: this.workerId,
@@ -187,10 +233,13 @@ export class MeetingWorkerRuntime {
       leaseExpiresAt: new Date(now.getTime() + this.leaseMs).toISOString(),
     });
     if (job) {
+      notifyMeetingStateChanged();
       const result = await this.processJob(job);
+      const cancelled = await this.oneShotService?.repository.isCancellationRequested(result.sessionId) ?? false;
       if (
         result.status === "ready" &&
-        this.transcriptionService?.providerEnabled
+        this.transcriptionService?.providerEnabled &&
+        !cancelled
       ) {
         try {
           await this.transcriptionService.enqueueFromProcessingJob(result);
@@ -204,6 +253,7 @@ export class MeetingWorkerRuntime {
           });
         }
       }
+      notifyMeetingStateChanged();
       return true;
     }
     if (
@@ -216,19 +266,12 @@ export class MeetingWorkerRuntime {
         leaseExpiresAt: new Date(now.getTime() + this.leaseMs).toISOString(),
       });
       if (transcriptionJob) {
+        notifyMeetingStateChanged();
         await this.processTranscriptionJob(transcriptionJob);
         return true;
       }
     }
-    if (!this.minutesRepository || !this.minutesService?.providerEnabled) return false;
-    const minutesJob = await this.minutesRepository.claimNext({
-      workerId: this.workerId,
-      now: now.toISOString(),
-      leaseExpiresAt: new Date(now.getTime() + this.leaseMs).toISOString(),
-    });
-    if (!minutesJob) return false;
-    await this.processMinutesJob(minutesJob);
-    return true;
+    return minutesClaimed;
   }
 
   private async processJob(
@@ -236,9 +279,14 @@ export class MeetingWorkerRuntime {
   ): Promise<MeetingProcessingJobRecord> {
     const abortController = new AbortController();
     this.currentAbortController = abortController;
+    if (this.stopping) abortController.abort();
+    if (await this.oneShotService?.repository.isCancellationRequested(job.sessionId)) abortController.abort();
     const heartbeatTimer = setInterval(() => {
-      void this.processingService.heartbeat(job.jobId, this.workerId).then((owned) => {
-        if (!owned) {
+      void Promise.all([
+        this.processingService.heartbeat(job.jobId, this.workerId),
+        this.oneShotService?.repository.isCancellationRequested(job.sessionId) ?? false,
+      ]).then(([owned, cancelled]) => {
+        if (!owned || cancelled) {
           log.warn({ event: "lease-lost", workerId: this.workerId, jobId: job.jobId });
           abortController.abort();
         }
@@ -268,10 +316,13 @@ export class MeetingWorkerRuntime {
       });
       return result;
     } finally {
+      notifyMeetingStateChanged();
       clearInterval(heartbeatTimer);
       if (this.currentAbortController === abortController) {
         this.currentAbortController = null;
       }
+      await this.oneShotService?.settleCancellation(job.sessionId);
+      await this.oneShotService?.settleTerminalFailure(job.sessionId);
     }
   }
 
@@ -281,8 +332,10 @@ export class MeetingWorkerRuntime {
     if (!this.transcriptionService) return;
     const abortController = new AbortController();
     this.currentAbortController = abortController;
+    if (this.stopping) abortController.abort();
+    if (await this.oneShotService?.repository.isCancellationRequested(job.sessionId)) abortController.abort();
     const heartbeatTimer = setInterval(() => {
-      void this.transcriptionService?.heartbeat(job.jobId, this.workerId).then((owned) => {
+      void this.transcriptionService!.heartbeat(job.jobId, this.workerId).then((owned) => {
         if (!owned) {
           log.warn({
             event: "lease-lost",
@@ -304,6 +357,7 @@ export class MeetingWorkerRuntime {
     }, this.heartbeatIntervalMs);
     heartbeatTimer.unref();
     try {
+      await this.liveTranscriptionService?.seal(job.sessionId);
       const result = await this.transcriptionService.processClaimedJob(
         job,
         this.workerId,
@@ -318,19 +372,24 @@ export class MeetingWorkerRuntime {
         errorCode: result.errorCode,
       });
     } finally {
+      notifyMeetingStateChanged();
       clearInterval(heartbeatTimer);
       if (this.currentAbortController === abortController) {
         this.currentAbortController = null;
       }
+      await this.oneShotService?.settleCancellation(job.sessionId);
+      await this.oneShotService?.settleTerminalFailure(job.sessionId);
     }
   }
 
   private async processMinutesJob(job: MeetingMinutesJobRecord): Promise<void> {
     if (!this.minutesService) return;
     const abortController = new AbortController();
-    this.currentAbortController = abortController;
+    this.minutesAbortController = abortController;
+    if (this.stopping) abortController.abort();
+    if (await this.oneShotService?.repository.isCancellationRequested(job.sessionId)) abortController.abort();
     const heartbeatTimer = setInterval(() => {
-      void this.minutesService?.heartbeat(job.jobId, this.workerId).then((owned) => {
+      void this.minutesService!.heartbeat(job.jobId, this.workerId).then((owned) => {
         if (!owned) {
           log.warn({
             event: "lease-lost",
@@ -351,12 +410,14 @@ export class MeetingWorkerRuntime {
       });
     }, this.heartbeatIntervalMs);
     heartbeatTimer.unref();
+    let completed = false;
     try {
       const result = await this.minutesService.processClaimedJob(
         job,
         this.workerId,
         abortController.signal
       );
+      completed = result.status === "ready";
       log.info({
         event: "job-finished",
         workerId: this.workerId,
@@ -366,22 +427,28 @@ export class MeetingWorkerRuntime {
         errorCode: result.errorCode,
       });
     } finally {
+      notifyMeetingStateChanged();
       clearInterval(heartbeatTimer);
-      if (this.currentAbortController === abortController) {
-        this.currentAbortController = null;
+      if (this.minutesAbortController === abortController) {
+        this.minutesAbortController = null;
       }
+      await this.oneShotService?.settleCancellation(job.sessionId);
+      await this.oneShotService?.settleTerminalFailure(job.sessionId);
+      if (completed && !this.stopping) await this.oneShotService?.reconcileMinutesCompletion(job.sessionId);
     }
   }
 
   private async cleanupArtifactsSafely(): Promise<void> {
     try {
-      const [activeTranscriptionSessions, activeMinutesSessions] = await Promise.all([
+      const [activeTranscriptionSessions, activeMinutesSessions, oneShotSessions] = await Promise.all([
         this.transcriptionService?.listActiveSessionIds() ?? [],
         this.minutesService?.listActiveSessionIds() ?? [],
+        this.oneShotService?.repository.protectedSessionIds() ?? [],
       ]);
       const protectedSessionIds = new Set([
         ...activeTranscriptionSessions,
         ...activeMinutesSessions,
+        ...oneShotSessions,
       ]);
       const result = await this.processingService.cleanupArtifacts(protectedSessionIds);
       if (result.deletedJobIds.length > 0) {
@@ -401,14 +468,15 @@ export class MeetingWorkerRuntime {
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null;
       void this.runOnce()
+        .then((processed) => this.schedule(processed ? 0 : this.pollIntervalMs))
         .catch((error) => {
           log.error({
             event: "poll-failed",
             workerId: this.workerId,
             error: error instanceof Error ? error.message : String(error),
           });
-        })
-        .finally(() => this.schedule(this.pollIntervalMs));
+          this.schedule(this.pollIntervalMs);
+        });
     }, delayMs);
   }
 }

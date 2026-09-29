@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MeetingMergedTranscriptSegment } from "./api/meetingRecordingApi";
+import type { MeetingMergedTranscriptSegment } from "./api/meetingLegacyRecordingApi";
 import {
   createMeetingTranscriptSearchIndex,
   filterMeetingTranscriptSegments,

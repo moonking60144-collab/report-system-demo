@@ -4,15 +4,15 @@ import {
   MEETING_RECORD_JSON_SCHEMA,
   type MeetingMinutesProviderInput,
   type MeetingRecord,
-  validateMeetingRecord,
 } from "./meetingMinutesSchema";
+import { validateMeetingMinutesProviderRecord } from "./meetingMinutesSources";
 import {
   MeetingMinutesProviderError,
   type MeetingMinutesProviderLike,
 } from "./meetingMinutesProvider";
 import {
   buildMeetingMinutesProviderInput,
-  MEETING_MINUTES_SYSTEM_INSTRUCTION,
+  buildMeetingMinutesSystemInstruction,
 } from "./meetingMinutesProviderPrompt";
 
 interface GoogleInteractionResponse {
@@ -48,12 +48,12 @@ function buildGoogleStructuredOutputSchema(value: unknown): unknown {
   }
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key !== "maxLength")
+      .filter(([key]) => !["minLength", "maxLength", "pattern", "maxItems"].includes(key))
       .map(([key, child]) => [key, buildGoogleStructuredOutputSchema(child)])
   );
 }
 
-// Interactions 目前不接受這組 schema 的 maxLength；array maxItems 仍交給模型與本地 validator 雙重約束。
+// 這組巢狀 schema 含 maxItems 時會被 Interactions 拒絕；長度與數量限制仍由本地 validator 執行。
 const GOOGLE_MEETING_RECORD_JSON_SCHEMA = buildGoogleStructuredOutputSchema(
   MEETING_RECORD_JSON_SCHEMA
 );
@@ -175,7 +175,7 @@ export class GoogleGeminiMeetingMinutesProvider implements MeetingMinutesProvide
         data: {
           model: this.model,
           store: false,
-          system_instruction: MEETING_MINUTES_SYSTEM_INSTRUCTION,
+          system_instruction: buildMeetingMinutesSystemInstruction(false, Boolean(input.human.revisionRequest)),
           input: [{ type: "text", text: serializedInput }],
           generation_config: { temperature: 0 },
           response_format: {
@@ -186,7 +186,7 @@ export class GoogleGeminiMeetingMinutesProvider implements MeetingMinutesProvide
         },
       });
       const parsed = JSON.parse(extractOutputText(response.data)) as unknown;
-      return validateMeetingRecord(parsed);
+      return validateMeetingMinutesProviderRecord(parsed, input);
     } catch (error) {
       throw mapGoogleError(error);
     }

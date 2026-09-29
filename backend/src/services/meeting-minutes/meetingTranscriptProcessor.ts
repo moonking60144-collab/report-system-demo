@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   mkdir,
+  readFile,
   readdir,
   rename,
   rm,
@@ -27,6 +28,12 @@ import {
   MeetingTranscriptionError,
   type MeetingTranscriptionProviderLike,
 } from "./meetingTranscriptionProvider";
+import { toPortableRelativePath } from "./meetingArtifactPath";
+import { meetingLiveTranscriptionRepository, type MeetingLiveTranscriptionRepository } from "../../storage/meeting-minutes/meetingLiveTranscriptionRepository";
+import { liveTranscriptionProfile } from "./meetingLiveTranscriptionService";
+import { scheduleMeetingTranscription } from "./meetingTranscriptionScheduler";
+import { MeetingPcmReader } from "./meetingPcmReader";
+import { LIVE_WINDOW_MS, liveWindow, positionWindowSegments, appendWindowSegments, pcmHash, pcmWave, wavePcm } from "./meetingLiveAudio";
 
 interface CommandResult {
   stdout: string;
@@ -86,6 +93,7 @@ export interface MeetingTranscriptProcessorLike {
 }
 
 interface MeetingTranscriptProcessorDeps {
+  liveRepository?: MeetingLiveTranscriptionRepository;
   repository?: MeetingTranscriptionJobRepository;
   provider?: MeetingTranscriptionProviderLike;
   processingDir?: string;
@@ -258,6 +266,7 @@ function formatTimestamp(milliseconds: number): string {
 }
 
 export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLike {
+  private readonly liveRepository;
   readonly enabled: boolean;
   readonly providerName: string;
   readonly model: string;
@@ -274,8 +283,9 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
   private readonly now: () => Date;
 
   constructor(deps: MeetingTranscriptProcessorDeps = {}) {
+    this.liveRepository = deps.liveRepository ?? meetingLiveTranscriptionRepository;
     this.repository = deps.repository ?? meetingTranscriptionJobRepository;
-    this.provider = deps.provider ?? meetingTranscriptionProvider;
+    this.provider = scheduleMeetingTranscription(deps.provider ?? meetingTranscriptionProvider);
     this.processingDir = path.resolve(deps.processingDir ?? env.MEETING_PROCESSING_DIR);
     this.ffmpegPath = deps.ffmpegPath ?? env.MEETING_FFMPEG_PATH;
     this.ffprobePath = deps.ffprobePath ?? env.MEETING_FFPROBE_PATH;
@@ -329,7 +339,9 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
       mkdir(outputDir, { recursive: true }),
     ]);
 
+    const pcmReaders: MeetingPcmReader[] = [];
     try {
+      const profile = liveTranscriptionProfile(this.provider, this.language);
       const sourceSegments = new Map<MeetingTranscriptSourceId, MeetingTranscriptSegment[]>();
       const sourceRank: Record<MeetingTranscriptSourceId, number> = {
         "room-mic": 0,
@@ -338,6 +350,10 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
       for (const track of [...input.tracks].sort(
         (left, right) => sourceRank[left.sourceId] - sourceRank[right.sourceId]
       )) {
+        const useLiveWindows = await this.liveRepository.hasReadySource(input.sessionId,track.sourceId,profile);
+        const chunkMs = useLiveWindows ? LIVE_WINDOW_MS : this.chunkMs;
+        const pcmReader = useLiveWindows ? await MeetingPcmReader.open(track.filePath) : null;
+        if (pcmReader) pcmReaders.push(pcmReader);
         await onPhase(
           track.sourceId === "room-mic"
             ? "transcribing-room-mic"
@@ -345,46 +361,55 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
         );
         const durationMs = await this.probeDurationMs(track.filePath, options.signal);
         const segments: MeetingTranscriptSegment[] = [];
-        const chunkCount = Math.max(1, Math.ceil(durationMs / this.chunkMs));
+        const chunkCount = Math.max(1, Math.ceil(durationMs / chunkMs));
         for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
           throwIfAborted(options.signal);
-          const startMs = chunkIndex * this.chunkMs;
-          const endMs = Math.min(durationMs, startMs + this.chunkMs);
+          const startMs = chunkIndex * chunkMs;
+          const endMs = Math.min(durationMs, startMs + chunkMs);
+          const window = useLiveWindows ? liveWindow(chunkIndex, durationMs) : { startMs,endMs,windowStartMs:startMs,windowEndMs:endMs };
           const chunkPath = path.join(
             chunksDir,
             `${track.sourceId}-${String(chunkIndex).padStart(5, "0")}.wav`
           );
-          await this.createChunk({
-            inputPath: track.filePath,
-            outputPath: chunkPath,
-            startMs,
-            endMs,
-            signal: options.signal,
-          });
-          const audioSha256 = await sha256File(chunkPath, options.signal);
+          let pcm: Buffer | null = null;
+          let wave: Buffer | null = null;
+          if (pcmReader) {
+            pcm = await pcmReader.readWindow(window.windowStartMs,window.windowEndMs);
+            wave = pcmWave(pcm);
+          } else {
+            await this.createChunk({ inputPath: track.filePath, outputPath: chunkPath,
+              startMs: window.windowStartMs, endMs: window.windowEndMs, signal: options.signal });
+          }
+          const audioSha256 = wave ? pcmHash(wave) : await sha256File(chunkPath, options.signal);
           const checkpoint = await this.repository.getChunkCheckpoint(
             input.jobId,
             track.sourceId,
             chunkIndex,
-            audioSha256
+            audioSha256,
+            profile
           );
           if (checkpoint) {
-            segments.push(...checkpoint.segments);
+            if (useLiveWindows) appendWindowSegments(segments,checkpoint.segments);
+            else segments.push(...checkpoint.segments);
             continue;
           }
-          const providerSegments = await this.provider.transcribe({
+          const cached = useLiveWindows ? await this.liveRepository.cached({ sessionId: input.sessionId,
+            sourceId: track.sourceId, chunkIndex, profile, audioHash: pcmHash(pcm ?? wavePcm(await readFile(chunkPath))) }) : null;
+          if (cached === null && wave) await writeFile(chunkPath,wave);
+          const providerSegments = cached ?? await this.provider.transcribe({
             audioPath: chunkPath,
             mimeType: "audio/wav",
             sourceId: track.sourceId,
             language: this.language,
-            durationMs: endMs - startMs,
+            durationMs: window.windowEndMs - window.windowStartMs,
             signal: options.signal,
           });
-          const normalized = providerSegments.map((segment, segmentIndex) => ({
+          const positioned = useLiveWindows ? positionWindowSegments(providerSegments,window) : providerSegments.map(segment => ({ ...segment,startMs:startMs+segment.startMs,endMs:startMs+segment.endMs }));
+          const normalized = positioned.map((segment, segmentIndex) => ({
             segmentId: `${track.sourceId}:${chunkIndex}:${segmentIndex}`,
             sourceId: track.sourceId,
-            startMs: startMs + segment.startMs,
-            endMs: startMs + segment.endMs,
+            startMs: segment.startMs,
+            endMs: segment.endMs,
             text: segment.text,
             speakerLabel: segment.speakerLabel
               ? `${track.sourceId}:chunk-${String(chunkIndex).padStart(5, "0")}:${segment.speakerLabel}`
@@ -399,10 +424,12 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
             startMs,
             endMs,
             audioSha256,
+            decoderProfile: profile,
             segments: normalized,
             now: this.now().toISOString(),
           });
-          segments.push(...normalized);
+          if (useLiveWindows) appendWindowSegments(segments,normalized);
+          else segments.push(...normalized);
         }
         sourceSegments.set(track.sourceId, segments);
       }
@@ -489,7 +516,7 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
           sessionId: input.sessionId,
           type: artifact.type,
           mimeType: artifact.mimeType,
-          relativePath: path.relative(this.processingDir, filePath),
+          relativePath: toPortableRelativePath(path.relative(this.processingDir, filePath)),
           sizeBytes: fileStat.size,
           sha256: await sha256File(filePath, options.signal),
           createdAt: generatedAt,
@@ -507,6 +534,7 @@ export class MeetingTranscriptProcessor implements MeetingTranscriptProcessorLik
         code
       );
     } finally {
+      await Promise.all(pcmReaders.map(reader => reader.close()));
       await rm(tempDir, { recursive: true, force: true });
     }
   }

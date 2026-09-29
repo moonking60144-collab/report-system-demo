@@ -1,7 +1,6 @@
 import axios from "axios";
 import { describe, expect, it } from "vitest";
 import {
-  isMeetingLibraryViewerAccessTerminalErrorCode,
   isMeetingSessionAccessTerminalErrorCode,
   persistMeetingSessionCapability,
   readMeetingSessionCapability,
@@ -81,15 +80,4 @@ describe("Meeting session access terminal errors", () => {
     expect(isMeetingSessionAccessTerminalErrorCode("TEMPORARY_NETWORK_ERROR")).toBe(false);
   });
 
-  it("錄音庫 viewer cookie 失效會要求回到存取碼入口", () => {
-    expect(
-      [
-        "MEETING_LIBRARY_VIEWER_REQUIRED",
-        "MEETING_LIBRARY_VIEWER_EXPIRED",
-        "MEETING_LIBRARY_ACCESS_NOT_CONFIGURED",
-      ].every(isMeetingLibraryViewerAccessTerminalErrorCode)
-    ).toBe(true);
-    expect(isMeetingLibraryViewerAccessTerminalErrorCode("TEMPORARY_NETWORK_ERROR"))
-      .toBe(false);
-  });
 });

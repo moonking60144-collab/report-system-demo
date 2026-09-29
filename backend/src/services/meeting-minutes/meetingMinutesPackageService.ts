@@ -24,6 +24,7 @@ import {
 } from "./meetingMinutesHtmlRenderer";
 import type { MeetingRecord } from "./meetingMinutesSchema";
 import type { MeetingMergedTranscriptDocument } from "./meetingTranscriptProcessor";
+import { toPortableRelativePath } from "./meetingArtifactPath";
 
 export interface MeetingMinutesPackageInput {
   jobId: string;
@@ -35,6 +36,7 @@ export interface MeetingMinutesPackageInput {
   transcript: MeetingMergedTranscriptDocument;
   transcriptText: string;
   playbackFilePath?: string;
+  playbackMimeType?: string;
 }
 
 export interface MeetingMinutesPackageResult {
@@ -69,18 +71,18 @@ export class MeetingMinutesPackageService {
   }
 
   async build(input: MeetingMinutesPackageInput): Promise<MeetingMinutesPackageResult> {
-    const relativeDirectory = path.join(
-      input.sessionId,
-      "minutes",
-      `v${input.versionNumber}`
+    const relativeDirectory = toPortableRelativePath(
+      path.join(input.sessionId, "minutes", `v${input.versionNumber}`)
     );
     const finalDirectory = this.resolvePath(relativeDirectory);
     const tempDirectory = this.resolvePath(
       path.join(".tmp", `${input.sessionId}-${input.versionId}-${this.idFactory()}`)
     );
     const sourceDirectory = path.join(tempDirectory, "source");
+    const audioName = input.playbackMimeType === "audio/webm" ? "audio-1.webm" : "audio-1.m4a";
+    const audioMimeType = input.playbackMimeType === "audio/webm" ? "audio/webm" : "audio/mp4";
     const audioFiles: MeetingMinutesAudioFile[] = input.playbackFilePath
-      ? [{ filename: "audio-1.m4a", label: "會議錄音" }]
+      ? [{ filename: audioName, label: "會議錄音" }]
       : [];
     const packageFiles: PackageFile[] = [
       { type: "minutes-html", filename: "index.html", mimeType: "text/html; charset=utf-8" },
@@ -103,8 +105,8 @@ export class MeetingMinutesPackageService {
     if (input.playbackFilePath) {
       packageFiles.push({
         type: "minutes-audio",
-        filename: "audio-1.m4a",
-        mimeType: "audio/mp4",
+        filename: audioName,
+        mimeType: audioMimeType,
       });
     }
 
@@ -133,7 +135,7 @@ export class MeetingMinutesPackageService {
       await writeFile(path.join(sourceDirectory, "transcript.txt"), input.transcriptText, "utf8");
       if (input.playbackFilePath) {
         await access(input.playbackFilePath);
-        await link(input.playbackFilePath, path.join(tempDirectory, "audio-1.m4a"));
+        await link(input.playbackFilePath, path.join(tempDirectory, audioName));
       }
 
       await mkdir(path.dirname(finalDirectory), { recursive: true });
@@ -152,7 +154,7 @@ export class MeetingMinutesPackageService {
           type: packageFile.type,
           filename: path.basename(packageFile.filename),
           mimeType: packageFile.mimeType,
-          relativePath: path.relative(this.processingDir, filePath),
+          relativePath: toPortableRelativePath(path.relative(this.processingDir, filePath)),
           sizeBytes: fileStat.size,
           sha256: await sha256File(filePath),
           createdAt: input.generatedAt,

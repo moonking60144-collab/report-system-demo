@@ -499,6 +499,10 @@ export const env = {
     "./.data/meeting-recordings",
   MEETING_RECORDING_OWNER_COOKIE_SECRET:
     process.env.MEETING_RECORDING_OWNER_COOKIE_SECRET?.trim() || "",
+  MEETING_ONE_SHOT_MAX_ACTIVE_PIPELINES: Math.min(
+    2,
+    Math.max(1, Math.trunc(readNumberEnv("MEETING_ONE_SHOT_MAX_ACTIVE_PIPELINES", 2)))
+  ),
   MEETING_LIBRARY_CODE_PEPPER:
     process.env.MEETING_LIBRARY_CODE_PEPPER?.trim() || "",
   MEETING_RECORDING_MAX_TOTAL_BYTES: Math.max(
@@ -517,6 +521,10 @@ export const env = {
     60 * 60 * 1000,
     Math.trunc(readNumberEnv("MEETING_RECORDING_STALE_SESSION_MS", 48 * 60 * 60 * 1000))
   ),
+  MEETING_RECORDER_LEASE_MS: Math.max(
+    30_000,
+    Math.trunc(readNumberEnv("MEETING_RECORDER_LEASE_MS", 90_000))
+  ),
   MEETING_RECORDING_CLEANUP_ENABLED: readBooleanEnv(
     "MEETING_RECORDING_CLEANUP_ENABLED",
     true
@@ -532,6 +540,8 @@ export const env = {
   MEETING_PROCESSING_DB_FILE:
     process.env.MEETING_PROCESSING_DB_FILE?.trim() ||
     "./.data/meeting-processing/metadata.v1.sqlite3",
+  MEETING_SUMMARY_ARCHIVE_MAX_BYTES: Math.max(1, Math.trunc(readNumberEnv("MEETING_SUMMARY_ARCHIVE_MAX_BYTES", 256 * 1024 * 1024))),
+  MEETING_ONE_SHOT_DELIVERY_MS: Math.max(60_000, Math.trunc(readNumberEnv("MEETING_ONE_SHOT_DELIVERY_MS", 24 * 60 * 60 * 1000))),
   MEETING_PROCESSING_DIR:
     process.env.MEETING_PROCESSING_DIR?.trim() ||
     "./.data/meeting-processing/artifacts",
@@ -587,6 +597,9 @@ export const env = {
   ).slice(0, 500),
   MEETING_TRANSCRIPTION_LANGUAGE:
     process.env.MEETING_TRANSCRIPTION_LANGUAGE?.trim() || "zh-TW",
+  MEETING_TRANSCRIPTION_BEAM_SIZE: Math.max(1, Math.trunc(readNumberEnv("MEETING_TRANSCRIPTION_BEAM_SIZE", 1))),
+  MEETING_LIVE_MAX_AUDIO_BYTES: Math.max(0, Math.trunc(readNumberEnv("MEETING_LIVE_MAX_AUDIO_BYTES", 256 * 1024 * 1024))),
+  MEETING_LIVE_MIN_FREE_BYTES: Math.max(0, Math.trunc(readNumberEnv("MEETING_LIVE_MIN_FREE_BYTES", 512 * 1024 * 1024))),
   MEETING_TRANSCRIPTION_CHUNK_MS: Math.min(
     30 * 60 * 1000,
     Math.max(
@@ -616,6 +629,16 @@ export const env = {
     )
   ),
   MEETING_MINUTES_PROVIDER: readMeetingMinutesProviderEnv(),
+  MEETING_MINUTES_MINIMAX_MODEL:
+    process.env.MEETING_MINUTES_MINIMAX_MODEL?.trim() || "MiniMax-M2.7-highspeed",
+  MEETING_MINUTES_MINIMAX_CONTEXT_WINDOW_TOKENS: Math.min(
+    2_000_000,
+    Math.max(32_768, Math.trunc(readNumberEnv("MEETING_MINUTES_MINIMAX_CONTEXT_WINDOW_TOKENS", 204_800)))
+  ),
+  MEETING_MINUTES_MINIMAX_CONTEXT_SAFETY_TOKENS: Math.min(
+    65_536,
+    Math.max(1_024, Math.trunc(readNumberEnv("MEETING_MINUTES_MINIMAX_CONTEXT_SAFETY_TOKENS", 8_192)))
+  ),
   MEETING_MINUTES_GOOGLE_API_KEY: readMeetingMinutesGoogleApiKey(),
   MEETING_MINUTES_GOOGLE_MODEL:
     process.env.MEETING_MINUTES_GOOGLE_MODEL?.trim() || "gemini-3.5-flash",

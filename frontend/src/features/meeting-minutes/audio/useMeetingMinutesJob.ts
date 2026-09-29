@@ -13,7 +13,7 @@ import {
   type MeetingMinutesJob,
   type MeetingMinutesVersion,
   type MeetingTranscriptionJob,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import {
   canRetryMeetingAiJob,
   createMeetingJobCursorStore,

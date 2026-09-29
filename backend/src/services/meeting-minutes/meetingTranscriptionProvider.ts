@@ -21,6 +21,8 @@ export interface MeetingTranscriptionProviderLike {
   readonly enabled: boolean;
   readonly name: string;
   readonly model: string;
+  readonly inferenceProfile?: string;
+  checkReady?(): Promise<boolean>;
   transcribe(
     input: MeetingTranscriptionProviderInput
   ): Promise<MeetingProviderTranscriptSegment[]>;

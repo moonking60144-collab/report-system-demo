@@ -37,6 +37,7 @@ async function createHarness(options: {
   now?: () => Date;
   providerMigrationRetryGraceMs?: number;
   retryDelayMs?: number;
+  transcriptTexts?: string[];
 } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "meeting-minutes-service-"));
   const repository = new MeetingMinutesJobRepository(path.join(root, "metadata.sqlite3"));
@@ -52,7 +53,7 @@ async function createHarness(options: {
       provider: "fake-transcription",
       model: "fake-model",
       generatedAt: "2026-07-16T01:00:00.000Z",
-      segments: [],
+      segments: (options.transcriptTexts ?? ["測試逐字稿"]).map((text, index) => ({ segmentId: `merged:${index}`, startMs: index * 1000, endMs: (index + 1) * 1000, text, primarySourceId: "room-mic", sourceSegmentIds: [`room-mic:${index}`], speakerLabel: null })),
     })
   );
   await writeFile(textPath, "[00:00:00] 測試逐字稿\n");
@@ -127,11 +128,13 @@ async function createHarness(options: {
       },
     ],
   };
+  let providerCalls = 0;
   const provider: MeetingMinutesProviderLike = {
     enabled: options.providerEnabled ?? true,
     name: "fake-minutes",
     model: "fake-model",
     async summarize() {
+      providerCalls += 1;
       if (options.failProvider) {
         throw Object.assign(new Error("provider failure"), {
           code: options.providerErrorCode ?? "MINUTES_TIMEOUT",
@@ -178,6 +181,7 @@ async function createHarness(options: {
     repository,
     service,
     transcriptionJob,
+    get providerCalls() { return providerCalls; },
     async close() {
       await service.close();
       await rm(root, { recursive: true, force: true });
@@ -194,6 +198,25 @@ const humanInput = {
   termCorrections: "",
   otherNotes: "",
 };
+
+test("空白逐字稿不呼叫 AI、不產生版本，保留成功轉錄與錄音", async () => {
+  for (const transcriptTexts of [[], ["", " \t\n", "\u3000"]]) {
+    const harness = await createHarness({ transcriptTexts });
+    try {
+      await harness.service.enqueue({ sessionId: "session-1", ownerId: "owner-1", clientRequestKey: "silent", humanInput });
+      const claimed = await harness.repository.claimNext({ workerId: "worker-1", now: "2026-07-16T02:01:00.000Z", leaseExpiresAt: "2026-07-16T02:11:00.000Z" });
+      assert.ok(claimed);
+      const result = await harness.service.processClaimedJob(claimed, "worker-1");
+      assert.equal(harness.providerCalls, 0, "SILENCE_MUST_NOT_CALL_AI");
+      assert.equal(result.errorCode, "MEETING_MINUTES_NO_SPEECH");
+      assert.equal(result.status, "failed");
+      assert.match(result.errorMessage ?? "", /未辨識到語音/);
+      assert.equal(result.version, null);
+      assert.equal(harness.transcriptionJob.status, "ready");
+      assert.equal((await harness.repository.listVersionsForOwner("session-1", "owner-1")).length, 0);
+    } finally { await harness.close(); }
+  }
+});
 
 test("ready transcript enqueue 冪等，worker 產生 version/package 且人工資料優先", async () => {
   const harness = await createHarness();

@@ -36,6 +36,7 @@ interface MeetingRecordingTrackManifest {
 }
 
 interface MeetingRecordingManifest {
+  deliveryMode?: "one-shot";
   schemaVersion: 1 | 2 | 3 | 4;
   sessionId: string;
   ownerId: string | null;
@@ -62,6 +63,7 @@ export interface MeetingRecordingTrack {
 }
 
 export interface MeetingRecordingSession {
+  deliveryMode?: "one-shot";
   sessionId: string;
   title: string;
   status: MeetingRecordingStatus;
@@ -71,6 +73,7 @@ export interface MeetingRecordingSession {
   durationMs: number | null;
   totalSizeBytes: number;
   tracks: MeetingRecordingTrack[];
+  recoveryUntil?: string | null;
 }
 
 export interface MeetingRecordingOwnerSummary {
@@ -85,6 +88,8 @@ export interface MeetingRecordingSessionPage {
   nextCursor: string | null;
   hasMore: boolean;
 }
+
+
 
 export interface MeetingRecordingSessionCapabilityAccess {
   ownerId: string;
@@ -164,6 +169,7 @@ function extensionForMimeType(mimeType: string): "webm" | "ogg" {
 
 function toPublicSession(manifest: MeetingRecordingManifest): MeetingRecordingSession {
   return {
+    ...(manifest.deliveryMode ? { deliveryMode: manifest.deliveryMode } : {}),
     sessionId: manifest.sessionId,
     title: manifest.title,
     status: manifest.status,
@@ -182,38 +188,22 @@ function toPublicSession(manifest: MeetingRecordingManifest): MeetingRecordingSe
   };
 }
 
+
+
 function encodeSessionCursor(session: Pick<MeetingRecordingManifest, "createdAt" | "sessionId">): string {
-  return Buffer.from(
-    JSON.stringify({ v: 1, createdAt: session.createdAt, sessionId: session.sessionId }),
-    "utf8"
-  ).toString("base64url");
+  return Buffer.from(JSON.stringify({ v: 1, createdAt: session.createdAt, sessionId: session.sessionId }), "utf8").toString("base64url");
 }
 
-function decodeSessionCursor(value: string | null | undefined): {
-  createdAt: string;
-  sessionId: string;
-} | null {
+function decodeSessionCursor(value: string | null | undefined): { createdAt: string; sessionId: string } | null {
   if (!value) return null;
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
-      v?: unknown;
-      createdAt?: unknown;
-      sessionId?: unknown;
-    };
-    if (
-      parsed.v !== 1 ||
-      typeof parsed.createdAt !== "string" ||
-      typeof parsed.sessionId !== "string" ||
-      !SESSION_ID_PATTERN.test(parsed.sessionId)
-    ) {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (parsed.v !== 1 || typeof parsed.createdAt !== "string" || typeof parsed.sessionId !== "string" || !SESSION_ID_PATTERN.test(parsed.sessionId)) {
       throw new Error("invalid recording cursor");
     }
     return { createdAt: parsed.createdAt, sessionId: parsed.sessionId };
   } catch {
-    throw new ValidationError(
-      "錄音清單游標不合法。",
-      "MEETING_RECORDING_CURSOR_INVALID"
-    );
+    throw new ValidationError("錄音清單游標不合法。", "MEETING_RECORDING_CURSOR_INVALID");
   }
 }
 
@@ -256,6 +246,7 @@ export class MeetingRecordingStorageService {
   }
 
   async createSession(input: {
+    deliveryMode?: "one-shot";
     ownerId: string;
     title?: string;
     sourceIds: string[];
@@ -344,6 +335,7 @@ export class MeetingRecordingStorageService {
       this.assertSessionId(sessionId);
       const timestamp = this.now().toISOString();
       const manifest: MeetingRecordingManifest = {
+        ...(input.deliveryMode ? { deliveryMode: input.deliveryMode } : {}),
         schemaVersion: 4,
         sessionId,
         ownerId: input.ownerId,
@@ -503,6 +495,49 @@ export class MeetingRecordingStorageService {
     });
   }
 
+  async readStreamingAudio(sessionId: string, ownerId: string, sourceId: MeetingAudioSourceId, offset: number): Promise<{ body: Buffer; eof: boolean }> {
+    this.assertSessionId(sessionId);
+    this.assertOwnerId(ownerId);
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid streaming audio offset");
+    const read = async (): Promise<{ body: Buffer; eof: boolean }> => {
+      const manifest = await this.readManifest(sessionId);
+      this.assertOwner(manifest, ownerId);
+      const track = manifest.tracks.find(item => item.sourceId === sourceId);
+      if (!track) throw new Error("Streaming source missing");
+      let filePath: string | null = null;
+      let position = offset;
+      let available = 0;
+      if (manifest.status === "finalized" && track.outputFile) {
+        filePath = path.join(this.sessionDir(sessionId), track.outputFile);
+        available = track.sizeBytes - offset;
+      } else {
+        for (let index = 0; index < track.chunks.length; index++) {
+          const chunk = track.chunks[index];
+          if (chunk.sequence !== index) break;
+          if (position < chunk.sizeBytes) {
+            filePath = this.chunkPath(sessionId, sourceId, index);
+            available = chunk.sizeBytes - position;
+            break;
+          }
+          position -= chunk.sizeBytes;
+        }
+      }
+      if (!filePath || available <= 0) return { body: Buffer.alloc(0), eof: manifest.status === "finalized" };
+      const handle = await open(filePath, "r");
+      try {
+        const buffer = Buffer.alloc(Math.min(256 * 1024, available));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        return { body: buffer.subarray(0, bytesRead), eof: false };
+      } finally { await handle.close(); }
+    };
+    try { return await read(); }
+    catch (error) {
+      // Finalize publishes the identical concatenated bytes before deleting source chunks.
+      if (!isErrno(error, "ENOENT")) throw error;
+      return read();
+    }
+  }
+
   async finalizeSession(input: {
     ownerId: string;
     sessionId: string;
@@ -657,7 +692,32 @@ export class MeetingRecordingStorageService {
     this.assertSessionId(sessionId);
     const manifest = await this.readManifest(sessionId);
     this.assertOwner(manifest, ownerId);
-    return toPublicSession(manifest);
+    return {
+      ...toPublicSession(manifest),
+      recoveryUntil: manifest.status === "finalized" ? null : new Date(Math.min(
+        Date.parse(manifest.updatedAt) + this.staleSessionMs,
+        manifest.sessionCapabilityExpiresAt ? Date.parse(manifest.sessionCapabilityExpiresAt) : Infinity
+      )).toISOString(),
+    };
+  }
+
+  async removeCompletedOneShot(sessionId: string, ownerId: string): Promise<boolean> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    this.assertOwnerId(ownerId);
+    return this.runSessionExclusive(sessionId, async () => {
+      let manifest: MeetingRecordingManifest;
+      try { manifest = await this.readManifest(sessionId); }
+      catch (error) {
+        if (error instanceof HttpError && error.code === "MEETING_RECORDING_NOT_FOUND") return true;
+        throw error;
+      }
+      this.assertOwner(manifest, ownerId);
+      if (manifest.deliveryMode !== "one-shot" || manifest.status !== "finalized") {
+        throw new HttpError(409, "不能以一次性政策清理這筆錄音。", "MEETING_ONE_SHOT_CLEANUP_INELIGIBLE");
+      }
+      return this.runCapacityExclusive(() => this.removeSessionLocked(manifest, undefined, { allowCurrentSessionMutation: true }));
+    });
   }
 
   async resolveSessionCapabilityOwner(
@@ -711,52 +771,36 @@ export class MeetingRecordingStorageService {
     };
   }
 
+
   async listSessions(ownerId: string, limit = 20): Promise<MeetingRecordingSession[]> {
     return (await this.listSessionsPage(ownerId, { limit })).items;
   }
 
-  async listSessionsPage(
-    ownerId: string,
-    options: { limit?: number; cursor?: string | null } = {}
-  ): Promise<MeetingRecordingSessionPage> {
+  async listSessionsPage(ownerId: string, options: { limit?: number; cursor?: string | null } = {}): Promise<MeetingRecordingSessionPage> {
     await this.initialize();
     this.assertOwnerId(ownerId);
-    const normalizedLimit = Math.min(100, Math.max(1, Math.trunc(options.limit ?? 50)));
+    const limit = Math.min(100, Math.max(1, Math.trunc(options.limit ?? 50)));
     const cursor = decodeSessionCursor(options.cursor);
-    const manifests = await this.readAllManifests();
-    const ordered = manifests
-      .filter((manifest) => manifest.ownerId === ownerId)
-      .sort(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) ||
-          left.sessionId.localeCompare(right.sessionId)
-      )
-      .filter(
-        (manifest) =>
-          !cursor ||
-          manifest.createdAt.localeCompare(cursor.createdAt) < 0 ||
-          (manifest.createdAt === cursor.createdAt &&
-            manifest.sessionId.localeCompare(cursor.sessionId) > 0)
-      );
-    const page = ordered.slice(0, normalizedLimit + 1);
-    const hasMore = page.length > normalizedLimit;
-    const visible = page.slice(0, normalizedLimit);
+    const ordered = (await this.readAllManifests())
+      .filter((manifest) => manifest.ownerId === ownerId && manifest.deliveryMode !== "one-shot")
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.sessionId.localeCompare(right.sessionId))
+      .filter((manifest) => !cursor || manifest.createdAt < cursor.createdAt ||
+        (manifest.createdAt === cursor.createdAt && manifest.sessionId > cursor.sessionId));
+    const page = ordered.slice(0, limit + 1);
+    const hasMore = page.length > limit;
+    const visible = page.slice(0, limit);
     return {
       items: visible.map(toPublicSession),
-      nextCursor:
-        hasMore && visible.length > 0
-          ? encodeSessionCursor(visible[visible.length - 1]!)
-          : null,
+      nextCursor: hasMore && visible.length > 0 ? encodeSessionCursor(visible[visible.length - 1]!) : null,
       hasMore,
     };
   }
 
   async summarizeSessionsByOwner(): Promise<Map<string, MeetingRecordingOwnerSummary>> {
     await this.initialize();
-    const manifests = await this.readAllManifests();
     const summaries = new Map<string, MeetingRecordingOwnerSummary>();
-    for (const manifest of manifests) {
-      if (!manifest.ownerId) continue;
+    for (const manifest of await this.readAllManifests()) {
+      if (!manifest.ownerId || manifest.deliveryMode === "one-shot") continue;
       const current = summaries.get(manifest.ownerId) ?? {
         ownerId: manifest.ownerId,
         recordingCount: 0,
@@ -766,16 +810,30 @@ export class MeetingRecordingStorageService {
       const session = toPublicSession(manifest);
       current.recordingCount += 1;
       current.recordingTitles.push(session.title);
-      if (
-        !current.latestRecording ||
-        session.createdAt.localeCompare(current.latestRecording.createdAt) > 0
-      ) {
+      if (!current.latestRecording || session.createdAt > current.latestRecording.createdAt) {
         current.latestRecording = session;
       }
       summaries.set(manifest.ownerId, current);
     }
     return summaries;
   }
+
+  async listLegacySessionsForAdmin(limit: number, offset: number, query: string): Promise<MeetingRecordingSession[]> {
+    await this.initialize();
+    return (await this.readAllManifests()).filter(item => item.deliveryMode !== "one-shot" && item.title.toLowerCase().includes(query.toLowerCase()))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.sessionId.localeCompare(b.sessionId))
+      .slice(offset, offset + limit).map(toPublicSession);
+  }
+
+  async getLegacySessionForAdmin(sessionId: string): Promise<{ ownerId: string; session: MeetingRecordingSession }> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    const manifest = await this.readManifest(sessionId);
+    if (manifest.deliveryMode === "one-shot" || !manifest.ownerId) throw new HttpError(404, "找不到舊版錄音。", "MEETING_RECORDING_NOT_FOUND");
+    return { ownerId: manifest.ownerId, session: toPublicSession(manifest) };
+  }
+
+
 
   async resolveTrack(sessionId: string, sourceId: string, ownerId: string): Promise<{
     filePath: string;

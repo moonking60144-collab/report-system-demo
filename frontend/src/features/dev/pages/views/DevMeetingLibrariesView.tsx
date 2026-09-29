@@ -16,7 +16,7 @@ import {
   openMeetingAdminLibrary,
   rotateMeetingAdminLibraryCode,
   type MeetingAdminLibrary,
-} from "../../../meeting-minutes/api/meetingLibraryAdminApi";
+} from "../../../meeting-minutes/api/meetingLegacyLibraryAdminApi";
 import { resolveMeetingRecordingApiError } from "../../../meeting-minutes/api/meetingRecordingApi";
 import { MEETING_LIBRARY_ROUTE } from "../../../meeting-minutes/routes";
 import { useDevContext } from "../../layout/devContext";

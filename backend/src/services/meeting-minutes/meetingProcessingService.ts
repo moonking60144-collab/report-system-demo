@@ -131,7 +131,11 @@ export class MeetingProcessingService {
     return this.repository.getJobBySessionForOwner(sessionId, ownerId);
   }
 
-  async retry(jobId: string, ownerId: string): Promise<MeetingProcessingJobRecord> {
+  listJobStatesForSessions(sessionIds: string[]): Promise<MeetingProcessingJobRecord[]> {
+    return this.repository.listJobStatesBySessionIds(sessionIds);
+  }
+
+  async retry(jobId: string, ownerId: string, force = false): Promise<MeetingProcessingJobRecord> {
     const initialJob = await this.repository.getJobForOwner(jobId, ownerId);
     if (!initialJob) {
       throw new HttpError(404, "找不到後處理任務。", "MEETING_PROCESSING_JOB_NOT_FOUND");
@@ -145,7 +149,7 @@ export class MeetingProcessingService {
       if (job.status !== "failed") {
         throw new HttpError(409, "只有失敗的後處理任務可以重試。", "MEETING_PROCESSING_RETRY_INVALID");
       }
-      if (job.attemptCount >= job.maxAttempts) {
+      if (!force && job.attemptCount >= job.maxAttempts) {
         throw new HttpError(409, "後處理任務已達重試上限。", "MEETING_PROCESSING_RETRY_EXHAUSTED");
       }
       await this.acquireProcessingLock({
@@ -153,7 +157,7 @@ export class MeetingProcessingService {
         ownerId,
         jobId,
       });
-      const retried = await this.repository.retry(jobId, ownerId, this.now().toISOString());
+      const retried = await this.repository.retry(jobId, ownerId, this.now().toISOString(), force);
       if (!retried) {
         const current = await this.repository.getJobForOwner(jobId, ownerId);
         if (
@@ -168,6 +172,10 @@ export class MeetingProcessingService {
       result = retried;
     });
     return result;
+  }
+
+  cancelPendingForSession(sessionId: string): Promise<boolean> {
+    return this.repository.cancelPendingForSession(sessionId, this.now().toISOString());
   }
 
   async processClaimedJob(

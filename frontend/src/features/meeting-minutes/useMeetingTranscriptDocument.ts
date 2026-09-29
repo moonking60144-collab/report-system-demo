@@ -8,7 +8,7 @@ import {
   resolveMeetingRecordingApiErrorCode,
   type MeetingMergedTranscriptDocument,
   type MeetingTranscriptionArtifact,
-} from "./api/meetingRecordingApi";
+} from "./api/meetingLegacyRecordingApi";
 
 type TranscriptArtifactIdentity = Pick<
   MeetingTranscriptionArtifact,

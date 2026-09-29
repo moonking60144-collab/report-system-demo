@@ -186,6 +186,8 @@ function devToolIcon(id: string) {
       return <FileTextOutlined />;
     case "meeting-libraries":
       return <AudioOutlined />;
+    case "meeting-summaries":
+      return <FileTextOutlined />;
     case "entities":
       return <DatabaseOutlined />;
     case "matrix":

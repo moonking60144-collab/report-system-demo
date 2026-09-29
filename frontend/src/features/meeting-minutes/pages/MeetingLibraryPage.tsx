@@ -31,12 +31,12 @@ import {
   type MeetingLibraryInfo,
   type MeetingLibraryRecordingDetail,
   type MeetingRecordingSession,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import { MeetingTranscriptDialog } from "../components/MeetingTranscriptDialog";
 import { MEETING_AUDIO_CHECK_ROUTE } from "../routes";
 import { useMeetingTranscriptDocument } from "../useMeetingTranscriptDocument";
 import { formatMeetingLibraryCodeInput } from "../utils/meetingLibraryCode";
-import "../styles/meeting-audio-check.css";
+import "../styles/meeting-demo-library.css";
 
 type LibraryPagePhase = "checking" | "entry" | "ready";
 

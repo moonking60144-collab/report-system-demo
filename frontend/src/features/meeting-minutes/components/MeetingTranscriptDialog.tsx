@@ -10,7 +10,7 @@ import { useTranslation } from "react-i18next";
 import {
   resolveMeetingRecordingApiError,
   type MeetingMergedTranscriptDocument,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import { useMeetingTranscriptSearch } from "../useMeetingTranscriptSearch";
 
 function formatTranscriptTimestamp(milliseconds: number): string {

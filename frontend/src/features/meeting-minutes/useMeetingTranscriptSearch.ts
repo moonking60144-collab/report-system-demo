@@ -1,5 +1,5 @@
 import { useDeferredValue, useMemo, useState } from "react";
-import type { MeetingMergedTranscriptSegment } from "./api/meetingRecordingApi";
+import type { MeetingMergedTranscriptSegment } from "./api/meetingLegacyRecordingApi";
 
 export const MEETING_TRANSCRIPT_INITIAL_SEGMENT_LIMIT = 200;
 export const MEETING_TRANSCRIPT_SEGMENT_PAGE_SIZE = 200;

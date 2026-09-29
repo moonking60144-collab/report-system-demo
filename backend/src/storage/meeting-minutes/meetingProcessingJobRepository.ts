@@ -217,6 +217,16 @@ export class MeetingProcessingJobRepository {
     return row ? this.attachArtifacts(mapJob(row)) : null;
   }
 
+  async listJobStatesBySessionIds(sessionIds: string[]): Promise<MeetingProcessingJobRecord[]> {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = await (await this.getDb()).all<JobRow[]>(
+      `SELECT * FROM meeting_processing_jobs WHERE session_id IN (${placeholders})`,
+      ...sessionIds
+    );
+    return rows.map(row => mapJob(row));
+  }
+
   async listJobsForOwner(ownerId: string, limit = 20): Promise<MeetingProcessingJobRecord[]> {
     const db = await this.getDb();
     const rows = await db.all<JobRow[]>(
@@ -511,20 +521,23 @@ export class MeetingProcessingJobRepository {
     return row ? this.attachArtifacts(mapJob(row)) : null;
   }
 
-  async retry(jobId: string, ownerId: string, now: string): Promise<MeetingProcessingJobRecord | null> {
+  async retry(jobId: string, ownerId: string, now: string, force = false): Promise<MeetingProcessingJobRecord | null> {
     const db = await this.getDb();
     await db.exec("BEGIN IMMEDIATE");
     try {
       const row = await db.get<JobRow>(
         `UPDATE meeting_processing_jobs
-         SET status = 'pending', phase = 'queued', error_code = NULL, error_message = NULL,
+         SET status = 'pending', phase = 'queued', attempt_count = CASE WHEN ? THEN 0 ELSE attempt_count END,
+             error_code = NULL, error_message = NULL,
              started_at = NULL, updated_at = ?, completed_at = NULL,
              worker_id = NULL, lease_expires_at = NULL
-         WHERE job_id = ? AND owner_id = ? AND status = 'failed' AND attempt_count < max_attempts
+         WHERE job_id = ? AND owner_id = ? AND status = 'failed' AND (? OR attempt_count < max_attempts)
          RETURNING *`,
+        force ? 1 : 0,
         now,
         jobId,
-        ownerId
+        ownerId,
+        force ? 1 : 0
       );
       if (!row) {
         await db.exec("ROLLBACK");
@@ -537,6 +550,14 @@ export class MeetingProcessingJobRepository {
       await db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  async cancelPendingForSession(sessionId: string, now: string): Promise<boolean> {
+    const result = await (await this.getDb()).run(`UPDATE meeting_processing_jobs
+      SET status='failed', attempt_count=max_attempts, error_code='MEETING_CANCELLED',
+        error_message=NULL, updated_at=?, completed_at=?, worker_id=NULL, lease_expires_at=NULL
+      WHERE session_id=? AND status='pending'`, now, now, sessionId);
+    return (result.changes ?? 0) > 0;
   }
 
   async requeueRetryableFailed(now: string, retryBefore: string): Promise<string[]> {

@@ -9,7 +9,7 @@ import {
   retryMeetingProcessingJob,
   type MeetingProcessingJob,
   type MeetingRecordingSession,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import {
   createMeetingJobCursorStore,
   getMeetingBrowserStorage,

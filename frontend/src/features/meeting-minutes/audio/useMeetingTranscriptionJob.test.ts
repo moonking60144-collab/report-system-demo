@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MeetingTranscriptionJob } from "../api/meetingRecordingApi";
+import type { MeetingTranscriptionJob } from "../api/meetingLegacyRecordingApi";
 import { canRetryMeetingAiJob } from "./meetingJobTracking";
 import {
   clearMeetingTranscriptionCursor,

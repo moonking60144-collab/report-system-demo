@@ -11,7 +11,7 @@ import {
   type MeetingMergedTranscriptDocument,
   type MeetingProcessingJob,
   type MeetingTranscriptionJob,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import {
   canRetryMeetingAiJob,
   createMeetingJobCursorStore,

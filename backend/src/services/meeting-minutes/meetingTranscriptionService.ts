@@ -159,6 +159,10 @@ export class MeetingTranscriptionService {
     return this.repository.getJobBySessionForOwner(sessionId, ownerId);
   }
 
+  listJobStatesForSessions(sessionIds: string[]): Promise<MeetingTranscriptionJobRecord[]> {
+    return this.repository.listJobStatesBySessionIds(sessionIds);
+  }
+
   listActiveSessionIds(): Promise<string[]> {
     const providerChangedAfter = new Date(
       this.now().getTime() - this.providerMigrationRetryGraceMs
@@ -170,7 +174,7 @@ export class MeetingTranscriptionService {
     });
   }
 
-  async retry(jobId: string, ownerId: string): Promise<MeetingTranscriptionJobRecord> {
+  async retry(jobId: string, ownerId: string, force = false): Promise<MeetingTranscriptionJobRecord> {
     this.assertAvailable();
     const now = this.now();
     const nowIso = now.toISOString();
@@ -203,22 +207,12 @@ export class MeetingTranscriptionService {
         "MEETING_TRANSCRIPTION_RETRY_INVALID"
       );
     }
-    if (job.errorCode === "MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED") {
-      throw new HttpError(
-        409,
-        "逐字稿 provider 升級重送期限已過，請重新建立逐字稿任務。",
-        "MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED"
-      );
+    if (!force && job.errorCode === "MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED") {
+      throw new HttpError(409, "逐字稿 provider 升級重送期限已過，請重新建立逐字稿任務。", "MEETING_TRANSCRIPTION_PROVIDER_MIGRATION_EXPIRED");
     }
-    const providerChanged =
-      job.provider !== this.transcriptProcessor.providerName ||
-      job.model !== this.transcriptProcessor.model;
-    if (!providerChanged && job.attemptCount >= job.maxAttempts) {
-      throw new HttpError(
-        409,
-        "逐字稿任務已達重試上限。",
-        "MEETING_TRANSCRIPTION_RETRY_EXHAUSTED"
-      );
+    const providerChanged = job.provider !== this.transcriptProcessor.providerName || job.model !== this.transcriptProcessor.model;
+    if (!force && !providerChanged && job.attemptCount >= job.maxAttempts) {
+      throw new HttpError(409, "逐字稿任務已達重試上限。", "MEETING_TRANSCRIPTION_RETRY_EXHAUSTED");
     }
     const retried = await this.repository.retry({
       jobId,
@@ -227,6 +221,7 @@ export class MeetingTranscriptionService {
       model: this.transcriptProcessor.model,
       now: nowIso,
       providerChangedAfter,
+      force,
     });
     if (!retried) {
       throw new HttpError(
@@ -236,6 +231,10 @@ export class MeetingTranscriptionService {
       );
     }
     return retried;
+  }
+
+  cancelPendingForSession(sessionId: string): Promise<boolean> {
+    return this.repository.cancelPendingForSession(sessionId, this.now().toISOString());
   }
 
   async processClaimedJob(

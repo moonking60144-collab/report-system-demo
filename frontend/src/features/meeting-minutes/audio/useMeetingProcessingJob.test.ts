@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MeetingProcessingJob } from "../api/meetingRecordingApi";
+import type { MeetingProcessingJob } from "../api/meetingLegacyRecordingApi";
 import {
   clearMeetingProcessingCursor,
   parseMeetingProcessingCursor,

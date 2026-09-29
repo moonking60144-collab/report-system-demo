@@ -59,6 +59,7 @@ function inputSha256(input: {
   transcriptionJobId: string;
   transcriptSha256: string;
   human: MeetingMinutesHumanInput;
+  baseVersionId?: string;
 }): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
@@ -110,6 +111,7 @@ export class MeetingMinutesService {
     ownerId: string;
     clientRequestKey: string;
     humanInput: Partial<MeetingMinutesHumanInput>;
+    deliveryRevision?: { baseVersionId: string; maxPending: number };
   }): Promise<{ job: MeetingMinutesJobRecord; created: boolean }> {
     this.assertAvailable();
     const clientRequestKey = input.clientRequestKey.trim();
@@ -140,6 +142,7 @@ export class MeetingMinutesService {
       transcriptionJobId: transcriptionJob.jobId,
       transcriptSha256: transcriptArtifact.sha256,
       human,
+      baseVersionId: input.deliveryRevision?.baseVersionId,
     });
     let result!: { job: MeetingMinutesJobRecord; created: boolean };
     await this.enqueueQueue.enqueue(input.sessionId, async () => {
@@ -174,6 +177,7 @@ export class MeetingMinutesService {
         model: this.provider.model,
         maxAttempts: this.maxAttempts,
         now: this.now().toISOString(),
+        deliveryRevision: input.deliveryRevision,
       });
     });
     return result;
@@ -181,6 +185,14 @@ export class MeetingMinutesService {
 
   getJob(jobId: string, ownerId: string): Promise<MeetingMinutesJobRecord | null> {
     return this.repository.getJobForOwner(jobId, ownerId);
+  }
+
+  getJobByRequestKey(sessionId: string, ownerId: string, key: string): Promise<MeetingMinutesJobRecord | null> {
+    return this.repository.getJobByRequestKeyForOwner(sessionId, ownerId, key);
+  }
+
+  listJobStatesForSessions(sessionIds: string[]): Promise<MeetingMinutesJobRecord[]> {
+    return this.repository.listJobStatesBySessionIds(sessionIds);
   }
 
   listVersions(
@@ -206,7 +218,7 @@ export class MeetingMinutesService {
     });
   }
 
-  async retry(jobId: string, ownerId: string): Promise<MeetingMinutesJobRecord> {
+  async retry(jobId: string, ownerId: string, force = false): Promise<MeetingMinutesJobRecord> {
     this.assertAvailable();
     const now = this.now();
     const nowIso = now.toISOString();
@@ -235,21 +247,12 @@ export class MeetingMinutesService {
         "MEETING_MINUTES_RETRY_INVALID"
       );
     }
-    if (job.errorCode === "MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED") {
-      throw new HttpError(
-        409,
-        "會議紀錄 provider 升級重送期限已過，請重新產生會議紀錄任務。",
-        "MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED"
-      );
+    if (!force && job.errorCode === "MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED") {
+      throw new HttpError(409, "會議紀錄 provider 升級重送期限已過，請重新產生會議紀錄任務。", "MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED");
     }
-    const providerChanged =
-      job.provider !== this.provider.name || job.model !== this.provider.model;
-    if (!providerChanged && job.attemptCount >= job.maxAttempts) {
-      throw new HttpError(
-        409,
-        "會議紀錄任務已達重試上限。",
-        "MEETING_MINUTES_RETRY_EXHAUSTED"
-      );
+    const providerChanged = job.provider !== this.provider.name || job.model !== this.provider.model;
+    if (!force && !providerChanged && job.attemptCount >= job.maxAttempts) {
+      throw new HttpError(409, "會議紀錄任務已達重試上限。", "MEETING_MINUTES_RETRY_EXHAUSTED");
     }
     const retried = await this.repository.retry({
       jobId,
@@ -258,6 +261,7 @@ export class MeetingMinutesService {
       model: this.provider.model,
       now: nowIso,
       providerChangedAfter,
+      force,
     });
     if (!retried) {
       throw new HttpError(
@@ -267,6 +271,10 @@ export class MeetingMinutesService {
       );
     }
     return retried;
+  }
+
+  cancelPendingForSession(sessionId: string): Promise<boolean> {
+    return this.repository.cancelPendingForSession(sessionId, this.now().toISOString());
   }
 
   async processClaimedJob(
@@ -316,6 +324,11 @@ export class MeetingMinutesService {
           code: "MEETING_MINUTES_TRANSCRIPT_SESSION_MISMATCH",
         });
       }
+      if (!transcript.segments.some((segment) => segment.text.trim())) {
+        throw Object.assign(new Error("未辨識到語音，未產生摘要。請確認麥克風後重新錄音。"), {
+          code: "MEETING_MINUTES_NO_SPEECH",
+        });
+      }
       const transcriptText = await readFile(textFile.filePath, "utf8");
       const providerRecord = await this.provider.summarize(
         { transcript, human: job.input },
@@ -351,6 +364,7 @@ export class MeetingMinutesService {
         transcript,
         transcriptText,
         playbackFilePath: playback?.filePath,
+        playbackMimeType: playbackArtifact?.mimeType,
       });
       terminalJob = await this.repository.markReady({
         jobId: job.jobId,

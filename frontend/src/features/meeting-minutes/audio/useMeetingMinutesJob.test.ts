@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   MeetingMinutesHumanInput,
   MeetingMinutesJob,
-} from "../api/meetingRecordingApi";
+} from "../api/meetingLegacyRecordingApi";
 import {
   clearMeetingMinutesCursor,
   createMeetingMinutesEnqueueGate,

@@ -14,6 +14,7 @@ import {
   validateMeetingRecord,
 } from "../../services/meeting-minutes/meetingMinutesSchema";
 import { MEETING_MINUTES_AUTO_RETRY_ERROR_CODES } from "../../services/meeting-minutes/meetingMinutesRetryPolicy";
+import { HttpError } from "../../utils/httpError";
 
 export const MEETING_MINUTES_JOB_STATUSES = ["pending", "running", "ready", "failed"] as const;
 export type MeetingMinutesJobStatus = (typeof MEETING_MINUTES_JOB_STATUSES)[number];
@@ -60,6 +61,7 @@ export interface MeetingMinutesJobRecord {
   sessionId: string;
   ownerId: string;
   clientRequestKey: string;
+  revisionBaseVersionId?: string | null;
   inputSha256: string;
   input: MeetingMinutesHumanInput;
   provider: string;
@@ -83,6 +85,7 @@ interface JobRow {
   session_id: string;
   owner_id: string;
   client_request_key: string;
+  revision_base_version_id: string | null;
   input_sha256: string;
   input_json: string;
   provider: string;
@@ -158,6 +161,7 @@ function mapJob(row: JobRow): Omit<MeetingMinutesJobRecord, "version"> {
     sessionId: row.session_id,
     ownerId: row.owner_id,
     clientRequestKey: row.client_request_key,
+    revisionBaseVersionId: row.revision_base_version_id,
     inputSha256: row.input_sha256,
     input: normalizeMeetingMinutesHumanInput(
       parseJson(row.input_json, "input") as Partial<MeetingMinutesHumanInput>
@@ -179,6 +183,7 @@ function mapJob(row: JobRow): Omit<MeetingMinutesJobRecord, "version"> {
 
 export class MeetingMinutesJobRepository {
   private dbPromise: Promise<Database> | null = null;
+  private revisionMutation: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly dbFile = env.MEETING_PROCESSING_DB_FILE) {}
 
@@ -212,7 +217,49 @@ export class MeetingMinutesJobRepository {
     model: string;
     maxAttempts: number;
     now: string;
+    deliveryRevision?: { baseVersionId: string; maxPending: number };
   }): Promise<{ job: MeetingMinutesJobRecord; created: boolean }> {
+    if (input.deliveryRevision) {
+      const action = this.revisionMutation.then(async () => {
+        // 避免其他 API 的入列或清理加入修訂交易，隨其失敗一起回滾。
+        const transaction = new MeetingMinutesJobRepository(this.dbFile);
+        try {
+          const db = await transaction.getDb();
+          await db.exec("BEGIN IMMEDIATE");
+          try {
+            const existing = await db.get<JobRow>(`SELECT * FROM meeting_minutes_jobs
+              WHERE session_id=? AND owner_id=? AND client_request_key=?`, input.sessionId, input.ownerId, input.clientRequestKey);
+            if (existing) {
+              if (existing.input_sha256 !== input.inputSha256) throw new HttpError(409, "修訂請求編號已用於不同內容。", "MEETING_MINUTES_CLIENT_REQUEST_KEY_CONFLICT");
+              await db.exec("COMMIT");
+              return { job: await transaction.attachVersion(mapJob(existing)), created: false };
+            }
+            const session = await db.get<{ adopted_version_id: string | null; revision_job_id: string | null; expires_at: string | null; cleanup_started_at: string | null; cancel_requested_at: string | null; device_session_released_at: string | null }>(
+              "SELECT * FROM meeting_one_shot_sessions WHERE session_id=? AND owner_id=?", input.sessionId, input.ownerId);
+            if (!session) throw new HttpError(404, "找不到會議。", "MEETING_ONE_SHOT_NOT_FOUND");
+            if (session.cleanup_started_at || !session.expires_at || session.expires_at <= input.now) throw new HttpError(410, "修訂期限已到，請使用已保存的摘要。", "MEETING_ONE_SHOT_EXPIRED");
+            if (session.cancel_requested_at || session.device_session_released_at || session.adopted_version_id !== input.deliveryRevision!.baseVersionId) throw new HttpError(409, "採用版本已變更或已離開會議，請重新讀取。", "MEETING_REVISION_CONFLICT");
+            if (session.revision_job_id) throw new HttpError(409, "已有修訂正在處理或等待確認，請先完成該筆修訂。", "MEETING_REVISION_PENDING");
+            const count = await db.get<{ count: number }>(`SELECT COUNT(*) AS count FROM meeting_minutes_jobs
+              WHERE client_request_key LIKE 'revision:%' AND (status IN ('pending','running') OR (status='failed' AND attempt_count<max_attempts))`);
+            if ((count?.count ?? 0) >= input.deliveryRevision!.maxPending) throw new HttpError(409, "目前修訂工作已滿，請稍後再試。", "MEETING_REVISION_CAPACITY_FULL");
+            const result = await transaction.enqueue({ ...input, deliveryRevision: undefined });
+            await db.run("UPDATE meeting_minutes_jobs SET revision_base_version_id=? WHERE job_id=?", input.deliveryRevision!.baseVersionId, result.job.jobId);
+            result.job.revisionBaseVersionId = input.deliveryRevision!.baseVersionId;
+            await db.run("UPDATE meeting_one_shot_sessions SET revision_job_id=? WHERE session_id=?", result.job.jobId, input.sessionId);
+            await db.exec("COMMIT");
+            return result;
+          } catch (error) {
+            await db.exec("ROLLBACK").catch(() => undefined);
+            throw error;
+          }
+        } finally {
+          await transaction.close();
+        }
+      });
+      this.revisionMutation = action.catch(() => undefined);
+      return action;
+    }
     const db = await this.getDb();
     const result = await db.run(
       `INSERT OR IGNORE INTO meeting_minutes_jobs (
@@ -280,6 +327,24 @@ export class MeetingMinutesJobRepository {
       clientRequestKey
     );
     return row ? this.attachVersion(mapJob(row)) : null;
+  }
+
+  async listJobStatesBySessionIds(sessionIds: string[]): Promise<MeetingMinutesJobRecord[]> {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = await (await this.getDb()).all<JobRow[]>(
+      `SELECT * FROM meeting_minutes_jobs WHERE session_id IN (${placeholders})
+       ORDER BY created_at DESC, job_id DESC`,
+      ...sessionIds
+    );
+    const seen = new Set<string>();
+    const jobs: MeetingMinutesJobRecord[] = [];
+    for (const row of rows) {
+      if (seen.has(row.session_id)) continue;
+      seen.add(row.session_id);
+      jobs.push({ ...mapJob(row), version: null });
+    }
+    return jobs;
   }
 
   async listVersionsForOwner(
@@ -596,37 +661,44 @@ export class MeetingMinutesJobRepository {
     model: string;
     now: string;
     providerChangedAfter: string;
+    force?: boolean;
   }): Promise<MeetingMinutesJobRecord | null> {
     const db = await this.getDb();
     const row = await db.get<JobRow>(
       `UPDATE meeting_minutes_jobs
        SET provider = ?, model = ?, status = 'pending', phase = 'queued',
-           attempt_count = CASE WHEN provider != ? OR model != ? THEN 0 ELSE attempt_count END,
+           attempt_count = CASE WHEN ? OR provider != ? OR model != ? THEN 0 ELSE attempt_count END,
            error_code = NULL, error_message = NULL,
            started_at = NULL, updated_at = ?, completed_at = NULL,
            worker_id = NULL, lease_expires_at = NULL
        WHERE job_id = ? AND owner_id = ? AND status = 'failed'
-         AND (
-           attempt_count < max_attempts
-           OR (
-             (provider != ? OR model != ?)
-             AND updated_at > ?
-             AND error_code != 'MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED'
-           )
-         )
+         AND (? OR attempt_count < max_attempts OR (
+           (provider != ? OR model != ?) AND updated_at > ?
+           AND error_code != 'MEETING_MINUTES_PROVIDER_MIGRATION_EXPIRED'
+         ))
        RETURNING *`,
       input.provider,
       input.model,
+      input.force ? 1 : 0,
       input.provider,
       input.model,
       input.now,
       input.jobId,
       input.ownerId,
+      input.force ? 1 : 0,
       input.provider,
       input.model,
       input.providerChangedAfter
     );
     return row ? this.attachVersion(mapJob(row)) : null;
+  }
+
+  async cancelPendingForSession(sessionId: string, now: string): Promise<boolean> {
+    const result = await (await this.getDb()).run(`UPDATE meeting_minutes_jobs
+      SET status='failed', attempt_count=max_attempts, error_code='MEETING_CANCELLED',
+        error_message=NULL, updated_at=?, completed_at=?, worker_id=NULL, lease_expires_at=NULL
+      WHERE session_id=? AND status='pending'`, now, now, sessionId);
+    return (result.changes ?? 0) > 0;
   }
 
   async requeueClaimed(input: {
@@ -830,6 +902,7 @@ export class MeetingMinutesJobRepository {
           client_request_key TEXT NOT NULL,
           input_sha256 TEXT NOT NULL,
           input_json TEXT NOT NULL,
+          revision_base_version_id TEXT,
           provider TEXT NOT NULL,
           model TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'ready', 'failed')),
@@ -885,6 +958,18 @@ export class MeetingMinutesJobRepository {
          ON meeting_minutes_jobs(status, lease_expires_at);`,
       ].join("\n")
     );
+    await db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = await db.all<Array<{ name: string }>>("PRAGMA table_info(meeting_minutes_jobs)");
+      if (!columns.some(column => column.name === "revision_base_version_id")) {
+        await db.exec("ALTER TABLE meeting_minutes_jobs ADD COLUMN revision_base_version_id TEXT");
+      }
+      await db.exec("COMMIT");
+    } catch (error) {
+      await db.exec("ROLLBACK").catch(() => undefined);
+      await db.close().catch(() => undefined);
+      throw error;
+    }
     return db;
   }
 }
