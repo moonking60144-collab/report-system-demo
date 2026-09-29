@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureMeetingSttPython } from "./meeting-stt-environment.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const backendDir = path.join(root, "backend");
@@ -167,10 +168,12 @@ async function main() {
       if (model !== expectedModel || beamSize !== expectedBeamSize || sttPort !== Number(endpoint.port || 80)) {
         throw new Error("[demo] Meeting STT model, beam size, or port does not match backend settings");
       }
-      const python = path.join(meetingSttDir, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
-      if (!existsSync(python)) {
-        throw new Error("[demo] Meeting STT environment missing; run uv sync --locked --python 3.12 in services/meeting-stt");
-      }
+      const python = await ensureMeetingSttPython(meetingSttDir, {
+        run,
+        env: process.env,
+        diarizationEnabled: isEnabled(sttSettings.MEETING_STT_DIARIZATION_ENABLED),
+      });
+      if (stopping) return;
       startServer("meeting-stt", python, ["-m", "app"], meetingSttDir, process.env);
       const healthUrl = new URL("/health", endpoint);
       const token = String(backendSettings.MEETING_TRANSCRIPTION_LOCAL_TOKEN ?? "").trim();
