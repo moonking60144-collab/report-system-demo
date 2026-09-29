@@ -2,6 +2,7 @@
 # Single-service: one VM serves both Express API and the built Vite SPA.
 # Replace `app` with the name returned by `fly launch` before first deploy.
 
+
 app = "report-system-demo"
 primary_region = "nrt"
 

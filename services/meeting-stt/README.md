@@ -2,6 +2,7 @@
 
 這是 `ragic-report` Meeting 子系統的獨立開源語音轉文字服務。Node backend 繼續負責錄音、SQLite job、10 分鐘 chunk checkpoint、retry、逐字稿合併與 Meeting Minutes；本服務只接收一段 canonical WAV，回傳逐字稿 segments。
 
+
 ## 元件與授權
 
 - `faster-whisper`：MIT，執行 Whisper 模型。
