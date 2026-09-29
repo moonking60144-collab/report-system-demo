@@ -73,6 +73,7 @@ export function DevMeetingSummaryArchive() {
     <div className="dev-meeting-libraries__toolbar"><label><input aria-label="搜尋會議摘要" placeholder="搜尋會議名稱" value={query} onChange={event => { setLoading(true); setQuery(event.target.value); setOffset(0); }} /></label>{stats && <span>{stats.count} 份 · {(stats.bytes / 1048576).toFixed(2)} / {(stats.maxBytes / 1048576).toFixed(0)} MiB HTML</span>}</div>
     {blockedReason === "MEETING_SUMMARY_ARCHIVE_FULL" && <p role="alert">摘要庫剩餘容量不足，新的錄音已暫停；請處理容量，不會自動刪除舊摘要。</p>}
     {blockedReason === "MEETING_ONE_SHOT_PROVIDER_NOT_READY" && <p role="alert">會議處理服務尚未啟用，新的錄音已暫停。</p>}
+    {blockedReason === "DEMO_MEETING_DISABLED" && <p role="alert">此 Demo 未啟用錄音與 AI 處理，新的錄音已暫停。</p>}
     {error && <p className="dev-mode-error" role="alert">{error}</p>}
     {loading && <p role="status"><LoadingOutlined spin /> 讀取摘要中…</p>}
     {!loading && !error && items.length === 0 && <p>尚無符合條件的摘要。</p>}

@@ -75,7 +75,7 @@ const meetingMinutesEn = {
     retention: "Downloads remain available in this browser for {{hours}} hours after completion. Audio and transcripts are then removed; only the summary is archived.",
     full: "The summary archive is full. New recordings are paused. Contact a developer.",
     unavailable: "Meeting processing is not ready. Retry shortly or contact a developer.",
-    demoDisabled: "Recording and AI processing are disabled in the public Demo. This page previews the updated workflow.",
+    demoDisabled: "The public Demo previews the updated workflow. To try recording and AI summaries, configure the required services and your own API key locally as described in the project documentation.",
     checkingAvailability: "Checking meeting service…",
     availabilityUnavailable: "Meeting service status unavailable",
     refresh: "Check again", result: "Meeting output", loading: "Checking progress…",

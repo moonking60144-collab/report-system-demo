@@ -74,6 +74,7 @@ async function withTestServer(
       transcriptionService: MeetingTranscriptionService;
       minutesRepository: MeetingMinutesJobRepository;
       minutesService: MeetingMinutesService;
+      service: MeetingRecordingStorageService;
       libraryRepository: MeetingLibraryRepository;
       libraryService: MeetingLibraryAccessService;
     }
@@ -262,6 +263,7 @@ async function withTestServer(
       transcriptionService,
       minutesRepository,
       minutesService,
+      service,
       libraryRepository,
       libraryService,
     });
@@ -721,6 +723,31 @@ test("owner 可確認舊 Code 補齊缺少的提示後再開始錄音", async ()
       body: JSON.stringify({ sourceIds: ["room-mic"] }),
     });
     assert.equal(create.status, 201);
+  }, { precreateLibraries: false });
+});
+
+test("錄音庫 viewer 無法以已知 ID 讀取一次性會議，舊錄音仍可讀取", async () => {
+  await withTestServer(async (baseUrl, _root, context) => {
+    const setup = await context.libraryService.ensureLibrary(OWNER_IDS[0], "隔離測試");
+    assert.ok(setup.code);
+    const oneShot = await context.service.createSession({ ownerId: OWNER_IDS[0], title: "私密一次性會議", sourceIds: ["room-mic"], deliveryMode: "one-shot" });
+    await context.service.uploadChunk({ ownerId: OWNER_IDS[0], sessionId: oneShot.sessionId, sourceId: "room-mic", sequence: 0, mimeType: "audio/webm", body: Buffer.from("private audio") });
+    await context.service.finalizeSession({ ownerId: OWNER_IDS[0], sessionId: oneShot.sessionId, durationMs: 5000, tracks: [{ sourceId: "room-mic", chunkCount: 1 }] });
+    const legacy = await context.service.createSession({ ownerId: OWNER_IDS[0], title: "舊錄音", sourceIds: ["room-mic"] });
+    const login = await fetch(`${baseUrl}/api/meetings/library-access`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Meeting-Request": "1" }, body: JSON.stringify({ code: setup.code }),
+    });
+    assert.equal(login.status, 200);
+    const headers = { Cookie: namedCookie(login, "meeting_library_viewer_v1") };
+    const list = await fetch(`${baseUrl}/api/meetings/library/recordings`, { headers });
+    assert.equal(list.status, 200);
+    assert.deepEqual((await list.json() as { data: Array<{ sessionId: string }> }).data.map(item => item.sessionId), [legacy.sessionId]);
+    for (const suffix of ["", "/tracks/room-mic", "/artifacts/unknown", "/transcription-artifacts/unknown", "/minutes/versions/unknown/package.zip"]) {
+      const response = await fetch(`${baseUrl}/api/meetings/library/recordings/${oneShot.sessionId}${suffix}`, { headers });
+      assert.equal(response.status, 404, suffix);
+      assert.doesNotMatch(await response.text(), /私密一次性會議|private audio/, suffix);
+    }
+    assert.equal((await fetch(`${baseUrl}/api/meetings/library/recordings/${legacy.sessionId}`, { headers })).status, 200);
   }, { precreateLibraries: false });
 });
 

@@ -1,6 +1,6 @@
 # 企業報工工具系統 — Demo
 
-> 本專案衍生自實際內網架構，完整保留正式資料流、背景任務、SQLite Read Model、SSE 即時更新與容錯機制；上游資料、Definitions、會議內容及企業環境值已以合成 Fixture 替代。
+> 本專案衍生自實際內網架構，保留正式資料流、背景任務、SQLite Read Model、SSE 即時更新與容錯機制；上游資料、Definitions、會議內容及企業環境值已以合成 Fixture 替代。
 
 ![報工主畫面：工令列表、任務中心與故障模擬](docs/demo-overview.jpg)
 
@@ -28,6 +28,8 @@ npm run demo
 | `http://127.0.0.1:3300` | Backend API |
 
 一般 Demo 不需要 AI API key，也不會下載模型；Dev AI 回答、語音辨識與 AI 會議摘要需要另外啟用對應 provider。設定方式見 [AI 與 STT 設定](docs/ai-setup.md)。
+
+Meeting 預設僅展示新版操作畫面。若想自行體驗完整錄音與摘要，可在本機自備 API key，並依 [Meeting 設定](docs/ai-setup.md)啟用所需服務；不設定也可使用其他 Demo 功能。
 
 ## 功能
 

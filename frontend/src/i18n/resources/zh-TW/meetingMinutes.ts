@@ -75,7 +75,7 @@ const meetingMinutesZhTw = {
     retention: "產出後保留 {{hours}} 小時供原瀏覽器下載；期限後移除音檔與逐字稿，後台僅保留摘要。",
     full: "摘要庫容量已滿，暫停新的錄音。請聯絡開發者處理。",
     unavailable: "會議處理服務尚未就緒，請稍後重試或聯絡開發者。",
-    demoDisabled: "公開 Demo 未啟用真實錄音與 AI 處理；此頁展示新版操作流程。",
+    demoDisabled: "公開 Demo 只展示新版操作流程。如需自行體驗錄音與 AI 摘要，可依專案說明在本機設定所需服務與自己的 API key。",
     checkingAvailability: "正在確認會議服務…",
     availabilityUnavailable: "無法確認會議服務狀態",
     refresh: "重新查詢", result: "會議產出", loading: "查詢進度中…",

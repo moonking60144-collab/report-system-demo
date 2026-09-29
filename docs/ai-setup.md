@@ -46,3 +46,19 @@ npm run demo
 Python 環境、模型與啟動步驟見 [Meeting STT README](../services/meeting-stt/README.md)。依該文件啟動服務後，再依 [backend 環境設定範例](../backend/.env.example) 啟用 STT provider；AI 會議摘要另需設定對應的摘要 provider。單純完成錄音不等同已完成逐字稿或 AI 摘要。
 
 模型、索引、錄音與產出檔應保留在本機資料目錄；provider key 不加入 Git。
+
+### Windows 本機 Demo 啟用完整會議流程（選用）
+
+預設 Demo 不提供共用 API key，也不會送出真實錄音。這段設定只供想在自己電腦上測試完整流程的人使用；其他 Demo 功能不需要它。Gemini key 在目前架構中負責產生會議摘要，**不會自動替代語音辨識**。若 Windows 電腦已自行設定 `GOOGLE_GEMINI_API_KEY`，可在該電腦既有的 `backend/.env` 明確加入下列設定；不要把 key 複製到本 repo 或提交。若沒有 `backend/.env`，先從 `backend/.env.example` 建立，再編輯設定。
+
+```dotenv
+MEETING_WORKER_ENABLED=true
+MEETING_TRANSCRIPTION_PROVIDER=local-whisper
+MEETING_TRANSCRIPTION_LOCAL_URL=http://127.0.0.1:8010/v1/transcriptions
+MEETING_MINUTES_PROVIDER=google-gemini
+MEETING_ALLOW_SHARED_GEMINI_CREDENTIAL=true
+MEETING_FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
+MEETING_FFPROBE_PATH=C:\ffmpeg\bin\ffprobe.exe
+```
+
+共用 Gemini key 是明確 opt-in：如果 Meeting 使用獨立的 `MEETING_MINUTES_GOOGLE_API_KEY`，可維持 `MEETING_ALLOW_SHARED_GEMINI_CREDENTIAL=false`。上面的 FFmpeg 路徑只是範例，需改成該 Windows 電腦的實際執行檔位置。先依 [Meeting STT README](../services/meeting-stt/README.md) 啟動 Whisper，確認 `/health` 的 model／beamSize 與 backend 相同，再從專案根目錄執行 `npm run demo`。`GET http://127.0.0.1:3300/api/meetings/one-shot` 的 `data.available` 必須是 `true`，才代表這次本機啟動可接受新會議；只看到網頁或已設定 Gemini key 不算完成。公開 Demo 仍使用預設的停用設定，不會讀取 Windows 電腦上的 key。

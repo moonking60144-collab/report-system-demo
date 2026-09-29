@@ -407,6 +407,17 @@ export function createMeetingRecordingsRouter(
     }
   );
 
+  router.use("/meetings/library/recordings/:sessionId", async (req, _res, next) => {
+    try {
+      const library = await viewerAuth.requireViewer(req);
+      const session = await service.getSession(req.params.sessionId, library.libraryId);
+      if (session.deliveryMode === "one-shot") {
+        throw new HttpError(404, "找不到錄音。", "MEETING_RECORDING_NOT_FOUND");
+      }
+      next();
+    } catch (error) { next(error); }
+  });
+
   router.post("/meetings/library-access", async (req, res, next) => {
     try {
       ownerAuth.requireMutationIntent(req);
