@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -9,6 +10,14 @@ const excludedFiles = new Set([
   "backend/package-lock.json",
   "frontend/package-lock.json",
   "services/meeting-stt/uv.lock",
+]);
+// Raster content needs visual review before its approved digest is updated.
+const approvedRasterFiles = new Map([
+  ["docs/architecture.png", "531e6b25e0676fa8977be1437493b364672cda8fa2445674a32ab6bfc0abb10f"],
+  ["docs/demo-overview.jpg", "741fca34b68f61585a905be9aa27c1f4f5e46ff75a22c00d907a08150d229a52"],
+  ["docs/dev-ai-definitions.jpg", "4d142f032b8759ca73155c2bdb5441346816f5a33a68eebfd377b06a0dee6abb"],
+  ["docs/efficiency-reports.jpg", "1b0c34877cbe9b16cced060e39f9e752dfa7a8dfe787f8a903ec89ac4f8c0c5a"],
+  ["docs/meeting-audio-check.jpg", "add11561873f22cf826454d81e76938a0584aa923e1bd685133a14a0a1d4631a"],
 ]);
 
 const fromCodePoints = (...points) => String.fromCodePoint(...points);
@@ -69,6 +78,18 @@ const tracked = [
 const findings = [];
 for (const file of tracked) {
   const absolutePath = path.join(repoRoot, file);
+  if (/\.(?:avif|gif|jpe?g|png|webp)$/iu.test(file)) {
+    if (!existsSync(absolutePath)) continue;
+    try {
+      const digest = createHash("sha256").update(readFileSync(absolutePath)).digest("hex");
+      if (digest !== approvedRasterFiles.get(file)) {
+        findings.push(`${file}: unreviewed raster image`);
+      }
+    } catch {
+      findings.push(`${file}: raster image could not be inspected`);
+    }
+    continue;
+  }
   let content;
   try {
     content = readFileSync(absolutePath, "utf8");
