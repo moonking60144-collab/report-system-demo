@@ -25,6 +25,8 @@ import {
 import type { StoredSyncState } from "../../../storage/sqlite/workReportSqliteRepository";
 import { hasReadableSqliteSnapshot, isSqliteSnapshotStale } from "../readModelState";
 import { parseDateTimeTimestamp } from "../../../utils/dateTime";
+import { getWorkReportFilterDateKey } from "../../../utils/workReportFilterDate";
+import { parseWorkReportFilterNumber } from "../../../utils/workReportFilterNumber";
 import { parseSemanticBoolean } from "../../../utils/semanticBoolean";
 import { normalizeComparableValue, parseNumericValue } from "./valueUtils";
 import { shouldExcludeSortOrder99Record } from "./workReportSortOrderVisibility";
@@ -497,22 +499,38 @@ export class WorkReportReadSupport {
           condition.field === "machineCode" && formId === "902"
             ? record.filterMachineCode
             : this.getReportColumnValue(record, condition.field);
-        const text = this.normalizeColumnFilterText(rawValue);
-        const values = condition.values.map((value) => this.normalizeColumnFilterText(value));
+        const normalizeText = (value: unknown) => String(value ?? "").trim().replace(/[A-Z]/g, char => char.toLowerCase());
+        const text = normalizeText(rawValue);
+        const values = condition.values.map(normalizeText);
         switch (condition.operator) {
           case "contains":
             return text.includes(values[0] ?? "");
           case "notContains":
             return !text.includes(values[0] ?? "");
           case "equals":
+            if (REPORT_COLUMN_TYPE_BY_KEY[condition.field] === "number") {
+              const number = parseWorkReportFilterNumber(rawValue);
+              return number !== null && number === parseWorkReportFilterNumber(condition.values[0]);
+            }
             return text === (values[0] ?? "");
+          case "greaterThan":
+          case "lessThan":
+          case "atLeast":
+          case "atMost": {
+            const number = parseWorkReportFilterNumber(rawValue);
+            const expected = parseWorkReportFilterNumber(condition.values[0]);
+            if (number === null || expected === null) return false;
+            if (condition.operator === "greaterThan") return number > expected;
+            if (condition.operator === "lessThan") return number < expected;
+            return condition.operator === "atLeast" ? number >= expected : number <= expected;
+          }
           case "startsWith":
             return text.startsWith(values[0] ?? "");
           case "isAnyOf":
           case "isNotAnyOf": {
             const semanticBoolean = parseSemanticBoolean(rawValue);
             const comparable =
-              condition.field === "siteRunning" || condition.field === "startSchedule"
+              REPORT_COLUMN_TYPE_BY_KEY[condition.field] === "boolean"
                 ? semanticBoolean === true
                   ? "yes"
                   : semanticBoolean === false
@@ -529,14 +547,10 @@ export class WorkReportReadSupport {
           case "before":
           case "after":
           case "between": {
-            const timestamp = this.parseTimestamp(rawValue);
-            if (timestamp === null) {
+            const dateKey = getWorkReportFilterDateKey(rawValue);
+            if (dateKey === null) {
               return false;
             }
-            const date = new Date(timestamp);
-            const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-              date.getDate()
-            ).padStart(2, "0")}`;
             if (condition.operator === "before") {
               return dateKey <= (condition.values[0] ?? "");
             }

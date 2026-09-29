@@ -3,7 +3,7 @@ import { Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "react-i18next";
 import type { WorkReportRecord } from "../../../api/workReport";
-import type { ColumnDisplayMode } from "../types";
+import type { ColumnDisplayMode, UiLanguage, WorkReportFilterCondition, WorkReportFormId } from "../types";
 import type { MarkedWorkOrder } from "../hooks/useWorkReportMarkedRow";
 import { isWorkOrderClosedStatus, parseSemanticBoolean } from "../utils";
 import {
@@ -11,11 +11,14 @@ import {
   PageLoadingBoundary,
 } from "../../../components/PageLoadingBoundary";
 import { FixedHorizontalScrollbar } from "./FixedHorizontalScrollbar";
-import { WorkReportRowMarkMenu } from "./WorkReportRowMarkMenu";
+import { WorkReportCellCopyMenu } from "./WorkReportCellCopyMenu";
 import { WorkReportListScrollHintButton } from "./WorkReportListScrollHintButton";
 
 interface WorkReportTableSectionProps {
   columns: ColumnsType<WorkReportRecord>;
+  currentFormId: WorkReportFormId;
+  uiLanguage: UiLanguage;
+  onFilterByValue?: (condition: WorkReportFilterCondition) => void;
   columnDisplayMode: ColumnDisplayMode;
   visibleRecords: WorkReportRecord[];
   backgroundLoading: boolean;
@@ -42,6 +45,9 @@ function shouldIgnoreRowClick(event: MouseEvent<HTMLElement>): boolean {
 
 export const WorkReportTableSection = memo(function WorkReportTableSection({
   columns,
+  currentFormId,
+  uiLanguage,
+  onFilterByValue,
   columnDisplayMode,
   visibleRecords,
   backgroundLoading,
@@ -143,7 +149,8 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
 
   return (
     <section className="work-report-table-stage">
-      <WorkReportRowMarkMenu records={visibleRecords}
+      <WorkReportCellCopyMenu columns={columns} records={visibleRecords} currentFormId={currentFormId}
+        uiLanguage={uiLanguage} onFilterByValue={onFilterByValue}
         markedEntryId={markedRow?.entryId ?? null} onToggleMarkedRow={onToggleMarkedRow}>
       <div
         ref={tableWrapRef}
@@ -168,7 +175,7 @@ export const WorkReportTableSection = memo(function WorkReportTableSection({
           onRow={buildRowProps}
         />
       </div>
-      </WorkReportRowMarkMenu>
+      </WorkReportCellCopyMenu>
 
       <FixedHorizontalScrollbar
         tableWrapRef={tableWrapRef}

@@ -22,6 +22,10 @@ export const FACET_BLANK_TOKEN = REPORT_COLUMN_BLANK_TOKEN;
 export const FACET_BOOL_TRUE_TOKEN = REPORT_COLUMN_BOOL_TRUE_TOKEN;
 export const FACET_BOOL_FALSE_TOKEN = REPORT_COLUMN_BOOL_FALSE_TOKEN;
 
+function trimCustomFilterSql(valueExpression: string): string {
+  return `TRIM(CAST(${valueExpression} AS TEXT), char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279))`;
+}
+
 const REPORT_COLUMN_SQL_BY_KEY: Partial<Record<ReportColumnKey, string>> = {
   startSchedule: "start_schedule",
   workOrderNo: "work_order_no",
@@ -74,10 +78,11 @@ export function getReportColumnSqlExpression(columnKey: ReportColumnKey): string
   );
 }
 
-export function getReportColumnTokenSqlExpression(columnKey: ReportColumnKey): string {
-  const valueExpression = getReportColumnSqlExpression(columnKey);
+export function getReportColumnTokenSqlExpression(columnKey: ReportColumnKey, customValueExpression?: string): string {
+  const valueExpression = customValueExpression ?? getReportColumnSqlExpression(columnKey);
+  const trimmedValue = customValueExpression === undefined ? `TRIM(CAST(${valueExpression} AS TEXT))` : trimCustomFilterSql(valueExpression);
   if (REPORT_COLUMN_TYPE_BY_KEY[columnKey] === "boolean") {
-    const normalized = `LOWER(TRIM(CAST(${valueExpression} AS TEXT)))`;
+    const normalized = `LOWER(${trimmedValue})`;
     return `CASE
       WHEN ${normalized} IN ('yes', 'true', '1', 'v', '✓', '是') THEN '${FACET_BOOL_TRUE_TOKEN}'
       WHEN ${normalized} IN ('no', 'false', '0', '否') THEN '${FACET_BOOL_FALSE_TOKEN}'
@@ -85,9 +90,9 @@ export function getReportColumnTokenSqlExpression(columnKey: ReportColumnKey): s
     END`;
   }
   return `CASE
-    WHEN ${valueExpression} IS NULL OR TRIM(CAST(${valueExpression} AS TEXT)) = ''
+    WHEN ${valueExpression} IS NULL OR ${trimmedValue} = ''
       THEN '${FACET_BLANK_TOKEN}'
-    ELSE TRIM(CAST(${valueExpression} AS TEXT))
+    ELSE ${trimmedValue}
   END`;
 }
 
@@ -164,14 +169,39 @@ function buildCustomFilterConditionClause(
   condition: WorkReportFilterCondition,
   formId: string
 ): { clause: string; params: Array<string | number> } {
+  // The typed sort_order column historically accepts parseFloat prefixes; custom filters use the original value.
   const valueExpression =
     condition.field === "machineCode" && formId === "902"
       ? "filter_machine_code"
-      : getReportColumnSqlExpression(condition.field);
-  const trimmedTextExpression = `LOWER(TRIM(CAST(${valueExpression} AS TEXT)))`;
+      : REPORT_COLUMN_TYPE_BY_KEY[condition.field] === "number"
+        ? `json_extract(summary_json, '$.${condition.field}')`
+        : getReportColumnSqlExpression(condition.field);
+  const trimmedTextExpression = `LOWER(${trimCustomFilterSql(valueExpression)})`;
   const values = condition.values.map((value) => value.trim());
-  const lowerValues = values.map((value) => value.toLowerCase());
-  const blankClause = `(${valueExpression} IS NULL OR TRIM(CAST(${valueExpression} AS TEXT)) = '')`;
+  const lowerValues = values.map(value => value.replace(/[A-Z]/g, char => char.toLowerCase()));
+  const blankValueExpression = condition.field === "machineCode"
+    ? valueExpression : `json_extract(summary_json, '$.${condition.field}')`;
+  const blankClause = `(${blankValueExpression} IS NULL OR ${trimCustomFilterSql(blankValueExpression)} = '')`;
+  const dateExpression = `UPPER(REPLACE(${trimCustomFilterSql(`json_extract(summary_json, '$.${condition.field}')`)}, '/', '-'))`;
+  const dateValueExpression = `CASE WHEN json_type(summary_json, '$.${condition.field}') = 'text' THEN
+    CASE WHEN ${dateExpression} GLOB '*[+-][0-9][0-9][0-9][0-9]'
+    THEN date(substr(${dateExpression}, 1, length(${dateExpression}) - 2) || ':' || substr(${dateExpression}, -2), '+8 hours')
+    WHEN LOWER(${dateExpression}) GLOB '*z'
+    OR ${dateExpression} GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+    THEN date(${dateExpression}, '+8 hours') ELSE date(${dateExpression}, '+0 days') END END`;
+  if (REPORT_COLUMN_TYPE_BY_KEY[condition.field] === "number" && !["isEmpty", "isNotEmpty"].includes(condition.operator)) {
+    const numericText = trimCustomFilterSql(`REPLACE(CAST(${valueExpression} AS TEXT), ',', '')`);
+    const numericExpression = `CASE WHEN json_type(summary_json, '$.${condition.field}') IN ('integer', 'real', 'text')
+      AND json_valid(${numericText}) THEN
+      CASE WHEN json_type(${numericText}) IN ('integer', 'real')
+        AND ABS(CAST(${numericText} AS REAL)) <= 1.7976931348623157e308
+        THEN CAST(${numericText} AS REAL) END END`;
+    const comparison = { equals: "=", greaterThan: ">", lessThan: "<", atLeast: ">=", atMost: "<=" };
+    return {
+      clause: `${numericExpression} ${comparison[condition.operator as keyof typeof comparison]} ?`,
+      params: [Number(values[0]?.replace(/,/g, ""))],
+    };
+  }
 
   switch (condition.operator) {
     case "contains":
@@ -193,13 +223,13 @@ function buildCustomFilterConditionClause(
       };
     case "isAnyOf":
     case "isNotAnyOf": {
-      const booleanField = condition.field === "siteRunning" || condition.field === "startSchedule";
+      const booleanField = REPORT_COLUMN_TYPE_BY_KEY[condition.field] === "boolean";
       const tokenExpression = booleanField
-        ? getReportColumnTokenSqlExpression(condition.field)
+        ? getReportColumnTokenSqlExpression(condition.field, valueExpression)
         : `CASE
-            WHEN ${valueExpression} IS NULL OR TRIM(CAST(${valueExpression} AS TEXT)) = ''
+            WHEN ${blankClause}
               THEN '${FACET_BLANK_TOKEN}'
-            ELSE TRIM(CAST(${valueExpression} AS TEXT))
+            ELSE ${trimCustomFilterSql(valueExpression)}
           END`;
       const normalizedValues = booleanField
         ? lowerValues.map((value) =>
@@ -220,19 +250,24 @@ function buildCustomFilterConditionClause(
       return { clause: `NOT ${blankClause}`, params: [] };
     case "before":
       return {
-        clause: `date(${valueExpression}, 'localtime') <= date(?)`,
+        clause: `${dateValueExpression} <= date(?)`,
         params: [values[0] ?? ""],
       };
     case "after":
       return {
-        clause: `date(${valueExpression}, 'localtime') >= date(?)`,
+        clause: `${dateValueExpression} >= date(?)`,
         params: [values[0] ?? ""],
       };
     case "between":
       return {
-        clause: `date(${valueExpression}, 'localtime') BETWEEN date(?) AND date(?)`,
+        clause: `${dateValueExpression} BETWEEN date(?) AND date(?)`,
         params: [values[0] ?? "", values[1] ?? ""],
       };
+    case "greaterThan":
+    case "lessThan":
+    case "atLeast":
+    case "atMost":
+      throw new Error("Numeric filter requires a numeric field");
   }
 }
 

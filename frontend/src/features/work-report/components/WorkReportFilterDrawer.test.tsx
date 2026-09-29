@@ -17,6 +17,8 @@ vi.mock("react", async (load) => ({
       hooks.values[index] = typeof value === "function" ? value(hooks.values[index]) : value;
     }];
   },
+  useRef: (initial: unknown) => ({ current: initial }),
+  useEffect: () => undefined,
 }));
 vi.mock("react-i18next", async (load) => ({ ...await load<typeof import("react-i18next")>(), useTranslation: () => ({ t: (key: string) => key }) }));
 
@@ -34,7 +36,7 @@ const appliedState: Parameters<typeof WorkReportFilterDrawer>[0]["appliedState"]
   activePlaceholderViewId: null,
   usesCustomFilterGroup: false,
 };
-function renderDrawer(nextAppliedState = appliedState) {
+function renderDrawer(nextAppliedState = appliedState, conditionRequest?: Parameters<typeof WorkReportFilterDrawer>[0]["conditionRequest"]) {
   hooks.index = 0;
   return WorkReportFilterDrawer({
     currentFormId: "901", activeLandingPageKey: "line-a-901",
@@ -43,6 +45,7 @@ function renderDrawer(nextAppliedState = appliedState) {
     filterControlDisabled: false, activeFilterChips: [],
     columnFilterCount: 1, machineColumnFilterTokens: ["MA01"],
     onApply: apply, onClose: close, onPendingChange: pendingChange,
+    conditionRequest,
   });
 }
 function render(nextAppliedState = appliedState) {
@@ -55,6 +58,12 @@ beforeEach(() => {
 });
 
 describe("filter drawer draft boundary", () => {
+  it("adds a right-click filter to the draft without silently applying it", () => {
+    const request = { id: "quick-filter", field: "workOrderNo" as const, operator: "equals" as const, values: ["WO-DEMO-1"] };
+    const drawer = renderDrawer(appliedState, request);
+    expect(drawer.props.children.props.filterGroup.conditions).toEqual([...group.conditions, request]);
+    expect(apply).not.toHaveBeenCalled();
+  });
   it("keeps the work report underneath interactive without a modal mask", () => {
     expect(renderDrawer().props.mask).toBe(false);
   });

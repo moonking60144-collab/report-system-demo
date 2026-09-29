@@ -21,6 +21,7 @@ import { readColumnDisplayMode, writeColumnDisplayMode } from "../../src/feature
 import type {
   ColumnDisplayMode,
   ColumnKey,
+  WorkReportFilterCondition,
   WorkReportEntryFieldMutationOperation,
 } from "../../src/features/work-report/types";
 
@@ -32,6 +33,7 @@ declare global {
     __workReportListVisualStartScheduleMutationCount?: number;
     __workReportListVisualMainMachineMutationCount?: number;
     __workReportListVisualUrgentMutationCount?: number;
+    __workReportListVisualFilterCondition?: WorkReportFilterCondition;
   }
 }
 
@@ -372,6 +374,11 @@ function WorkReportListVisualContractFixture() {
         <WorkReportTableSection
           showScrollHintButton={new URLSearchParams(window.location.search).has("scrollHint")}
           columns={columns}
+          currentFormId={formId}
+          uiLanguage="zh"
+          onFilterByValue={(condition) => {
+            window.__workReportListVisualFilterCondition = condition;
+          }}
           columnDisplayMode={columnDisplayMode}
           visibleRecords={statusRecords}
           backgroundLoading={false}

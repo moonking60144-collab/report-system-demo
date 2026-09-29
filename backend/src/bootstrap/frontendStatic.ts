@@ -30,11 +30,20 @@ export function setupFrontendStaticServing(app: Express): FrontendStaticSetupRes
   app.use(
     express.static(frontendStaticDir, {
       index: "index.html",
+      setHeaders(res, filePath) {
+        if (path.basename(filePath) === "index.html") res.setHeader("Cache-Control", "no-cache");
+        if (path.basename(filePath) === "version.json") res.setHeader("Cache-Control", "no-store");
+      },
     })
   );
 
+  app.get(/^\/assets(?:\/|$)/, (_req, res) => {
+    res.status(404).end();
+  });
+
   // Temporary rescue mode: serve SPA routes from backend while keeping /api untouched.
   app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.join(frontendStaticDir, "index.html"));
   });
 

@@ -163,6 +163,35 @@ test("parseReportsQuery 驗證自訂 filterGroup 的欄位、運算子與上限"
   }
 });
 
+test("同日日期區間保留兩個端點，集合條件仍去重", () => {
+  const parsed = parseReportsQuery({ filterGroup: JSON.stringify({ joinMode: "all", conditions: [
+    { id: "day", field: "lastUpdatedAt", operator: "between", values: ["2026-09-17", "2026-09-17"] },
+    { id: "status", field: "status", operator: "isAnyOf", values: ["未結案", "未結案"] },
+  ] }) });
+  assert.deepEqual(parsed.filterGroup?.conditions[0]?.values, ["2026-09-17", "2026-09-17"]);
+  assert.deepEqual(parsed.filterGroup?.conditions[1]?.values, ["未結案"]);
+});
+
+test("擴充欄位仍驗證型別、日期及數字條件", () => {
+  const conditions = [
+    { id: "size", field: "size", operator: "equals", values: ["123*123"] },
+    { id: "urgent", field: "urgent", operator: "isAnyOf", values: ["yes"] },
+    { id: "number", field: "estimatedHours", operator: "greaterThan", values: ["1,000.5"] },
+    { id: "date", field: "plannedEndDate", operator: "between", values: ["2026-09-17", "2026-09-17"] },
+  ];
+  const parse = (items: unknown[]) => parseReportsQuery({ filterGroup: JSON.stringify({ joinMode: "all", conditions: items }) });
+  assert.deepEqual(parse(conditions).filterGroup?.conditions, conditions);
+  for (const condition of [
+    { ...conditions[0], field: "filterMachineCode" },
+    { ...conditions[0], field: "reports" },
+    { ...conditions[0], operator: "greaterThan" },
+    { ...conditions[1], values: ["maybe"] },
+    { ...conditions[2], values: ["abc"] },
+    { ...conditions[2], values: ["1e400"] },
+    { ...conditions[3], values: ["2026-02-31", "2026-02-31"] },
+  ]) assert.throws(() => parse([condition]), error => error instanceof HttpError && error.statusCode === 400);
+});
+
 test("精確查詢拒絕 unknown 欄位與 analysis 型別不符", () => {
   assert.throws(
     () =>

@@ -1,6 +1,7 @@
 import type { WorkReportRecord } from "../../../api/workReport";
 import {
   ALL_FILTER_VALUE,
+  COLUMN_TYPE_MAP,
   WORK_REPORT_MAX_FILTER_CONDITIONS,
   WORK_REPORT_MAX_FILTER_VALUES,
 } from "../constants";
@@ -22,6 +23,10 @@ const FILTER_FIELD_ORDER: WorkReportFilterField[] = [
   "siteRunning",
   "startSchedule",
   "lastUpdatedAt",
+  ...Object.keys(COLUMN_TYPE_MAP).filter(field => ![
+    "filterMachineCode", "machineCode", "status", "workOrderNo", "customerPartNo",
+    "siteRunning", "startSchedule", "lastUpdatedAt",
+  ].includes(field)) as WorkReportFilterField[],
 ];
 const FILTER_FIELDS = new Set<WorkReportFilterField>(FILTER_FIELD_ORDER);
 
@@ -33,15 +38,20 @@ export function getWorkReportFilterFields(
   );
 }
 
-const FILTER_OPERATORS_BY_FIELD: Record<WorkReportFilterField, readonly WorkReportFilterOperator[]> = {
-  workOrderNo: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
-  customerPartNo: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
-  machineCode: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  status: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  siteRunning: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  startSchedule: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  lastUpdatedAt: ["before", "after", "between", "isEmpty", "isNotEmpty"],
-};
+const FILTER_OPERATORS_BY_TYPE = {
+  text: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
+  number: ["equals", "greaterThan", "lessThan", "atLeast", "atMost", "isEmpty", "isNotEmpty"],
+  boolean: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
+  date: ["before", "after", "between", "isEmpty", "isNotEmpty"],
+} as const;
+
+export function parseWorkReportFilterNumber(value: unknown): number | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const text = String(value ?? "").trim().replace(/,/g, "");
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/i.test(text)) return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
 
 const VALUELESS_FILTER_OPERATORS = new Set<WorkReportFilterOperator>(["isEmpty", "isNotEmpty"]);
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -56,7 +66,7 @@ export function createWorkReportFilterCondition(
   field: WorkReportFilterField = "machineCode"
 ): WorkReportFilterCondition {
   conditionSequence += 1;
-  const defaultOperator = FILTER_OPERATORS_BY_FIELD[field][0];
+  const defaultOperator = getWorkReportFilterOperators(field)[0];
   return {
     id: `filter-${Date.now().toString(36)}-${conditionSequence.toString(36)}`,
     field,
@@ -78,7 +88,9 @@ export function cloneWorkReportFilterGroup(group: WorkReportFilterGroup): WorkRe
 export function getWorkReportFilterOperators(
   field: WorkReportFilterField
 ): readonly WorkReportFilterOperator[] {
-  return FILTER_OPERATORS_BY_FIELD[field];
+  return field === "machineCode" || field === "status"
+    ? FILTER_OPERATORS_BY_TYPE.boolean
+    : FILTER_OPERATORS_BY_TYPE[COLUMN_TYPE_MAP[field]];
 }
 
 export function isWorkReportFilterConditionComplete(
@@ -95,8 +107,14 @@ export function isWorkReportFilterConditionComplete(
       condition.values[0] <= condition.values[1]
     );
   }
-  if (condition.field === "lastUpdatedAt") {
+  if (COLUMN_TYPE_MAP[condition.field] === "date") {
     return isValidDateOnly(condition.values[0] ?? "");
+  }
+  if (COLUMN_TYPE_MAP[condition.field] === "number") {
+    return parseWorkReportFilterNumber(condition.values[0]) !== null;
+  }
+  if (COLUMN_TYPE_MAP[condition.field] === "boolean") {
+    return condition.values.length > 0 && condition.values.every(value => value === "yes" || value === "no");
   }
   return condition.values.some((value) => value.trim().length > 0);
 }
@@ -134,20 +152,16 @@ export function normalizeWorkReportFilterGroup(value: unknown): WorkReportFilter
           const field = raw.field as WorkReportFilterField;
           if (
             typeof raw.operator !== "string" ||
-            !FILTER_OPERATORS_BY_FIELD[field].includes(raw.operator as WorkReportFilterOperator)
+            !getWorkReportFilterOperators(field).includes(raw.operator as WorkReportFilterOperator)
           ) {
             return null;
           }
-          const values = Array.isArray(raw.values)
-            ? Array.from(
-                new Set(
-                  raw.values
-                    .filter((item): item is string => typeof item === "string")
-                    .map((item) => item.trim().slice(0, 120))
-                    .filter(Boolean)
-                )
-              ).slice(0, WORK_REPORT_MAX_FILTER_VALUES)
+          const suppliedValues = Array.isArray(raw.values)
+            ? raw.values.filter((item): item is string => typeof item === "string")
+                .map(item => item.trim().slice(0, 120)).filter(Boolean)
             : [];
+          const values = (raw.operator === "between" ? suppliedValues : Array.from(new Set(suppliedValues)))
+            .slice(0, WORK_REPORT_MAX_FILTER_VALUES);
           const normalized: WorkReportFilterCondition = {
             id:
               typeof raw.id === "string" && raw.id.trim()
@@ -252,7 +266,7 @@ function getConditionRecordValue(
 }
 
 function normalizeComparableText(value: unknown): string {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "").trim().replace(/[A-Z]/g, char => char.toLowerCase());
 }
 
 function getBooleanToken(value: unknown): string {
@@ -260,12 +274,16 @@ function getBooleanToken(value: unknown): string {
   return parsed === true ? "yes" : parsed === false ? "no" : "";
 }
 
-function endOfDateTimestamp(value: string): number {
-  return Date.parse(`${value}T23:59:59.999`);
-}
-
-function startOfDateTimestamp(value: string): number {
-  return Date.parse(`${value}T00:00:00.000`);
+export function getWorkReportFilterDateKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^(\d{4})[/-](\d{2})[/-](\d{2})(?:[ Tt](.+))?$/);
+  if (!match) return null;
+  const time = (match[4] ?? "00:00:00").toUpperCase();
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(time);
+  const timestamp = Date.parse(`${match[1]}-${match[2]}-${match[3]}T${time}${hasTimezone ? "" : "+08:00"}`);
+  if (!Number.isFinite(timestamp)) return null;
+  // 報工日曆日期固定使用 UTC+08:00，避免瀏覽器與 Server 時區不同。
+  return new Date(timestamp + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 export function matchesWorkReportFilterCondition(
@@ -283,19 +301,34 @@ export function matchesWorkReportFilterCondition(
     case "notContains":
       return !text.includes(values[0] ?? "");
     case "equals":
+      if (COLUMN_TYPE_MAP[condition.field] === "number") {
+        const number = parseWorkReportFilterNumber(rawValue);
+        return number !== null && number === parseWorkReportFilterNumber(condition.values[0]);
+      }
       return text === (values[0] ?? "");
+    case "greaterThan":
+    case "lessThan":
+    case "atLeast":
+    case "atMost": {
+      const number = parseWorkReportFilterNumber(rawValue);
+      const expected = parseWorkReportFilterNumber(condition.values[0]);
+      if (number === null || expected === null) return false;
+      if (condition.operator === "greaterThan") return number > expected;
+      if (condition.operator === "lessThan") return number < expected;
+      return condition.operator === "atLeast" ? number >= expected : number <= expected;
+    }
     case "startsWith":
       return text.startsWith(values[0] ?? "");
     case "isAnyOf": {
       const comparable =
-        condition.field === "siteRunning" || condition.field === "startSchedule"
+        COLUMN_TYPE_MAP[condition.field] === "boolean"
           ? getBooleanToken(rawValue)
           : text;
       return values.includes(comparable);
     }
     case "isNotAnyOf": {
       const comparable =
-        condition.field === "siteRunning" || condition.field === "startSchedule"
+        COLUMN_TYPE_MAP[condition.field] === "boolean"
           ? getBooleanToken(rawValue)
           : text;
       return !values.includes(comparable);
@@ -304,21 +337,14 @@ export function matchesWorkReportFilterCondition(
       return text === "";
     case "isNotEmpty":
       return text !== "";
-    case "before": {
-      const timestamp = Date.parse(String(rawValue ?? ""));
-      return Number.isFinite(timestamp) && timestamp <= endOfDateTimestamp(condition.values[0] ?? "");
-    }
-    case "after": {
-      const timestamp = Date.parse(String(rawValue ?? ""));
-      return Number.isFinite(timestamp) && timestamp >= startOfDateTimestamp(condition.values[0] ?? "");
-    }
+    case "before":
+    case "after":
     case "between": {
-      const timestamp = Date.parse(String(rawValue ?? ""));
-      return (
-        Number.isFinite(timestamp) &&
-        timestamp >= startOfDateTimestamp(condition.values[0] ?? "") &&
-        timestamp <= endOfDateTimestamp(condition.values[1] ?? "")
-      );
+      const dateKey = getWorkReportFilterDateKey(rawValue);
+      if (dateKey === null) return false;
+      if (condition.operator === "before") return dateKey <= (condition.values[0] ?? "");
+      if (condition.operator === "after") return dateKey >= (condition.values[0] ?? "");
+      return dateKey >= (condition.values[0] ?? "") && dateKey <= (condition.values[1] ?? "");
     }
   }
 }

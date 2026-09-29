@@ -1,13 +1,14 @@
-import { useState } from "react";
-import { Drawer } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Drawer, message } from "antd";
 import { useTranslation } from "react-i18next";
-import { DEFAULT_GLOBAL_FILTERS } from "../constants";
+import { DEFAULT_GLOBAL_FILTERS, WORK_REPORT_MAX_FILTER_CONDITIONS } from "../constants";
 import type {
   ColumnFilterState,
   ColumnSortRule,
   GlobalFilters,
   SidebarPlaceholderView,
   WorkReportFilterGroup,
+  WorkReportFilterCondition,
 } from "../types";
 import { EMPTY_WORK_REPORT_FILTER_GROUP, isSameWorkReportFilterGroup } from "../utils";
 import { WorkReportFilterPanel, type WorkReportFilterPanelProps } from "./WorkReportFilterPanel";
@@ -26,6 +27,7 @@ type Props = Omit<WorkReportFilterPanelProps,
     usesCustomFilterGroup: boolean;
   };
   onClose: () => void;
+  conditionRequest?: WorkReportFilterCondition | null;
   onPendingChange: (pending: boolean) => void;
   onApply: (draft: {
     globalFilters: GlobalFilters;
@@ -39,6 +41,7 @@ type Props = Omit<WorkReportFilterPanelProps,
 type AppliedState = Props["appliedState"];
 
 interface DrawerDraftState {
+  conditionRequestId: string | null;
   source: AppliedState;
   group: WorkReportFilterGroup;
   globals: GlobalFilters;
@@ -60,6 +63,7 @@ function createGlobalDraft(globalFilters: GlobalFilters): GlobalFilters {
 
 function createDrawerDraft(source: AppliedState): DrawerDraftState {
   return {
+    conditionRequestId: null,
     source,
     group: source.filterGroup,
     globals: createGlobalDraft(source.globalFilters),
@@ -81,6 +85,7 @@ function isDrawerDraftPending(draft: DrawerDraftState, appliedState: AppliedStat
 
 export function WorkReportFilterDrawer({
   appliedState,
+  conditionRequest,
   onClose,
   onPendingChange,
   onApply,
@@ -88,16 +93,39 @@ export function WorkReportFilterDrawer({
 }: Props) {
   const { t } = useTranslation(["workReport", "common"]);
   const [storedDraft, setStoredDraft] = useState(() => createDrawerDraft(appliedState));
-  const draft = storedDraft.source === appliedState
+  const notifiedRequestRef = useRef<string | null>(null);
+  const reportedPendingRef = useRef<{ requestId: string; source: AppliedState; pending: boolean } | null>(null);
+  let draft = storedDraft.source === appliedState
     ? storedDraft
-    : createDrawerDraft(appliedState);
+    : { ...createDrawerDraft(appliedState), conditionRequestId: storedDraft.conditionRequestId };
+  if (conditionRequest && draft.conditionRequestId !== conditionRequest.id &&
+    draft.group.conditions.length < WORK_REPORT_MAX_FILTER_CONDITIONS) {
+    draft = {
+      ...draft,
+      conditionRequestId: conditionRequest.id,
+      group: { ...draft.group, conditions: [...draft.group.conditions, conditionRequest] },
+      preserveAppliedGlobalFilters: false,
+    };
+    setStoredDraft(draft);
+  }
+  const pending = isDrawerDraftPending(draft, appliedState);
+  const requestWaiting = !!conditionRequest && draft.conditionRequestId !== conditionRequest.id;
+  useEffect(() => {
+    if (!conditionRequest) return;
+    const reported = reportedPendingRef.current;
+    if (reported?.requestId !== conditionRequest.id || reported.source !== appliedState || reported.pending !== pending) {
+      reportedPendingRef.current = { requestId: conditionRequest.id, source: appliedState, pending };
+      onPendingChange(pending);
+    }
+    if (!requestWaiting || notifiedRequestRef.current === conditionRequest.id) return;
+    notifiedRequestRef.current = conditionRequest.id;
+    void message.info(t("workReport:cellCopy.filterLimit"));
+  }, [conditionRequest, appliedState, pending, requestWaiting, onPendingChange, t]);
   const updateDraft = (update: (current: DrawerDraftState) => DrawerDraftState) => {
     const nextDraft = update(draft);
     setStoredDraft(nextDraft);
     onPendingChange(isDrawerDraftPending(nextDraft, appliedState));
   };
-
-  const pending = isDrawerDraftPending(draft, appliedState);
 
   const resetDraft = (current: DrawerDraftState): DrawerDraftState => ({
     ...current,

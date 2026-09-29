@@ -55,6 +55,7 @@ import type {
   UiLanguage,
   WorkReportLocalPreferences,
   WorkReportListLocationState,
+  WorkReportFilterCondition,
   WorkReportFilterGroup,
 } from "../types";
 import {
@@ -311,6 +312,8 @@ export function WorkReportListPage() {
     handleColumnResizeStart,
   } = useWorkReportListTableLayoutController(currentFormId);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [cellFilterRequest, setCellFilterRequest] = useState<{ scope: string; condition: WorkReportFilterCondition } | null>(null);
+  if (cellFilterRequest && cellFilterRequest.scope !== activeLandingPageKey) setCellFilterRequest(null);
   const [filterDrawerDraftStatus, setFilterDrawerDraftStatus] = useState<{
     source: object;
     pending: boolean;
@@ -321,9 +324,14 @@ export function WorkReportListPage() {
     setFilterPanelOpen(true);
   }, [filterPanelOpen]);
   const handleCloseFilterDrawer = useCallback(() => {
+    setCellFilterRequest(null);
     setFilterDrawerDraftStatus(null);
     setFilterPanelOpen(false);
   }, []);
+  const handleFilterByCellValue = useCallback((condition: WorkReportFilterCondition) => {
+    setCellFilterRequest({ scope: activeLandingPageKey, condition });
+    setFilterPanelOpen(true);
+  }, [activeLandingPageKey]);
   const handleFilterDrawerBackgroundClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (
@@ -1193,6 +1201,7 @@ export function WorkReportListPage() {
                     currentFormId={currentFormId}
                     activeLandingPageKey={activeLandingPageKey}
                     appliedState={filterDrawerAppliedState}
+                    conditionRequest={cellFilterRequest?.condition}
                     onClose={handleCloseFilterDrawer}
                     onPendingChange={(pending) => {
                       setFilterDrawerDraftStatus({
@@ -1227,6 +1236,9 @@ export function WorkReportListPage() {
 
                 <WorkReportTableSection
                   columns={columns}
+                  currentFormId={currentFormId}
+                  uiLanguage={uiLanguage}
+                  onFilterByValue={handleFilterByCellValue}
                   columnDisplayMode={columnDisplayMode}
                   visibleRecords={visibleRecords}
                   backgroundLoading={listBackgroundLoading}

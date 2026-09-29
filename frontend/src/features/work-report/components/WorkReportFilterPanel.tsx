@@ -12,6 +12,7 @@ import {
   WORK_REPORT_MAX_FILTER_VALUES,
   WORK_REPORT_MAX_SAVED_FILTERS,
   WORK_REPORT_MAX_SAVED_FILTER_NAME_LENGTH,
+  COLUMN_TYPE_MAP,
 } from "../constants";
 import {
   deleteWorkReportFilterPreset,
@@ -228,8 +229,7 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
     if (
       condition.field === "machineCode" ||
       condition.field === "status" ||
-      condition.field === "siteRunning" ||
-      condition.field === "startSchedule"
+      COLUMN_TYPE_MAP[condition.field] === "boolean"
     ) {
       return (
         <div className="custom-filter-multi-value">
@@ -255,7 +255,7 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
       );
     }
 
-    if (condition.field === "lastUpdatedAt") {
+    if (COLUMN_TYPE_MAP[condition.field] === "date") {
       const isBetween = condition.operator === "between";
       return (
         <div className={`custom-filter-date-value ${isBetween ? "is-range" : ""}`}>
@@ -265,6 +265,7 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
             max={isBetween ? condition.values[1] || undefined : undefined}
             disabled={filterControlDisabled}
             aria-label={t("workReport:filters.builder.dateStart")}
+            title={t("workReport:filters.builder.dateTimezone")}
             onChange={(event) =>
               updateCondition(condition.id, {
                 values: [event.target.value, ...(isBetween ? [condition.values[1] ?? ""] : [])],
@@ -280,6 +281,7 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
                 min={condition.values[0] || undefined}
                 disabled={filterControlDisabled}
                 aria-label={t("workReport:filters.builder.dateEnd")}
+                title={t("workReport:filters.builder.dateTimezone")}
                 onChange={(event) =>
                   updateCondition(condition.id, {
                     values: [condition.values[0] ?? "", event.target.value],
@@ -294,6 +296,8 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
 
     return (
       <Input
+        type={COLUMN_TYPE_MAP[condition.field] === "number" ? "number" : "text"}
+        step="any"
         value={condition.values[0] ?? ""}
         maxLength={120}
         disabled={filterControlDisabled}
@@ -427,6 +431,8 @@ export const WorkReportFilterPanel = memo(function WorkReportFilterPanel({
                 </span>
                 <Select
                   className="custom-filter-field-select"
+                  showSearch
+                  optionFilterProp="label"
                   value={condition.field}
                   options={fieldOptions}
                   disabled={filterControlDisabled}

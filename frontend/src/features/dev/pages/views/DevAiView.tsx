@@ -46,6 +46,7 @@ import {
 } from "../../utils/devAiClientMessageId";
 import { DevAiMessageContent } from "../../components/DevAiMessageContent";
 import { DevAiThinkingSignal } from "../../components/DevAiThinkingSignal";
+import { useDevAiAutoScroll } from "../../utils/useDevAiAutoScroll";
 
 export function DevAiView() {
   const { token, onAuthFailure } = useDevContext();
@@ -144,6 +145,11 @@ export function DevAiView() {
     }
     return map;
   }, [detail?.artifacts]);
+  const autoScroll = useDevAiAutoScroll(
+    threadId,
+    detail,
+    `${sending}:${loading}`
+  );
 
   async function handleNewThread() {
     if (!readiness?.chatAvailable) {
@@ -379,7 +385,7 @@ export function DevAiView() {
               <p>{activeThread.summary}</p>
             </section>
           ) : null}
-          <div className="dev-ai-workspace__messages" aria-label="對話內容">
+          <div {...autoScroll} className="dev-ai-workspace__messages" aria-label="對話內容">
             {detail?.messages.length ? (
               detail.messages.map((message, index) => {
                 const messageArtifacts = artifactsByMessage.get(message.id) ?? [];

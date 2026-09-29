@@ -17,6 +17,7 @@ import type {
 } from "../types";
 import { getColumnHeaderLocaleText, parseSemanticBoolean } from "../utils";
 import { formatPlannedEndDateDisplay } from "../utils/plannedEndDateUtils";
+import { getWorkReportCellCopyValue } from "../workReportCellCopy";
 import {
   useWorkReportColumnMenuContent,
   type WorkReportColumnsMenuActions,
@@ -547,6 +548,11 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
 
         return {
           ...column,
+          onCell: (record: WorkReportRecord, index?: number) => ({
+            ...column.onCell?.(record, index),
+            "data-work-report-copy-value": getWorkReportCellCopyValue(record, columnKey, currentFormId, uiLanguage),
+            "data-work-report-column-key": columnKey,
+          }),
           className: [column.className, toneClassName].filter(Boolean).join(" ") || undefined,
           width:
             typeof columnWidthOverrides[columnKey] === "number"
@@ -591,9 +597,11 @@ export function useWorkReportColumns(args: UseWorkReportColumnsArgs) {
     columnColors,
     columnOrder,
     columnWidthOverrides,
+    currentFormId,
     disableFixedColumns,
     hiddenColumnKeys,
     renderColumnHeaderWithMenu,
+    uiLanguage,
   ]);
 
   return { columns };

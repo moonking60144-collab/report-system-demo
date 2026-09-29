@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type SetStateAction,
 } from "react";
+import { useDevAiAutoScroll } from "../utils/useDevAiAutoScroll";
 import { createPortal } from "react-dom";
 import {
   CloseOutlined,
@@ -139,6 +140,7 @@ export function RagicDefinitionsAiAssistant({
   const suppressLauncherClickUntilRef = useRef(0);
   const threadSendInFlightRef = useRef(false);
   const messageSubmissionRef = useRef<DevAiMessageSubmission | null>(null);
+  const autoScroll = useDevAiAutoScroll(thread?.id, threadDetail, `${open}:${loading}`);
 
   const targetFormPath = draft.formPath.trim();
   const targetFieldId = draft.fieldId.trim();
@@ -604,7 +606,7 @@ export function RagicDefinitionsAiAssistant({
             <small>{contextStatus}</small>
           </div>
 
-          <div className="ragic-defs-ai-bot__conversation" aria-label="AI 對話內容">
+          <div {...autoScroll} className="ragic-defs-ai-bot__conversation" aria-label="AI 對話內容">
             {threadDetail?.messages.length ? (
               <AiThreadTimeline
                 detail={threadDetail}

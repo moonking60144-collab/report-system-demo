@@ -1,4 +1,5 @@
 import { getOrCreateClientBootId, getOrCreateClientId, getOrCreateTabId } from "../../utils/clientIdentity";
+import { checkFrontendLifecycleVersion } from "../../frontendUpdateGuard";
 
 let connection: { url: string; source: EventSource; users: number } | null = null;
 
@@ -22,7 +23,12 @@ export function workReportEventsUrl(): string {
 }
 
 export function acquireWorkReportConnection(url = workReportEventsUrl()) {
-  if (!connection) connection = { url, source: new window.EventSource(url), users: 0 };
+  if (!connection) {
+    const source = new window.EventSource(url);
+    source.addEventListener("ready", checkFrontendLifecycleVersion);
+    source.addEventListener("ping", checkFrontendLifecycleVersion);
+    connection = { url, source, users: 0 };
+  }
   const current = connection;
   current.users += 1;
   let released = false;

@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
+import type { WorkReportFilterCondition } from "../../src/features/work-report/types";
 
 declare global {
   interface Window {
     __workReportListVisualReady?: boolean;
     __workReportListVisualDetailOpenCount?: number;
+    __workReportListVisualFilterCondition?: WorkReportFilterCondition;
     __workReportListVisualStartScheduleMutationCount?: number;
     __workReportListVisualMainMachineMutationCount?: number;
     __workReportListVisualUrgentMutationCount?: number;
@@ -523,6 +525,37 @@ test('右鍵標記一次只保留一筆，保留業務底色並可從固定工�
   await page.getByRole('button', { name: '清除標記 WO-CLOSED' }).click();
   await expect(page.locator('[data-row-key="closed"]')).not.toHaveClass(/row-marked/);
   expect(await page.evaluate(() => sessionStorage.getItem('work-report:marked-row:901'))).toBeNull();
+});
+
+test('列表右鍵複製顯示值與整列，並把精確欄位條件交給篩選入口', async ({ page }) => {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&formId=901');
+  const row = page.locator('[data-row-key="normal"]');
+  await row.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '複製欄位值' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('DEMO-070335');
+
+  await row.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '複製這列' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('DEMO-070335');
+
+  await row.locator('.work-order-cell-button').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '以此值篩選' }).click();
+  await expect.poll(() => page.evaluate(() => window.__workReportListVisualFilterCondition))
+    .toMatchObject({ field: 'workOrderNo', operator: 'equals', values: ['DEMO-070335'] });
+  await expect(page.getByRole('menuitem', { name: /在 Ragic 開啟/ })).toHaveCount(0);
+});
+
+test('右鍵編輯布林欄位先開啟編輯器，不會在選單操作時直接寫入', async ({ page }) => {
+  await page.goto('/__work-report-list-visual-contract__?statusProbe=1&formId=901');
+  const urgent = page.locator('[data-row-key="normal"] [data-work-report-column-key="urgent"] .work-report-boolean-toggle');
+  await urgent.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '編輯欄位值' }).click();
+  await expect(page.locator('.work-report-editable-popover')).toBeVisible();
+  expect(await page.evaluate(() => window.__workReportListVisualUrgentMutationCount ?? 0)).toBe(0);
+  await page.locator('.work-report-editable-popover select').selectOption('no');
+  await page.locator('.work-report-editable-popover').getByRole('button', { name: '儲存' }).click();
+  await expect.poll(() => page.evaluate(() => window.__workReportListVisualUrgentMutationCount)).toBe(1);
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }, { width: 820, height: 560 }, { width: 390, height: 844 }]) {

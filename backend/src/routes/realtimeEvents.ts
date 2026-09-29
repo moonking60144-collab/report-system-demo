@@ -7,6 +7,7 @@ import {
 } from "../events/realtimeEventBus";
 import { SERVER_BOOT_ID } from "../observability/serverBootState";
 import { SERVER_DEPLOY_VERSION } from "../observability/deployVersionState";
+import { readFrontendBuildId } from "../observability/frontendBuildState";
 import { workReportClientPresenceStore } from "../observability/workReportClientPresenceStore";
 import { workReportDebugLog } from "../observability/workReportDebugLog";
 import { resolveRequestClientIdentity } from "../infra/requestClientIdentity";
@@ -88,6 +89,7 @@ realtimeEventsRouter.get(
       at: new Date().toISOString(),
       bootId: SERVER_BOOT_ID,
       deployVersion: SERVER_DEPLOY_VERSION,
+      frontendBuildId: readFrontendBuildId(),
     });
     const lastRagicDefinitionsSyncStatus = getLastRagicDefinitionsSyncStatus();
     if (lastRagicDefinitionsSyncStatus) {
@@ -161,6 +163,7 @@ realtimeEventsRouter.get(
           at: new Date().toISOString(),
           bootId: SERVER_BOOT_ID,
           deployVersion: SERVER_DEPLOY_VERSION,
+          frontendBuildId: readFrontendBuildId(),
         });
       } catch (error) {
         workReportDebugLog("sse", "heartbeat-write-failed", {

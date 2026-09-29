@@ -16,6 +16,7 @@ import {
 } from "../types/workReport";
 import { HttpError } from "../utils/httpError";
 import { normalizeDateOnly } from "../utils/dateOnly";
+import { parseWorkReportFilterNumber } from "../utils/workReportFilterNumber";
 import { env } from "../config/env";
 import { createHash, timingSafeEqual } from "node:crypto";
 
@@ -223,17 +224,14 @@ function parseColumnFilters(input: string | undefined): ReportColumnFilterState 
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-const WORK_REPORT_FILTER_OPERATORS_BY_FIELD: Record<
-  WorkReportFilterField,
+const WORK_REPORT_FILTER_OPERATORS_BY_TYPE: Record<
+  ReportColumnFilterType,
   readonly WorkReportFilterOperator[]
 > = {
-  workOrderNo: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
-  customerPartNo: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
-  machineCode: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  status: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  siteRunning: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  startSchedule: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
-  lastUpdatedAt: ["before", "after", "between", "isEmpty", "isNotEmpty"],
+  text: ["contains", "notContains", "equals", "startsWith", "isEmpty", "isNotEmpty"],
+  number: ["equals", "greaterThan", "lessThan", "atLeast", "atMost", "isEmpty", "isNotEmpty"],
+  boolean: ["isAnyOf", "isNotAnyOf", "isEmpty", "isNotEmpty"],
+  date: ["before", "after", "between", "isEmpty", "isNotEmpty"],
 };
 
 const WORK_REPORT_FILTER_MAX_CONDITIONS = 12;
@@ -282,13 +280,12 @@ function parseFilterGroup(input: string | undefined): WorkReportFilterGroup | un
       throw new HttpError(400, `filterGroup.conditions[${index}] 格式錯誤`, "INVALID_QUERY_PARAM");
     }
     const raw = rawCondition as Record<string, unknown>;
-    const field = String(raw.field ?? "") as WorkReportFilterField;
+    const rawField = String(raw.field ?? "");
+    const field = rawField as WorkReportFilterField;
     const operator = String(raw.operator ?? "") as WorkReportFilterOperator;
-    const allowedOperators = Object.prototype.hasOwnProperty.call(
-      WORK_REPORT_FILTER_OPERATORS_BY_FIELD,
-      field
-    )
-      ? WORK_REPORT_FILTER_OPERATORS_BY_FIELD[field]
+    const fieldType = isReportColumnKey(rawField) && rawField !== "filterMachineCode" ? REPORT_COLUMN_TYPE_BY_KEY[rawField] : undefined;
+    const allowedOperators = fieldType
+      ? WORK_REPORT_FILTER_OPERATORS_BY_TYPE[field === "machineCode" || field === "status" ? "boolean" : fieldType]
       : undefined;
     if (!Array.isArray(allowedOperators) || !allowedOperators.includes(operator)) {
       throw new HttpError(
@@ -304,14 +301,9 @@ function parseFilterGroup(input: string | undefined): WorkReportFilterGroup | un
         "INVALID_QUERY_PARAM"
       );
     }
-    const values = Array.from(
-      new Set(
-        raw.values
-          .filter((value): value is string => typeof value === "string")
-          .map((value) => value.trim())
-          .filter(Boolean)
-      )
-    );
+    const suppliedValues = raw.values.filter((value): value is string => typeof value === "string")
+      .map(value => value.trim()).filter(Boolean);
+    const values = operator === "between" ? suppliedValues : Array.from(new Set(suppliedValues));
     if (values.some((value) => value.length > 120)) {
       throw new HttpError(
         400,
@@ -329,7 +321,7 @@ function parseFilterGroup(input: string | undefined): WorkReportFilterGroup | un
       );
     }
     if (
-      field === "lastUpdatedAt" &&
+      fieldType === "date" &&
       !isValueless &&
       values.slice(0, requiredValueCount).some((value) => !isValidFilterDateOnly(value))
     ) {
@@ -347,7 +339,7 @@ function parseFilterGroup(input: string | undefined): WorkReportFilterGroup | un
       );
     }
     if (
-      (field === "siteRunning" || field === "startSchedule") &&
+      fieldType === "boolean" &&
       !isValueless &&
       values.some((value) => value !== "yes" && value !== "no")
     ) {
@@ -356,6 +348,9 @@ function parseFilterGroup(input: string | undefined): WorkReportFilterGroup | un
         `filterGroup.conditions[${index}] 布林條件值無效`,
         "INVALID_QUERY_PARAM"
       );
+    }
+    if (fieldType === "number" && !isValueless && parseWorkReportFilterNumber(values[0]) === null) {
+      throw new HttpError(400, `filterGroup.conditions[${index}] 數字條件值無效`, "INVALID_QUERY_PARAM");
     }
     return {
       id:

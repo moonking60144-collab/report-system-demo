@@ -29,7 +29,10 @@ test("shutdown 主動結束 SSE 並清除 heartbeat、event listener 與 presenc
     const reader = response.body.getReader();
     const firstChunk = await reader.read();
     assert.equal(firstChunk.done, false);
-    assert.match(Buffer.from(firstChunk.value).toString("utf8"), /event: ready/);
+    const readyText = Buffer.from(firstChunk.value).toString("utf8");
+    assert.match(readyText, /event: ready/);
+    const readyPayload = JSON.parse(readyText.match(/event: ready\ndata: ([^\n]+)/)?.[1] ?? "null") as Record<string, unknown>;
+    assert.ok(Object.hasOwn(readyPayload, "frontendBuildId"));
     assert.deepEqual(getRealtimeSseStats(), {
       acceptingConnections: true,
       activeConnectionCount: 1,

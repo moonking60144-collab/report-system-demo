@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { checkFrontendLifecycleVersion, FRONTEND_BUILD_ID } from "../frontendUpdateGuard";
 import {
   clearServerBootRedirectFlash,
   hasServerBootRedirectPending,
@@ -139,6 +140,10 @@ export function useServerBootGuard(enabled = true): ServerBootGuardState {
     };
 
     const handleLifecycleEvent = (event: MessageEvent) => {
+      if (FRONTEND_BUILD_ID) {
+        checkFrontendLifecycleVersion(event);
+        return;
+      }
       handleDeployVersion(parseLifecycleDeployVersion(event.data));
     };
 

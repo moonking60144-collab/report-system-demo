@@ -93,6 +93,25 @@ test("可新增機台複選條件、切換任一條件並套用", async ({ page 
     });
 });
 
+test("新增數值欄位可選大於並保留數值條件", async ({ page }) => {
+  await openFixture(page);
+  const panel = page.getByRole("region", { name: "工令精確篩選" });
+  await panel.getByRole("button", { name: "新增條件" }).click();
+  const row = panel.locator(".custom-filter-condition-row").last();
+  await row.locator(".custom-filter-field-select").click();
+  await row.locator(".custom-filter-field-select input").fill("預估所需工時");
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .locator('.ant-select-item-option[title="預估所需工時"]').click();
+  await row.locator(".custom-filter-operator-select").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .locator('.ant-select-item-option[title="大於"]').click();
+  await row.locator('input[type="number"]').fill("2.5");
+  await panel.getByRole("button", { name: "套用篩選" }).click();
+  await expect.poll(() => page.evaluate(() => window.__workReportFilterPanelGroup?.conditions
+    .find(condition => condition.field === "estimatedHours")))
+    .toMatchObject({ field: "estimatedHours", operator: "greaterThan", values: ["2.5"] });
+});
+
 test("儲存條件後可跨重載保留並還原篩選與排序", async ({ page }) => {
   await openFixture(page);
   await page.getByRole("button", { name: "儲存條件" }).click();
