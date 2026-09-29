@@ -172,6 +172,7 @@ async function main() {
         run,
         env: process.env,
         diarizationEnabled: isEnabled(sttSettings.MEETING_STT_DIARIZATION_ENABLED),
+        isStopping: () => stopping,
       });
       if (stopping) return;
       startServer("meeting-stt", python, ["-m", "app"], meetingSttDir, process.env);
