@@ -16,6 +16,7 @@ interface UseWorkReportRealtimeArgs {
   onEntriesUpdated?: (payload: RealtimeEventPayload) => void;
   onSystemNoticeForceRefresh?: (payload: RealtimeEventPayload) => void;
   onServerBootIdChanged?: (payload: { bootId: string }) => void;
+  onReconnect?: () => void;
 }
 
 interface UseWorkReportRealtimeResult {
@@ -82,6 +83,7 @@ export function useWorkReportRealtime({
   onEntriesUpdated,
   onSystemNoticeForceRefresh,
   onServerBootIdChanged,
+  onReconnect,
 }: UseWorkReportRealtimeArgs): UseWorkReportRealtimeResult {
   const [connected, setConnected] = useState(false);
   const [disconnectedSince, setDisconnectedSince] = useState<number | null>(null);
@@ -91,6 +93,11 @@ export function useWorkReportRealtime({
   const onSystemNoticeForceRefreshRef = useRef(onSystemNoticeForceRefresh);
   const onServerBootIdChangedRef = useRef(onServerBootIdChanged);
   const lastBootIdRef = useRef("");
+  const onReconnectRef = useRef(onReconnect);
+
+  useEffect(() => {
+    onReconnectRef.current = onReconnect;
+  }, [onReconnect]);
 
   useEffect(() => {
     onFormUpdatedRef.current = onFormUpdated;
@@ -119,12 +126,18 @@ export function useWorkReportRealtime({
 
     const { source, release } = acquireWorkReportConnection();
 
+    let interrupted = false;
     const opened = () => {
       setConnected(true);
       setDisconnectedSince(null);
+      if (interrupted) {
+        interrupted = false;
+        onReconnectRef.current?.();
+      }
     };
 
     const errored = () => {
+      interrupted = true;
       setConnected(false);
       setDisconnectedSince((prev) => prev ?? Date.now());
     };

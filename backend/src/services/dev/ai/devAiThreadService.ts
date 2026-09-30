@@ -246,14 +246,14 @@ function buildRollingSummary(
   existingSummary: string | null | undefined,
   messages: Array<{ role: string; content: string }>
 ): string {
-  const head = existingSummary?.trim()
-    ? [`既有摘要：${existingSummary.trim()}`]
-    : ["本 thread 重點摘要："];
-  const tail = messages.slice(-8).map((message) => {
+  const heading = "近期對話摘要：";
+  const lines = existingSummary?.split("\n").filter((line) => line.startsWith("- ")) ?? [];
+  lines.push(...messages.slice(-8).map((message) => {
     const speaker = message.role === "assistant" ? "AI" : "使用者";
-    return `- ${speaker}: ${compactText(message.content, 180)}`;
-  });
-  return compactText([...head, ...tail].join("\n"), 2_000);
+    return `- ${speaker}: ${compactText(message.content.replace(/\s+/g, " "), 180)}`;
+  }));
+  while ([heading, ...lines].join("\n").length > 2_000) lines.shift();
+  return [heading, ...lines].join("\n");
 }
 
 function buildKnowledgeCandidate(params: {
@@ -875,9 +875,11 @@ export function createDevAiThreadService(
     const messages = await repository.listMessages(actor, threadId, summaryAfterMessages + 1);
     if (messages.length < summaryAfterMessages) return null;
     if (currentThread.summaryMessageId === lastMessageId) return null;
+    const previousIndex = messages.findIndex((item) => item.id === currentThread.summaryMessageId);
     const summary = buildRollingSummary(
-      currentThread.summary,
-      messages.map((item) => ({ role: item.role, content: item.content }))
+      previousIndex >= 0 ? currentThread.summary : null,
+      messages.slice(previousIndex + 1).filter((item) => item.status === "completed")
+        .map((item) => ({ role: item.role, content: item.content }))
     );
     return repository.updateThreadSummary({
       ownerActor: actor,

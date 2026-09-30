@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import {
   createReportAccepted,
   updateReportAccepted,
+  retryBatchDeleteFinalizeAccepted,
   type CreateReportTaskAcceptedResult,
   type WorkReportQueueTask,
   type WorkReportQueueTaskStatus,
@@ -335,6 +336,10 @@ export function WorkReportTaskQueueDrawer({
       if (!task.actorClientId || task.actorClientId !== actorClientId) {
         return false;
       }
+      if (task.taskType === "delete-report" || task.taskType === "delete-report-batch") {
+        return Boolean(task.deleteFinalizeFailed && task.deletedRowIds?.length &&
+          !tasks.some((item) => item.retriedFromTaskId === (task.retriedFromTaskId ?? task.taskId) && item.status !== "failed"));
+      }
       if (isRetryableMutationTaskType(task.taskType)) {
         const retryRecord = getRetryableMutationRecord(task.taskId);
         if (isEntryLevelUpdateWithoutRetryPayload(task, retryRecord?.rowId)) {
@@ -354,7 +359,7 @@ export function WorkReportTaskQueueDrawer({
       }
       return false;
     },
-    [actorClientId, context, entryId]
+    [actorClientId, context, entryId, tasks]
   );
 
   const getTaskRetryHint = useCallback(
@@ -374,9 +379,11 @@ export function WorkReportTaskQueueDrawer({
         return t("workReport:taskQueue.retryHints.callbackUnavailable");
       }
       if (task.taskType === "delete-report") {
+        if (canRetryTask(task)) return t("workReport:taskQueue.retryHints.deleteFinalizeAvailable");
         return t("workReport:taskQueue.retryHints.deleteUnavailable");
       }
       if (task.taskType === "delete-report-batch") {
+        if (canRetryTask(task)) return t("workReport:taskQueue.retryHints.deleteFinalizeAvailable");
         return t("workReport:taskQueue.retryHints.deleteBatchUnavailable");
       }
 
@@ -427,7 +434,7 @@ export function WorkReportTaskQueueDrawer({
 
       return t("workReport:taskQueue.retryHints.unsupported");
     },
-    [actorClientId, context, entryId, t]
+    [actorClientId, context, entryId, t, canRetryTask]
   );
 
   const showRetryConfirmModal = useCallback(
@@ -449,6 +456,17 @@ export function WorkReportTaskQueueDrawer({
   const handleRetryTask = useCallback(
     async (task: WorkReportQueueTask) => {
       if (!formId) {
+        return;
+      }
+      if ((task.taskType === "delete-report" || task.taskType === "delete-report-batch") && task.entryId && canRetryTask(task)) {
+        setRetryingTaskId(task.taskId);
+        setError(null);
+        try {
+          await retryBatchDeleteFinalizeAccepted(formId, task.entryId, task.taskId);
+          await loadTasks();
+        } catch (nextError) {
+          setError(nextError instanceof Error ? nextError.message : String(nextError));
+        } finally { setRetryingTaskId(null); }
         return;
       }
       if (task.taskType === "create-report-batch") {
@@ -547,7 +565,7 @@ export function WorkReportTaskQueueDrawer({
         setRetryingTaskId(null);
       }
     },
-    [formId, loadTasks, onRetryAccepted, showRetryConfirmModal, t, workOrderNo]
+    [formId, loadTasks, onRetryAccepted, showRetryConfirmModal, t, workOrderNo, canRetryTask]
   );
 
   return (
@@ -821,7 +839,7 @@ export function WorkReportTaskQueueDrawer({
                       >
                         {retryingTaskId === task.taskId
                           ? t("common:actions.saving")
-                          : t("workReport:taskQueue.retry")}
+                          : t(task.deleteFinalizeFailed ? "workReport:taskQueue.retryFinalize" : "workReport:taskQueue.retry")}
                       </button>
                     </div>
                   ) : null}

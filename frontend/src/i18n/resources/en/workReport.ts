@@ -982,6 +982,7 @@ const workReportEn = {
     empty: "No task history yet.",
     retry: "Retry",
     retrySubmitted: "The task has been submitted again.",
+    retryFinalize: "Retry finalization",
     retryMissing: "No local retry payload was found for this task. Please submit it again manually.",
     guidance: {
       active: "You can keep working or close Task Queue. Tasks continue in the background, with active progress refreshed about every 2 seconds.",
@@ -1077,6 +1078,7 @@ const workReportEn = {
       alreadyRetried: 'This task has already been retried. Check the "Retried As" task id above.',
       syncUnavailable: "Sync is a system background task. The task center does not support retry here; please refresh the page or trigger sync again manually.",
       callbackUnavailable: "Callback refresh is triggered by webhook/background flow. The task center does not support retry for this type.",
+      deleteFinalizeAvailable: "Retry recalculation and synchronization without deleting the rows again.",
       deleteUnavailable: "Delete tasks cannot be retried from Task Queue. Refresh and verify whether it still needs to be deleted.",
       deleteBatchUnavailable: "Batch delete is not retryable from the task center right now. Please select the rows again and delete them manually.",
       unsupported: "This task type is not retryable from the task center right now.",

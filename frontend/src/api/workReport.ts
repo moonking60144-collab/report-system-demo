@@ -943,6 +943,16 @@ export async function retryBatchCreateFinalizeAccepted(
   return response.data.data;
 }
 
+export async function retryBatchDeleteFinalizeAccepted(
+  formId: string, entryId: string, taskId: string
+): Promise<BatchCreateTaskAcceptedResult> {
+  const response = await api.post<{ data: BatchCreateTaskAcceptedResult }>(
+    `/forms/${formId}/reports/${entryId}/batch-delete/${taskId}/retry-finalize`, null,
+    { headers: buildTaskActorHeadersWithContext({}) }
+  );
+  return response.data.data;
+}
+
 export async function deleteReportsBatchAccepted(
   formId: string,
   entryId: string,

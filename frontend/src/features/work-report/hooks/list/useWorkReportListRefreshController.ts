@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { fetchWorkReportSyncStatus, triggerWorkReportSync, type WorkReportSyncTask } from "../../../../api/workReport";
 import type {
   WorkReportFrontendEventAction,
@@ -93,6 +93,9 @@ export function useWorkReportListRefreshController({
   const [refreshSyncModalOpen, setRefreshSyncModalOpen] = useState(false);
   const autoRefreshTimerRef = useRef<number | null>(null);
   const autoRefreshInFlightRef = useRef(false);
+  const refreshAfterFlightRef = useRef(false);
+  const latestAutoRefreshRef = useRef<(options?: { maxJitterMs?: number }) => void>(() => {});
+  const [reconnectPending, setReconnectPending] = useState(false);
   const lastHandledNoticeForceRefreshTokenRef = useRef("");
   const pendingAutoRefreshNoticeMessageRef = useRef<string | null>(null);
   const pendingReadStartedAfterRef = useRef<number | undefined>(undefined);
@@ -356,6 +359,7 @@ export function useWorkReportListRefreshController({
           ? undefined
           : Math.max(pendingReadStartedAfterRef.current, options.requiredReadStartedAfter);
       if (autoRefreshInFlightRef.current || autoRefreshTimerRef.current !== null) {
+        if (autoRefreshInFlightRef.current) refreshAfterFlightRef.current = true;
         if (options.noticeMessage) {
           pendingAutoRefreshNoticeMessageRef.current = options.noticeMessage;
         }
@@ -364,6 +368,11 @@ export function useWorkReportListRefreshController({
 
       const jitterMs = Math.max(0, options.maxJitterMs ?? 1200);
       autoRefreshTimerRef.current = window.setTimeout(() => {
+        if (latestAutoRefreshRef.current !== triggerAutoRefresh) {
+          autoRefreshTimerRef.current = null;
+          latestAutoRefreshRef.current({ maxJitterMs: 0 });
+          return;
+        }
         const requiredReadStartedAfter = pendingReadStartedAfterRef.current;
         pendingReadStartedAfterRef.current = undefined;
         autoRefreshTimerRef.current = null;
@@ -443,6 +452,10 @@ export function useWorkReportListRefreshController({
             });
           } finally {
             autoRefreshInFlightRef.current = false;
+            if (refreshAfterFlightRef.current) {
+              refreshAfterFlightRef.current = false;
+              latestAutoRefreshRef.current({ maxJitterMs: 0 });
+            }
           }
         };
         void run();
@@ -471,6 +484,16 @@ export function useWorkReportListRefreshController({
     isHydratingAllRecords,
     triggerAutoRefresh,
   };
+
+  useLayoutEffect(() => {
+    latestAutoRefreshRef.current = triggerAutoRefresh;
+  }, [triggerAutoRefresh]);
+
+  useEffect(() => {
+    if (!reconnectPending || loading || isHydratingAllRecords) return;
+    setReconnectPending(false);
+    triggerAutoRefresh({ maxJitterMs: 0 });
+  }, [reconnectPending, loading, isHydratingAllRecords, triggerAutoRefresh]);
 
   const handleSystemNoticeForceRefresh = useCallback(
     (forceRefreshToken: string): void => {
@@ -519,6 +542,7 @@ export function useWorkReportListRefreshController({
     enabled: !isStandaloneTopView,
     onFormUpdated: handleRealtimeFormUpdated,
     onSystemNoticeForceRefresh: handleRealtimeSystemNoticeForceRefresh,
+    onReconnect: () => setReconnectPending(true),
   });
 
   useEffect(() => {
@@ -546,6 +570,7 @@ export function useWorkReportListRefreshController({
 
   useEffect(() => {
     return () => {
+      refreshAfterFlightRef.current = false;
       if (autoRefreshTimerRef.current !== null) {
         window.clearTimeout(autoRefreshTimerRef.current);
         autoRefreshTimerRef.current = null;

@@ -31,6 +31,13 @@ export { PreviewPageCache } from "../cache/workReportPreviewCache";
 export type { PreviewPageCacheEntry } from "../cache/workReportPreviewCache";
 export { WorkReportEntrySettlementRevisionBarrier as HydrationEntrySettlementBarrier } from "../entrySettlementRevisionBarrier";
 
+interface PreviewReloadOptions {
+  throwOnError?: boolean;
+  mode?: "foreground" | "background";
+  invalidateCache?: boolean;
+  requiredReadStartedAfter?: number;
+}
+
 export function shouldReuseHydratedFullRecords(input: {
   forceRefresh: boolean;
   reloadFromBackend: boolean;
@@ -454,6 +461,9 @@ export function useWorkReportListData({
   onPreviewReadMetric,
 }: UseWorkReportListDataArgs) {
   const [loading, setLoading] = useState(false);
+  const [pendingBackgroundRead, setPendingBackgroundRead] = useState<{
+    forceRefresh: boolean; options: PreviewReloadOptions;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [records, setRecords] = useState<WorkReportRecord[]>([]);
   const [allRecords, setAllRecords] = useState<WorkReportRecord[]>([]);
@@ -678,12 +688,7 @@ export function useWorkReportListData({
   const loadReports = useCallback(
     async (
       forceRefresh = false,
-      options: {
-        throwOnError?: boolean;
-        mode?: "foreground" | "background";
-        invalidateCache?: boolean;
-        requiredReadStartedAfter?: number;
-      } = {}
+      options: PreviewReloadOptions = {}
     ): Promise<void> => {
       const isBackground = options.mode === "background";
       const metricMode: PreviewReadMetric["mode"] = isBackground
@@ -701,6 +706,10 @@ export function useWorkReportListData({
         return;
       }
       if (isBackground && foregroundPreviewRequestActiveRef.current) {
+        setPendingBackgroundRead((current) => ({
+          forceRefresh: forceRefresh || Boolean(current?.forceRefresh),
+          options: { ...options, invalidateCache: true, requiredReadStartedAfter: undefined },
+        }));
         return;
       }
       const retainedPreview =
@@ -955,6 +964,14 @@ export function useWorkReportListData({
     previewSettlementReloadEpoch,
     shouldUseFullHydrationForList,
   ]);
+
+  useEffect(() => {
+    if (!pendingBackgroundRead || loading || previewRevalidating || foregroundPreviewRequestActiveRef.current) return;
+    setPendingBackgroundRead(null);
+    void loadReports(pendingBackgroundRead.forceRefresh, pendingBackgroundRead.options).catch(() => {
+      // NOTE: loadReports retains its normal error state for a deferred refresh.
+    });
+  }, [pendingBackgroundRead, loading, previewRevalidating, loadReports]);
 
   useEffect(() => {
     if (

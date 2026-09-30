@@ -96,6 +96,7 @@ export interface WorkReportQueueTaskRecord {
   batchWriteIndeterminate?: boolean | null;
   writeIndeterminate?: boolean | null;
   deletedCount?: number | null;
+  deletedRowIds?: string[] | null;
   deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
   scanMs?: number | null;
@@ -147,6 +148,7 @@ interface UpsertWorkReportQueueTaskInput {
   batchWriteIndeterminate?: boolean | null;
   writeIndeterminate?: boolean | null;
   deletedCount?: number | null;
+  deletedRowIds?: string[] | null;
   deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
   scanMs?: number | null;
@@ -394,6 +396,7 @@ export class WorkReportTaskRegistryService {
           : input.deleteFinalizeFailed === null
             ? null
             : existing?.deleteFinalizeFailed ?? null,
+      deletedRowIds: input.deletedRowIds ? [...input.deletedRowIds] : existing?.deletedRowIds ?? null,
       retriedFromTaskId:
         normalizeOptionalString(input.retriedFromTaskId) ??
         existing?.retriedFromTaskId ??
@@ -471,6 +474,14 @@ export class WorkReportTaskRegistryService {
 
   getTask(taskId: string): WorkReportQueueTaskRecord | null {
     const task = this.tasks.get(taskId);
+    return task ? this.copyTask(task) : null;
+  }
+
+  findDeleteFinalizeRetry(sourceTaskId: string): WorkReportQueueTaskRecord | null {
+    const task = Array.from(this.tasks.values()).find((item) =>
+      (item.taskType === "delete-report" || item.taskType === "delete-report-batch") &&
+      item.retriedFromTaskId === sourceTaskId && item.status !== "failed"
+    );
     return task ? this.copyTask(task) : null;
   }
 
@@ -664,6 +675,8 @@ export class WorkReportTaskRegistryService {
           : "服務重啟，原未完成任務已標記為失敗";
       const recoveredTask: WorkReportQueueTaskRecord = {
         ...task,
+        ...((task.taskType === "delete-report" || task.taskType === "delete-report-batch") && task.deletedRowIds?.length
+          ? { deleteFinalizeFailed: true } : {}),
         status: "failed",
         updatedAt: recoveredAt,
         finishedAt: recoveredAt,
@@ -963,6 +976,8 @@ export class WorkReportTaskRegistryService {
         (typeof candidate.deletedCount === "number" &&
           Number.isInteger(candidate.deletedCount) &&
           candidate.deletedCount >= 0)) &&
+      (candidate.deletedRowIds == null ||
+        (Array.isArray(candidate.deletedRowIds) && candidate.deletedRowIds.every((id) => typeof id === "string" && /^\d+$/.test(id)))) &&
       (candidate.deleteFinalizeFailed === null ||
         candidate.deleteFinalizeFailed === undefined ||
         typeof candidate.deleteFinalizeFailed === "boolean") &&

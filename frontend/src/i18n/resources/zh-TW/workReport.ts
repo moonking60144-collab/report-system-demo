@@ -963,6 +963,7 @@ const workReportZhTw = {
     empty: "目前沒有任務紀錄",
     retry: "重送",
     retrySubmitted: "已重新送出這筆任務。",
+    retryFinalize: "重試收尾",
     retryMissing: "找不到這筆任務的本機重送資料，請重新送出。",
     guidance: {
       active: "可繼續操作或關閉任務中心，任務會在背景執行；執行中進度約每 2 秒更新。",
@@ -1058,6 +1059,7 @@ const workReportZhTw = {
       alreadyRetried: "這筆任務已經重送過，請看上方的「已重送為」任務編號。",
       syncUnavailable: "同步屬於系統背景任務，任務中心目前不提供重送；請改用頁面重新整理或手動重跑同步。",
       callbackUnavailable: "Callback 刷新由 webhook / 背景流程觸發，任務中心目前不提供重送。",
+      deleteFinalizeAvailable: "可重試工令回算與資料同步；已刪除的明細不會再次刪除。",
       deleteUnavailable: "刪除任務目前不支援在任務中心直接重送，請重新整理後再確認是否需要刪除。",
       deleteBatchUnavailable: "批次刪除目前不支援在任務中心直接重送，請重新選取後再刪一次。",
       unsupported: "這類任務目前不支援在任務中心直接重送。",

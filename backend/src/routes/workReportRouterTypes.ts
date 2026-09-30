@@ -208,6 +208,7 @@ export interface WorkReportRouterDeps {
   }): Promise<AcceptedMutationTaskResponse & {
     requestedCount?: number;
   }>;
+  requestBatchDeleteFinalizeRetry: WorkReportRouterDeps["requestBatchCreateFinalizeRetry"];
   updateReport(
     formId: string,
     entryId: string,

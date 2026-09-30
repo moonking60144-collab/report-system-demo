@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "../fixtures/verified-test";
 
 const thread = {
   id: "ui-fixture", title: "認識 Ragic 與表單設計", mode: "auto", context: {},
@@ -159,6 +159,112 @@ test("新對話可送出，等待只顯示漸層思考中；失敗保留草稿�
   await expect(input).toHaveValue("follow-up");
   await expect(page.getByRole("button", { name: "查看回答依據", exact: true })).toBeVisible();
 });
+
+test("切換對話載入中不會把訊息送到舊對話", async ({ page }) => {
+  const requests = await installWorkspaceMocks(page);
+  const other = { ...thread, id: "thread-b", title: "對話 B" };
+  await page.route("**/api/dev/ai/threads", route => route.fulfill({ json: { data: [thread, other] } }));
+  let pendingDetail: Route | undefined;
+  let postedTo = "";
+  await page.route("**/api/dev/ai/threads/thread-b", route => { pendingDetail = route; });
+  await page.route("**/api/dev/ai/threads/thread-b/messages", async route => {
+    postedTo = new URL(route.request().url()).pathname;
+    await route.fulfill({ status: 503, json: { error: { message: "fixture" } } });
+  });
+  await page.goto(`/dev/ai/threads/${thread.id}`);
+  const input = page.getByRole("textbox", { name: "訊息", exact: true });
+  await expect(input).toBeEditable();
+  await input.fill("這題屬於 B");
+  await page.getByRole("link", { name: "對話 B", exact: false }).click();
+  await expect(input).toBeDisabled();
+  expect(requests.pending()).toBeUndefined();
+  await expect.poll(() => Boolean(pendingDetail)).toBe(true);
+  await pendingDetail!.fulfill({ json: { data: { thread: other, messages: [], artifacts: [] } } });
+  await expect(input).toBeEditable();
+  await input.press("Control+Enter");
+  await expect.poll(() => postedTo).toBe("/api/dev/ai/threads/thread-b/messages");
+  expect(requests.pending()).toBeUndefined();
+});
+
+for (const failed of [false, true]) {
+  test(`A 的晚到${failed ? "錯誤" : "回答"}不污染 B 對話`, async ({ page }) => {
+    const requests = await installWorkspaceMocks(page);
+    const other = { ...thread, id: "thread-b", title: "對話 B" };
+    await page.route("**/api/dev/ai/threads", route => route.fulfill({ json: { data: [thread, other] } }));
+    await page.route("**/api/dev/ai/threads/thread-b", route => route.fulfill({ json: { data: {
+      thread: other, messages: [{ ...assistantMessage, id: "b-message", threadId: other.id, content: "B 專屬回答" }], artifacts: [],
+    } } }));
+    await page.goto(`/dev/ai/threads/${thread.id}`);
+    const input = page.getByRole("textbox", { name: "訊息", exact: true });
+    await input.fill("A 的問題");
+    await input.press("Control+Enter");
+    await expect.poll(() => Boolean(requests.pending())).toBe(true);
+    await page.getByRole("link", { name: "對話 B", exact: false }).click();
+    await expect(page.getByText("B 專屬回答")).toBeVisible();
+    await requests.complete(failed);
+    await expect(input).toBeEditable();
+    await expect(page).toHaveURL(/\/thread-b$/);
+    await expect(page.locator(".dev-ai-workspace__panel").getByText("對話 B", { exact: true }), "THREAD_OWNERSHIP").toBeVisible();
+    await expect(page.getByLabel("對話內容", { exact: true })).toHaveText(/B 專屬回答/);
+    await expect(page.getByLabel("對話內容", { exact: true })).not.toContainText("A 的問題");
+    await expect(page.getByText("暫時無法回答，請稍後重試", { exact: true })).not.toBeVisible();
+  });
+}
+
+for (const snapshotFirst of [false, true]) {
+  test(`返回 A 時${snapshotFirst ? "snapshot 先到" : "POST 先到"}仍保留歷史且不重複訊息`, async ({ page }) => {
+    const requests = await installWorkspaceMocks(page);
+    const other = { ...thread, id: "thread-b", title: "對話 B" };
+    const history = { ...assistantMessage, id: "history", content: "A 的既有歷史" };
+    const completeDetail = { thread, messages: [history, userMessage, assistantMessage], artifacts };
+    await page.route("**/api/dev/ai/threads", route => route.fulfill({ json: { data: [thread, other] } }));
+    await page.route("**/api/dev/ai/threads/thread-b", route => route.fulfill({ json: { data: { thread: other, messages: [], artifacts: [] } } }));
+    let reads = 0;
+    let stale: Route | undefined;
+    await page.route(`**/api/dev/ai/threads/${thread.id}`, async route => {
+      reads++;
+      if (reads === 2 && !snapshotFirst) { stale = route; return; }
+      await route.fulfill({ json: { data: reads === 1 ? { thread, messages: [history], artifacts: [] } : completeDetail } });
+    });
+    await page.goto(`/dev/ai/threads/${thread.id}`);
+    const input = page.getByRole("textbox", { name: "訊息", exact: true });
+    await input.fill("什麼是 Ragic？"); await input.press("Control+Enter");
+    await expect.poll(() => Boolean(requests.pending())).toBe(true);
+    await page.getByRole("link", { name: "對話 B", exact: false }).click();
+    await expect(page.locator(".dev-ai-workspace__panel").getByText("對話 B", { exact: true })).toBeVisible();
+    await page.getByRole("link", { name: thread.title, exact: false }).click();
+    await expect.poll(() => reads).toBe(2);
+    if (snapshotFirst) await expect(page.getByLabel("對話內容", { exact: true }).locator("article")).toHaveCount(3);
+    await requests.complete();
+    await expect(input).toBeEditable();
+    await expect(page.getByLabel("對話內容", { exact: true }).locator("article")).toHaveCount(3);
+    await expect(page.getByText("A 的既有歷史", { exact: true })).toBeVisible();
+    if (stale) await stale.fulfill({ json: { data: { thread, messages: [history], artifacts: [] } } });
+    await expect(page.getByLabel("對話內容", { exact: true }).locator("article")).toHaveCount(3);
+  });
+}
+
+for (const operation of ["archive", "create"]) {
+  test(`${operation} 晚到結果不改變新選取的對話`, async ({ page }) => {
+    await installWorkspaceMocks(page);
+    const other = { ...thread, id: "thread-b", title: "對話 B" };
+    let pending: Route | undefined;
+    await page.route("**/api/dev/ai/threads", async route => {
+      if (route.request().method() === "POST") { pending = route; return; }
+      await route.fulfill({ json: { data: [thread, other] } });
+    });
+    await page.route(`**/api/dev/ai/threads/${thread.id}/archive`, route => { pending = route; });
+    await page.route("**/api/dev/ai/threads/thread-b", route => route.fulfill({ json: { data: { thread: other, messages: [], artifacts: [] } } }));
+    await page.goto(`/dev/ai/threads/${thread.id}`);
+    await page.getByRole("button", { name: operation === "archive" ? /封存/ : /新對話/ }).click();
+    await expect.poll(() => Boolean(pending)).toBe(true);
+    await page.getByRole("link", { name: "對話 B", exact: false }).click();
+    await expect(page.locator(".dev-ai-workspace__panel").getByText("對話 B", { exact: true })).toBeVisible();
+    await pending!.fulfill({ json: { data: { ...thread, id: operation === "create" ? "new-thread" : thread.id } } });
+    await expect(page).toHaveURL(/\/thread-b$/);
+    await expect(page.locator(".dev-ai-workspace__panel").getByText("對話 B", { exact: true })).toBeVisible();
+  });
+}
 
 for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }, { width: 1280, height: 480 }]) {
   test(`長摘要展開仍可閱讀訊息與操作輸入框 ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {

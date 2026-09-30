@@ -152,6 +152,7 @@ export function useWorkReportDetailRefreshController({
       enabled,
       onEntryUpdated: handleRealtimeEntryUpdated,
       onEntriesUpdated: handleRealtimeEntryUpdated,
+      onReconnect: runImmediateRefresh,
     });
 
   useEffect(() => {

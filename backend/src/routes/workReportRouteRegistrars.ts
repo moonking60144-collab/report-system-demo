@@ -900,6 +900,26 @@ export function registerWorkReportMutationRoutes(router: Router, deps: WorkRepor
   );
 
   router.post(
+    "/:formId/reports/:entryId/batch-delete/:taskId/retry-finalize",
+    asyncHandler(async (req, res) => {
+      const ctx = parseMutationRequestContext(req);
+      const taskId = req.params.taskId;
+      assertRequiredPathValue(taskId, "taskId");
+      const task = await deps.requestBatchDeleteFinalizeRetry({
+        formId: ctx.formId, entryId: ctx.entryId, taskId,
+        actorClientId: ctx.actor.actorClientId ?? undefined,
+        actorTabId: ctx.actor.actorTabId ?? undefined,
+        actorIp: ctx.actor.actorIp ?? undefined,
+        actorLabel: ctx.actor.actorLabel ?? undefined,
+      });
+      res.status(202).json({
+        data: { ...task, lifecycleState: "accepted", acceptedAt: task.createdAt, confirmedAt: null },
+        meta: { formId: ctx.formId, entryId: ctx.entryId, accepted: true, retryMode: "finalize-only" },
+      });
+    })
+  );
+
+  router.post(
     "/:formId/reports/:entryId/batch-create/:taskId/retry-finalize",
     asyncHandler(async (req, res) => {
       const ctx = parseMutationRequestContext(req);

@@ -12,6 +12,24 @@ import { HttpError } from "../../src/utils/httpError";
 
 // 原值由編輯開始時取得；無關資料變動可通過，同一目標變動及結案必須在寫入前被攔截。
 for (const formId of ["901", "902"]) {
+  for (const action of ["update", "delete"] as const) {
+    test(`${formId} ${action} 未提供 hash 仍拒絕已結案工令`, async (t) => {
+      const config = getFormConfig(formId);
+      t.mock.method(ragicClient, "getEntry", async () => ({
+        [config.mainFields.status]: "已結案",
+        [config.writeConfig.subtableId]: { "42": { remark: "before" } },
+      }));
+      t.mock.method(workReportReadService, "getFormOptions", async () => ({ operatorId: [{ value: "A001", label: "Test", display: "Test" }] }));
+      const write = t.mock.method(ragicClient, "updateEntry", async () => ({}));
+      await assert.rejects(() => action === "delete"
+        ? workReportRowMutationService.hardDeleteReport(formId, "1", "42", { skipDeleteRecalculate: true })
+        : workReportRowMutationService.updateReport(formId, "1", "42", {
+          date: "2026-09-16", machineId: "MA18", operatorId: "A001", processCode: "A01",
+          startTime: "08:00", endTime: "09:00", productionQty: 5, remark: "after",
+        }), (error: unknown) => error instanceof HttpError && error.code === "ENTRY_CLOSED", "CLOSED_WITHOUT_HASH");
+      assert.equal(write.mock.callCount(), 0);
+    });
+  }
   for (const kind of ["date", "machine", "urgent", ...(formId === "901" ? ["schedule"] : [])]) {
     test(`${formId} ${kind} 原值相同時忽略其他欄位更新，已達目標時不重寫`, async (t) => {
       const config = getFormConfig(formId);

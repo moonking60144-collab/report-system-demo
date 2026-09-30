@@ -84,6 +84,9 @@ function createDeps(): WorkReportRouterDeps {
       createdAt: "2026-03-30T00:00:00.000Z",
       requestedCount: 2,
     }),
+    requestBatchDeleteFinalizeRetry: async (_input) => ({
+      taskId: "delete-finalize-retry", status: "pending", createdAt: new Date().toISOString(), requestedCount: 1,
+    }),
     requestBatchCreateFinalizeRetry: async (_input) => ({
       taskId: "batch-create-finalize-retry-task",
       status: "pending",

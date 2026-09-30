@@ -79,6 +79,8 @@ ENV NODE_ENV=production \
 COPY --from=backend-builder /app/backend/package.json ./package.json
 COPY --from=backend-builder /app/backend/node_modules ./node_modules
 COPY --from=backend-builder /app/backend/dist ./dist
+COPY --from=backend-builder /app/backend/templates ./templates
+COPY ragic-definitions/ /app/ragic-definitions/
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 # /data is mounted from a Fly volume; create it so first boot before mount

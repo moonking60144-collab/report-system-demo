@@ -74,7 +74,7 @@ class WorkReportRowMutationService {
     }
     validateReportPayload(payload, config.writeConfig.requiredFields);
     const normalizedPayload = await normalizePayloadForWrite(formId, config, payload);
-    const beforeSnapshot = await getExistingSubtableRow(config, entryId, normalizedRowId, { requireOpen: expectedRowSnapshotHash !== undefined });
+    const beforeSnapshot = await getExistingSubtableRow(config, entryId, normalizedRowId, { requireOpen: true });
     if (expectedRowSnapshotHash !== undefined) {
       assertRowSnapshotUnchanged(config, normalizedRowId, beforeSnapshot, expectedRowSnapshotHash);
     }
@@ -126,7 +126,7 @@ class WorkReportRowMutationService {
     if (!/^\d+$/.test(normalizedRowId)) {
       throw new HttpError(400, `非法的子表列識別碼：${rowId}`, "INVALID_ROW_ID");
     }
-    const beforeSnapshot = await getExistingSubtableRow(config, entryId, normalizedRowId, { requireOpen: expectedRowSnapshotHash !== undefined });
+    const beforeSnapshot = await getExistingSubtableRow(config, entryId, normalizedRowId, { requireOpen: true });
     if (expectedRowSnapshotHash !== undefined) {
       assertRowSnapshotUnchanged(config, normalizedRowId, beforeSnapshot, expectedRowSnapshotHash);
     }

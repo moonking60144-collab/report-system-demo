@@ -33,6 +33,23 @@ function nextTick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+for (const read of ["getFormPage", "getFormData"] as const) {
+  test(`${read} 拒絕 application error 與 malformed page，保留合法空頁`, async (t) => {
+    ragicClient.clearCache();
+    let payload: unknown;
+    t.mock.method(ragicClient as unknown as RagicClientInternals, "runReadRequest", async () => ({ data: payload }));
+    const run = () => read === "getFormPage"
+      ? ragicClient.getFormPage("/test/page-validation", { limit: 1000, offset: 0 }, false)
+      : ragicClient.getFormData("/test/page-validation", false);
+    for (payload of [{ status: "ERROR", msg: "permission denied" }, null, "bad response", { data: null }, { "1": "bad row" }]) {
+      await assert.rejects(run, /permission denied|無法辨識/, "INVALID_PAGE_MUST_REJECT");
+    }
+    for (payload of [{}, { data: {} }]) assert.deepEqual(await run(), {});
+    payload = { data: { "1": { name: "valid" } } };
+    assert.deepEqual(await run(), { "1": { name: "valid" } });
+  });
+}
+
 test("getFormPage 同一個 cache key 的併發讀取只送出一個 upstream request", async (t) => {
   ragicClient.clearCache();
   const client = ragicClient as unknown as RagicClientInternals;

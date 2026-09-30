@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import {
   AuditOutlined,
@@ -55,7 +55,8 @@ export function DevAiView() {
   const { threadId } = useParams();
   const navigate = useNavigate();
   const [threads, setThreads] = useState<DevAiThread[]>([]);
-  const [detail, setDetail] = useState<DevAiThreadDetail | null>(null);
+  const [loadedDetail, setDetail] = useState<DevAiThreadDetail | null>(null);
+  const detail = loadedDetail?.thread.id === threadId ? loadedDetail : null;
   const [draft, setDraft] = useState("");
   const [speedMode, setSpeedMode] = useState<DevAiSpeedMode>("fast");
   const [includeKnowledge, setIncludeKnowledge] = useState(true);
@@ -70,6 +71,11 @@ export function DevAiView() {
   const detailRevisionRef = useRef(0);
   const sendInFlightRef = useRef(false);
   const messageSubmissionRef = useRef<DevAiMessageSubmission | null>(null);
+  const selectionRef = useRef<{ threadId: string | undefined; token: string } | null>({ threadId, token });
+  useLayoutEffect(() => {
+    selectionRef.current = { threadId, token };
+    return () => { selectionRef.current = null; };
+  }, [threadId, token]);
   const unavailableMessage = devAiUnavailableMessage(readiness);
   const knowledgeUnavailableMessage = devAiKnowledgeUnavailableMessage(readiness);
 
@@ -159,27 +165,38 @@ export function DevAiView() {
       return;
     }
     setError(null);
+    const selection = selectionRef.current;
     try {
       const created = await createDevAiThread(token, { mode: "auto" });
+      if (selectionRef.current?.token !== token) return;
       setThreads((current) => [created, ...current.filter((thread) => thread.id !== created.id)]);
+      if (selectionRef.current !== selection) return;
       detailRevisionRef.current += 1;
       setDetail({ thread: created, messages: [], artifacts: [] });
       navigate(`/dev/ai/threads/${created.id}`);
     } catch (err) {
-      setError(extractErrorMessage(err, "新增對話失敗"));
+      if (selectionRef.current === selection) setError(extractErrorMessage(err, "新增對話失敗"));
     }
   }
 
   async function ensureThreadForSend(message: string): Promise<DevAiThread> {
-    if (activeThread && threadId) return activeThread;
+    if (threadId) {
+      if (detail?.thread.id !== threadId) throw new Error("對話尚未載入，請稍後再試");
+      return detail.thread;
+    }
+    const selection = selectionRef.current;
     const created = await createDevAiThread(token, {
       title: message.slice(0, 42),
       mode: "auto",
     });
+    if (selectionRef.current?.token !== token) return created;
     setThreads((current) => [created, ...current.filter((thread) => thread.id !== created.id)]);
-    detailRevisionRef.current += 1;
-    setDetail({ thread: created, messages: [], artifacts: [] });
-    navigate(`/dev/ai/threads/${created.id}`);
+    if (selectionRef.current === selection && selection?.token === token) {
+      selectionRef.current = { threadId: created.id, token };
+      detailRevisionRef.current += 1;
+      setDetail({ thread: created, messages: [], artifacts: [] });
+      navigate(`/dev/ai/threads/${created.id}`);
+    }
     return created;
   }
 
@@ -188,13 +205,16 @@ export function DevAiView() {
       setError(unavailableMessage ?? "AI 對話目前不可用");
       return;
     }
-    if (!draft.trim() || sending || sendInFlightRef.current) return;
+    if (!draft.trim() || sending || sendInFlightRef.current || (threadId && detail?.thread.id !== threadId)) return;
     sendInFlightRef.current = true;
     const message = draft.trim();
     setSending(true);
     setError(null);
+    let targetThreadId = threadId;
+    const selection = selectionRef.current;
     try {
       const targetThread = await ensureThreadForSend(message);
+      targetThreadId = targetThread.id;
       const payload: Omit<DevAiSendMessageRequest, "clientMessageId"> = {
         message,
         mode: "auto",
@@ -213,17 +233,38 @@ export function DevAiView() {
         clientMessageId: submission.clientMessageId,
       });
       messageSubmissionRef.current = null;
+      if (selectionRef.current?.token !== token) return;
+      setThreads((current) => [next.thread, ...current.filter((thread) => thread.id !== next.thread.id)]);
+      if (selectionRef.current.threadId !== targetThread.id) return;
       detailRevisionRef.current += 1;
+      if (threadId && selectionRef.current !== selection) {
+        const currentSelection = selectionRef.current;
+        setDraft("");
+        try {
+          const refreshed = await fetchDevAiThreadDetail(token, targetThread.id);
+          if (selectionRef.current === currentSelection) setDetail(refreshed);
+        } catch {
+          if (selectionRef.current === currentSelection) setError("回答已完成，但對話重新載入失敗，請重新整理。");
+        }
+        return;
+      }
       setDetail((current) => ({
         thread: next.thread,
-        messages: [...(current?.messages ?? []), next.userMessage, next.assistantMessage],
-        artifacts: [...(current?.artifacts ?? []), ...next.artifacts],
+        messages: [...new Map([
+          ...(current?.thread.id === targetThread.id ? current.messages : detail?.messages ?? []),
+          next.userMessage, next.assistantMessage,
+        ].map((item) => [item.id, item])).values()],
+        artifacts: [...new Map([
+          ...(current?.thread.id === targetThread.id ? current.artifacts : detail?.artifacts ?? []),
+          ...next.artifacts,
+        ].map((item) => [item.id, item])).values()],
         summaryUsed: next.summaryUsed,
       }));
-      setThreads((current) => [next.thread, ...current.filter((thread) => thread.id !== next.thread.id)]);
       setDraft("");
     } catch (err) {
-      setError(extractErrorMessage(err, "送出失敗"));
+      if (selectionRef.current?.token === token && selectionRef.current.threadId === targetThreadId) {
+        setError(extractErrorMessage(err, "送出失敗"));
+      }
     } finally {
       sendInFlightRef.current = false;
       setSending(false);
@@ -233,14 +274,17 @@ export function DevAiView() {
   async function handleArchive() {
     if (!threadId || !activeThread) return;
     setError(null);
+    const selection = selectionRef.current;
     try {
       await archiveDevAiThread(token, threadId);
+      if (selectionRef.current?.token !== token) return;
       setThreads((current) => current.filter((thread) => thread.id !== threadId));
+      if (selectionRef.current !== selection) return;
       detailRevisionRef.current += 1;
       setDetail(null);
       navigate("/dev/ai");
     } catch (err) {
-      setError(extractErrorMessage(err, "封存失敗"));
+      if (selectionRef.current === selection) setError(extractErrorMessage(err, "封存失敗"));
     }
   }
 
@@ -423,7 +467,7 @@ export function DevAiView() {
             includeKnowledge={includeKnowledge}
             includeDefinitions={includeDefinitions}
             sending={sending}
-            disabledReason={unavailableMessage}
+            disabledReason={unavailableMessage ?? (threadId && !detail ? "正在載入對話…" : null)}
             knowledgeAvailable={readiness?.knowledge.available ?? false}
             onDraftChange={setDraft}
             onSpeedModeChange={setSpeedMode}

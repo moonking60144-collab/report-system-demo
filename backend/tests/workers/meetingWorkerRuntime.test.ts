@@ -73,6 +73,50 @@ const minutesJob: MeetingMinutesJobRecord = {
   version: null,
 };
 
+for (const kind of ["transcription", "minutes"] as const) {
+  test(`${kind} 開始後取消會中止 provider 並執行 settlement`, async () => {
+    let cancelled = false;
+    let settled = 0;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    let observedSignal: AbortSignal | undefined;
+    let finished!: () => void;
+    const providerFinished = new Promise<void>((resolve) => { finished = resolve; });
+    const processClaimedJob = async (_job: unknown, _worker: string, signal: AbortSignal) => {
+      observedSignal = signal;
+      started();
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("RUNNING_JOB_CANCEL_NOT_OBSERVED")), 1000);
+        signal.addEventListener("abort", () => { clearTimeout(timeout); resolve(); finished(); }, { once: true });
+      });
+      return { ...(kind === "transcription" ? transcriptionJob : minutesJob), status: "failed" };
+    };
+    const runtime = new MeetingWorkerRuntime({
+      repository: { claimNext: async () => null } as never,
+      processingService: {} as never,
+      transcriptionRepository: { claimNext: async () => kind === "transcription" ? transcriptionJob : null } as never,
+      transcriptionService: { providerEnabled: true, heartbeat: async () => true, processClaimedJob } as never,
+      minutesRepository: { claimNext: async () => kind === "minutes" ? minutesJob : null } as never,
+      minutesService: { providerEnabled: true, heartbeat: async () => true, processClaimedJob } as never,
+      oneShotService: {
+        advance: async () => {},
+        repository: { isCancellationRequested: async () => cancelled },
+        settleCancellation: async () => { settled++; }, settleTerminalFailure: async () => {},
+      } as never,
+      workerId: "worker-cancel", heartbeatIntervalMs: 5,
+    });
+    const running = runtime.runOnce();
+    await ready;
+    assert.equal(observedSignal?.aborted, false);
+    cancelled = true;
+    await providerFinished;
+    await running;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(observedSignal?.aborted, true);
+    assert.equal(settled, 1);
+  });
+}
+
 test("runOnce 只 claim 一筆並等待 processing 完成", async () => {
   let claimCount = 0;
   let processCount = 0;

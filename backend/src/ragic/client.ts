@@ -105,6 +105,17 @@ function isRagicRecord(value: unknown): value is RagicRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function readFormPage(payload: unknown): RagicFormData {
+  if (isRagicRecord(payload) && String(payload.status ?? "").trim().toUpperCase() === "ERROR") {
+    throw new UpstreamError(String(payload.msg ?? "Ragic 資料讀取回傳 application error"), "RAGIC_READ_FAILED");
+  }
+  const rows = isRagicRecord(payload) && "data" in payload ? payload.data : payload;
+  if (!isRagicRecord(rows) || Object.entries(rows).some(([key, value]) => !key.startsWith("_") && !isRagicRecord(value))) {
+    throw new UpstreamError("Ragic 表單讀取回傳無法辨識的資料格式", "RAGIC_READ_INVALID_RESPONSE");
+  }
+  return rows as RagicFormData;
+}
+
 function extractEntry(payload: unknown, entryId: string): RagicRecord | null {
   if (!isRagicRecord(payload)) return null;
   const nested = isRagicRecord(payload.data) ? payload.data : payload;
@@ -216,7 +227,7 @@ class RagicClient {
           { maxRetries: requestOptions.maxRetries, timeoutMs }
         );
 
-        const pageEntries = Object.entries(response.data).filter(
+        const pageEntries = Object.entries(readFormPage(response.data)).filter(
           ([key]) => !key.startsWith("_")
         );
 
@@ -273,9 +284,7 @@ class RagicClient {
         { maxRetries: requestOptions.maxRetries, timeoutMs }
       );
 
-      const container = response.data as RagicRecord;
-      const nested = container?.data;
-      return isRagicRecord(nested) ? nested as RagicFormData : response.data;
+      return readFormPage(response.data);
     });
   }
 

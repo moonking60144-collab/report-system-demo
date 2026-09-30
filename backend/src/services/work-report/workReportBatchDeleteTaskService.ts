@@ -8,6 +8,7 @@ import {
   workReportTaskRegistryService,
   type WorkReportQueueTaskStatus,
   type WorkReportQueueTaskType,
+  type WorkReportQueueTaskRecord,
 } from "./workReportTaskRegistryService";
 
 const log = createLogger("work-report-batch-delete");
@@ -28,6 +29,8 @@ interface WorkReportBatchDeleteTask {
   rowIds: string[];
   requestedCount: number;
   deletedCount: number;
+  deletedRowIds: string[];
+  retriedFromTaskId?: string;
   failedCount: number;
   failedItems: BatchDeleteFailedItem[];
   status: WorkReportQueueTaskStatus;
@@ -117,13 +120,44 @@ function isDeleteWriteIndeterminate(item: BatchDeleteFailedItem): boolean {
   );
 }
 
-class WorkReportBatchDeleteTaskService {
+export class WorkReportBatchDeleteTaskService {
   private readonly tasks = new Map<string, WorkReportBatchDeleteTask>();
   private readonly queueChainByKey = workReportEntryMutationQueue;
+  constructor(private readonly registry = workReportTaskRegistryService) {}
 
   requestBatchDelete(input: RequestBatchDeleteInput): Pick<
     WorkReportBatchDeleteTask,
     "taskId" | "status" | "createdAt" | "requestedCount"
+  > {
+    return this.enqueueTask(input);
+  }
+
+  requestBatchDeleteFinalizeRetry(input: Pick<RequestBatchDeleteInput,
+    "formId" | "entryId" | "actorClientId" | "actorTabId" | "actorIp" | "actorLabel" | "finalizeAfterDelete"
+  > & { taskId: string }) {
+    const source = this.registry.getTask(input.taskId);
+    if (!source || source.formId !== input.formId || source.entryId !== input.entryId ||
+      (source.taskType !== "delete-report" && source.taskType !== "delete-report-batch")) {
+      throw new HttpError(404, "找不到刪除任務", "TASK_NOT_FOUND");
+    }
+    if (source.actorClientId && source.actorClientId !== input.actorClientId) {
+      throw new HttpError(403, "只能重試此裝置的刪除收尾任務", "DELETE_FINALIZE_RETRY_FORBIDDEN");
+    }
+    if (source.status !== "failed" || !source.deleteFinalizeFailed || !source.deletedRowIds?.length) {
+      throw new HttpError(409, "這筆任務沒有可重試的刪除收尾", "DELETE_FINALIZE_RETRY_UNAVAILABLE");
+    }
+    const rootTaskId = source.retriedFromTaskId ?? source.taskId;
+    const existing = this.registry.findDeleteFinalizeRetry(rootTaskId);
+    if (existing) return { taskId: existing.taskId, status: existing.status, createdAt: existing.createdAt, requestedCount: existing.deletedCount ?? 0 };
+    return this.enqueueTask({
+      ...input, taskType: source.taskType, rowIds: source.deletedRowIds,
+      workOrderNo: source.workOrderNo ?? undefined,
+      deleteRow: async () => { throw new Error("Finalize retry must never delete rows"); },
+    }, { ...source, taskId: rootTaskId });
+  }
+
+  private enqueueTask(input: RequestBatchDeleteInput, retrySource?: WorkReportQueueTaskRecord): Pick<
+    WorkReportBatchDeleteTask, "taskId" | "status" | "createdAt" | "requestedCount"
   > {
     const rowIds = normalizeRowIds(input.rowIds);
     if (rowIds.length === 0) {
@@ -144,11 +178,13 @@ class WorkReportBatchDeleteTaskService {
       queueKey: `${input.formId}:${input.entryId}`,
       rowIds,
       requestedCount: rowIds.length,
-      deletedCount: 0,
+      deletedCount: retrySource ? rowIds.length : 0,
+      deletedRowIds: retrySource ? [...rowIds] : [],
+      ...(retrySource ? { retriedFromTaskId: retrySource.taskId } : {}),
       failedCount: 0,
       failedItems: [],
       status: "pending",
-      phase: "deleting",
+      phase: retrySource ? "finalizing" : "deleting",
       createdAt,
       updatedAt: createdAt,
       ...(input.actorClientId ? { actorClientId: input.actorClientId } : {}),
@@ -188,15 +224,15 @@ class WorkReportBatchDeleteTaskService {
     const taskStartedAtMs = Date.parse(startedAt);
     this.patchTask(taskId, {
       status: "running",
-      phase: "deleting",
+      phase: task.retriedFromTaskId ? "finalizing" : "deleting",
       startedAt,
       updatedAt: startedAt,
       runningMessage: undefined,
     });
 
-    const deletedRowIds: string[] = [];
+    const deletedRowIds: string[] = [...task.deletedRowIds];
     const failedItems: BatchDeleteFailedItem[] = [];
-    const rowIds = [...task.rowIds];
+    const rowIds = task.retriedFromTaskId ? [] : [...task.rowIds];
     const concurrency = Math.max(
       1,
       Math.min(
@@ -302,6 +338,7 @@ class WorkReportBatchDeleteTaskService {
         } finally {
           this.patchTask(taskId, {
             deletedCount: deletedRowIds.length,
+            deletedRowIds: [...deletedRowIds],
             failedCount: failedItems.length,
             failedItems: [...failedItems],
             updatedAt: new Date().toISOString(),
@@ -448,7 +485,10 @@ class WorkReportBatchDeleteTaskService {
             .join(", ")}`
         : "";
 
-    const message = isSingleDelete
+    const message = task.retriedFromTaskId
+      ? task.status === "success" ? `已刪除的 ${task.deletedCount} 筆明細收尾完成`
+        : task.status === "failed" ? "刪除收尾重試失敗" : "正在重試刪除收尾（不重複刪除明細）"
+      : isSingleDelete
       ? task.status === "pending"
         ? "刪除報工排隊中"
         : task.status === "running"
@@ -486,7 +526,7 @@ class WorkReportBatchDeleteTaskService {
             .join(" | ")
         : null;
 
-    workReportTaskRegistryService.upsertTask({
+    this.registry.upsertTask({
       taskId: task.taskId,
       taskType: task.taskType,
       status: task.status,
@@ -519,6 +559,8 @@ class WorkReportBatchDeleteTaskService {
       writeIndeterminate: isSingleDelete ? writeIndeterminate : null,
       batchWriteIndeterminate: isSingleDelete ? null : writeIndeterminate,
       deletedCount: task.deletedCount,
+      deletedRowIds: task.deletedRowIds,
+      retriedFromTaskId: task.retriedFromTaskId,
       deleteFinalizeFailed,
     });
   }

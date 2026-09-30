@@ -922,7 +922,7 @@ export function WorkReportListPage() {
     currentFormId,
     shouldUseFullHydrationForList,
     isStandaloneTopView,
-    loading,
+    loading: loading || previewRevalidating,
     isHydratingAllRecords,
     page,
     setPage,

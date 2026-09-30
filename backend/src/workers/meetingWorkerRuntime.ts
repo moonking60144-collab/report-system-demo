@@ -335,8 +335,11 @@ export class MeetingWorkerRuntime {
     if (this.stopping) abortController.abort();
     if (await this.oneShotService?.repository.isCancellationRequested(job.sessionId)) abortController.abort();
     const heartbeatTimer = setInterval(() => {
-      void this.transcriptionService!.heartbeat(job.jobId, this.workerId).then((owned) => {
-        if (!owned) {
+      void Promise.all([
+        this.transcriptionService!.heartbeat(job.jobId, this.workerId),
+        this.oneShotService?.repository.isCancellationRequested(job.sessionId) ?? false,
+      ]).then(([owned, cancelled]) => {
+        if (!owned || cancelled) {
           log.warn({
             event: "lease-lost",
             workerId: this.workerId,
@@ -389,8 +392,11 @@ export class MeetingWorkerRuntime {
     if (this.stopping) abortController.abort();
     if (await this.oneShotService?.repository.isCancellationRequested(job.sessionId)) abortController.abort();
     const heartbeatTimer = setInterval(() => {
-      void this.minutesService!.heartbeat(job.jobId, this.workerId).then((owned) => {
-        if (!owned) {
+      void Promise.all([
+        this.minutesService!.heartbeat(job.jobId, this.workerId),
+        this.oneShotService?.repository.isCancellationRequested(job.sessionId) ?? false,
+      ]).then(([owned, cancelled]) => {
+        if (!owned || cancelled) {
           log.warn({
             event: "lease-lost",
             workerId: this.workerId,

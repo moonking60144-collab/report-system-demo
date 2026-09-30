@@ -581,6 +581,30 @@ test("Dev AI thread service summary 只更新 thread-local summary", async () =>
   await repo.close();
 });
 
+test("長對話摘要保留最新決策、限制長度且不重複摘要舊訊息", async () => {
+  const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
+  let tick = 0;
+  const service = createDevAiThreadService({
+    enabled: true, summaryEnabled: true, summaryAfterMessages: 2, repository: repo,
+    now: () => new Date(Date.UTC(2026, 8, 30, 0, 0, tick++)),
+    chatService: { async ask() { return chatResult({ answer: "確認".repeat(90) }); } },
+  });
+  try {
+    const thread = await service.createThread("alice", { title: "summary budget" });
+    for (let turn = 1; turn <= 20; turn++) {
+      const marker = `decision-${turn}:`;
+      const result = await service.sendMessage("alice", thread.id, {
+        clientMessageId: `summary-${turn}`, message: marker + "詳細內容".repeat(40),
+      });
+      const summary = result.thread.summary ?? "";
+      assert.ok(summary.length <= 2000);
+      assert.ok(summary.includes(marker), "LATEST_DECISION_MUST_SURVIVE");
+      assert.equal(summary.split(marker).length - 1, 1);
+      assert.doesNotMatch(summary, /既有摘要/);
+    }
+  } finally { await repo.close(); }
+});
+
 test("Dev AI thread service 預設一問一答後會建立 thread summary", async () => {
   const repo = createDevAiThreadRepository({ dbFile: ":memory:", idFactory: idFactory() });
   const service = createDevAiThreadService({

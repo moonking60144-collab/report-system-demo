@@ -408,6 +408,7 @@ export interface WorkReportQueueTask extends MutationLifecycleTiming {
   batchWriteIndeterminate?: boolean | null;
   writeIndeterminate?: boolean | null;
   deletedCount?: number | null;
+  deletedRowIds?: string[] | null;
   deleteFinalizeFailed?: boolean | null;
   retriedFromTaskId?: string | null;
   scanMs?: number | null;

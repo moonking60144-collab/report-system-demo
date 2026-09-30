@@ -51,6 +51,14 @@ async function finalizeBatchCreateAndPublish(
   await enqueueProjectionAfterBatchMutation(formId, entryId, "create");
 }
 
+async function finalizeBatchDeleteAndPublish(formId: string, entryId: string, rowIds: string[]): Promise<void> {
+  try {
+    await workReportService.finalizeBatchDelete(formId, entryId, rowIds);
+  } finally {
+    await enqueueProjectionAfterBatchMutation(formId, entryId, "delete");
+  }
+}
+
 const workReportRouter = createWorkReportRouter({
   runEntryMutationExclusive: runWorkReportEntryMutationExclusive,
   requestSync: workReportSyncService.requestSync.bind(workReportSyncService),
@@ -185,16 +193,16 @@ const workReportRouter = createWorkReportRouter({
         if (deletedCount <= 0) {
           return;
         }
-        await workReportService.finalizeBatchDelete(
-          input.formId,
-          input.entryId,
-          deletedRowIds
-        );
-        await enqueueProjectionAfterBatchMutation(input.formId, input.entryId, "delete");
+        await finalizeBatchDeleteAndPublish(input.formId, input.entryId, deletedRowIds);
       },
     });
     return taskResponse;
   },
+  requestBatchDeleteFinalizeRetry: async (input) =>
+    workReportBatchDeleteTaskService.requestBatchDeleteFinalizeRetry({
+      ...input,
+      finalizeAfterDelete: ({ deletedRowIds }) => finalizeBatchDeleteAndPublish(input.formId, input.entryId, deletedRowIds),
+    }),
   updateReport: workReportService.updateReport.bind(workReportService),
   updateMainMachine: workReportService.updateMainMachine.bind(workReportService),
   updateSortOrder: workReportService.updateSortOrder.bind(workReportService),
